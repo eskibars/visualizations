@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Snowy Christmas Night</title>
+  <style>
+    :root { --bg1:#040616; --bg2:#071338; --bg3:#0b2457; }
+    html, body{
+      height:100%;
+      margin:0;
+      background:
+        radial-gradient(1200px 800px at 50% 15%, rgba(130,170,255,.14), transparent 60%),
+        linear-gradient(180deg, var(--bg1), var(--bg2) 55%, var(--bg3));
+      overflow:hidden;
+      font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+    }
+    canvas{ display:block; width:100vw; height:100vh; }
+    .overlay{
+      position:fixed; inset:0; pointer-events:none;
+      background:
+        radial-gradient(1200px 900px at 50% 35%, rgba(255,255,255,.06), transparent 55%),
+        radial-gradient(1000px 700px at 70% 20%, rgba(120,170,255,.08), transparent 55%),
+        radial-gradient(closest-side at 50% 60%, transparent 60%, rgba(0,0,0,.35) 100%);
+      mix-blend-mode: screen;
+    }
+    .hint{
+      position:fixed; left:16px; bottom:14px;
+      color:rgba(255,255,255,.55);
+      font-size:12px; letter-spacing:.3px;
+      user-select:none;
+      text-shadow:0 2px 10px rgba(0,0,0,.5);
+      opacity:.65;
+      max-width: 70vw;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .hint kbd{
+      padding:2px 6px; border-radius:6px;
+      border:1px solid rgba(255,255,255,.2);
+      background:rgba(255,255,255,.06);
+      color:rgba(255,255,255,.7);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="overlay"></div>
+  <div class="hint" id="hint">Tip: press <kbd>F</kbd> for fullscreen • click to add a gentle “gust”</div>
+
+  <script>
+    (() => {
+      const canvas = document.getElementById("c");
+      const ctx = canvas.getContext("2d", { alpha: true });
+      const hintEl = document.getElementById("hint");
+
+      // Install roundRect polyfill FIRST (some signage browsers lack it).
+      if (!CanvasRenderingContext2D.prototype.roundRect) {
+        CanvasRenderingContext2D.prototype.roundRect = function(x, y, w, h, r) {
+          const rr = Array.isArray(r) ? r : [r, r, r, r];
+          const [r1, r2, r3, r4] = rr.map(v => Math.max(0, Math.min(v, Math.min(w, h) / 2)));
+          this.beginPath();
+          this.moveTo(x + r1, y);
+          this.arcTo(x + w, y, x + w, y + h, r2);
+          this.arcTo(x + w, y + h, x, y + h, r3);
+          this.arcTo(x, y + h, x, y, r4);
+          this.arcTo(x, y, x + w, y, r1);
+          this.closePath();
+          return this;
+        };
+      }
+
+      // Basic on-screen error reporting (helps on kiosks)
+      window.addEventListener("error", (e) => {
+        hintEl.textContent = "Render error: " + (e?.message || "unknown");
+      });
+
+      // HiDPI handling
+      let W=0, H=0, DPR=1;
+      function resize(){
+        DPR = Math.max(1, Math.min(2.5, window.devicePixelRatio || 1));
+        W = Math.floor(window.innerWidth);
+        H = Math.floor(window.innerHeight);
+        canvas.width = Math.floor(W * DPR);
+        canvas.height = Math.floor(H * DPR);
+        ctx.setTransform(DPR,0,0,DPR,0,0);
+        initMoon();
+        initStars();
+        initSnow();
+        initTree();
+      }
+      window.addEventListener("resize", resize, { passive:true });
+
+      // Utilities
+      const rand  = (a,b)=>a+Math.random()*(b-a);
+      const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+      const lerp  = (a,b,t)=>a+(b-a)*t;
+
+      // Deterministic helpers (no per-frame randomness flicker)
+      const fract = (x)=>x-Math.floor(x);
+      const hash1 = (n)=>fract(Math.sin(n)*43758.5453123);
+      const smoothNoise = (time, seed)=>0.5+0.5*Math.sin(time+seed);
+
+      // Scene timing
+      let t0 = performance.now();
+      let gust = 0;
+      let wind = 0;
+
+      // Stars
+      const stars = [];
+      function initStars(){
+        stars.length=0;
+        const n = Math.floor((W*H)/14000);
+        for(let i=0;i<n;i++){
+          stars.push({
+            x:Math.random()*W,
+            y:Math.random()*H*0.65,
+            r:rand(0.6,1.8),
+            tw:rand(0,Math.PI*2),
+            a:rand(0.25,0.9)
+          });
+        }
+      }
+
+      // Snow
+      const snow = [];
+      const snowCount = ()=>Math.floor((W*H)/6000);
+      function makeFlake(spawnAnywhere=false){
+        const size = rand(0.8,3.2);
+        const depth = rand(0.25,1);
+        return {
+          x:Math.random()*W,
+          y:spawnAnywhere ? Math.random()*H : -rand(10,H*0.2),
+          r:size*lerp(0.55,1.25,depth),
+          vy:lerp(18,95,depth),
+          drift:rand(-1,1),
+          wob:rand(0,Math.PI*2),
+          depth,
+          a:lerp(0.18,0.75,depth)
+        };
+      }
+      function initSnow(){
+        snow.length=0;
+        const n = snowCount();
+        for(let i=0;i<n;i++) snow.push(makeFlake(true));
+      }
+
+      // Tree
+      const lights = [];
+      const ornaments = [];
+      const branchCaps = [];
+      let treeState = null;
+
+      function initTree(){
+        lights.length=0;
+        ornaments.length=0;
+        branchCaps.length=0;
+
+        const cx = W*0.5;
+        const baseY = H*0.82;
+        const treeH = Math.min(H*0.58, W*0.62);
+        const treeW = treeH*0.78;
+
+        const garlands=6;
+        for(let g=0; g<garlands; g++){
+          const gy = baseY - treeH*lerp(0.12,0.95, g/(garlands-1));
+          const half = treeW*lerp(0.10,0.52, g/(garlands-1));
+          const bulbs = Math.floor(lerp(12,30, g/(garlands-1)));
+
+          for(let i=0;i<bulbs;i++){
+            const u = i/(bulbs-1);
+            const x = cx + lerp(-half,half,u);
+            const sag = Math.sin(u*Math.PI)*lerp(10,24, g/(garlands-1));
+            const y = gy + sag;
+
+            const yNorm = (baseY - y)/treeH;
+            const maxHalfAtY = treeW*(0.54*(1-yNorm)+0.06);
+            if(Math.abs(x-cx) > maxHalfAtY) continue;
+
+            lights.push({
+              x,y,
+              r:rand(3.2,4.6),
+              hue:[35,120,190,320,50][Math.floor(Math.random()*5)],
+              phase:rand(0,Math.PI*2),
+              speed:rand(0.7,1.6),
+              jitter:rand(0.0,0.25),
+              seed:Math.random()*1000
+            });
+          }
+        }
+
+        const ornN = Math.floor((treeH*treeW)/22000);
+        for(let i=0;i<ornN;i++){
+          const y = baseY - treeH*rand(0.10,0.92);
+          const yNorm = (baseY - y)/treeH;
+          const half = treeW*(0.54*(1-yNorm)+0.06);
+          const x = cx + rand(-half*0.95, half*0.95);
+          const r = rand(4.5,9.5)*lerp(0.7,1.15, 1-yNorm);
+          const hue = [350,5,210,45,130][Math.floor(Math.random()*5)];
+          ornaments.push({ x,y,r,hue, shine:rand(0.2,0.8), phase:rand(0,Math.PI*2) });
+        }
+
+        for(let i=0;i<10;i++){
+          branchCaps.push({
+            yFrac: rand(0.15, 0.90),
+            xNorm: rand(-0.85, 0.85),
+            wBase: rand(16, 46),
+            hFrac: rand(0.22, 0.35),
+            rot:   rand(-0.4, 0.4),
+            a:     rand(0.18, 0.32)
+          });
+        }
+
+        treeState = { cx, baseY, treeH, treeW };
+      }
+
+      // Moon (precomputed craters)
+      let moon = null;
+      function initMoon(){
+        const mx = W*0.78;
+        const my = H*0.16;
+        const mr = Math.min(W,H)*0.06;
+
+        const craters = [];
+        for(let i=0;i<7;i++){
+          craters.push({ dx: rand(-0.5,0.5), dy: rand(-0.45,0.45), rr: rand(0.05,0.18) });
+        }
+        moon = { mx,my,mr,craters };
+      }
+
+      // Interaction
+      window.addEventListener("pointerdown", (e)=>{
+        const x = e.clientX/W - 0.5;
+        gust += clamp(x*2.5, -1.5, 1.5);
+      }, { passive:true });
+
+      window.addEventListener("keydown", (e)=>{
+        if(e.key.toLowerCase()==="f"){
+          if(!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+          else document.exitFullscreen?.();
+        }
+      });
+
+      // Drawing helpers
+      function drawGlowCircle(x,y,r,color,alpha){
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        const g = ctx.createRadialGradient(x,y,0,x,y,r);
+        g.addColorStop(0, color);
+        g.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fill();
+        ctx.restore();
+      }
+      function drawStar(x,y,r,a){
+        ctx.save();
+        ctx.globalAlpha = a;
+        ctx.fillStyle = "rgba(255,255,255,0.92)";
+        ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fill();
+        ctx.restore();
+      }
+
+      function drawMoon(){
+        const { mx,my,mr,craters } = moon;
+        drawGlowCircle(mx,my,mr*4.2,"rgba(180,210,255,0.22)",1);
+        drawGlowCircle(mx,my,mr*2.2,"rgba(255,255,255,0.10)",1);
+
+        ctx.save();
+        ctx.globalAlpha = 0.9;
+        ctx.fillStyle = "rgba(235,245,255,0.85)";
+        ctx.beginPath(); ctx.arc(mx,my,mr,0,Math.PI*2); ctx.fill();
+
+        ctx.globalAlpha = 0.22;
+        ctx.fillStyle = "rgba(150,175,210,0.8)";
+        for(const c of craters){
+          ctx.beginPath();
+          ctx.arc(mx + c.dx*mr, my + c.dy*mr, c.rr*mr, 0, Math.PI*2);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+
+      function drawGround(now){
+        const horizon = H*0.78;
+        ctx.save();
+
+        const fog = ctx.createLinearGradient(0, horizon-120, 0, H);
+        fog.addColorStop(0, "rgba(255,255,255,0.00)");
+        fog.addColorStop(0.4, "rgba(220,240,255,0.10)");
+        fog.addColorStop(1, "rgba(255,255,255,0.18)");
+        ctx.fillStyle = fog;
+        ctx.fillRect(0, horizon-140, W, H-(horizon-140));
+
+        ctx.globalAlpha = 0.30;
+        ctx.fillStyle = "rgba(210,235,255,0.75)";
+        ctx.beginPath();
+        ctx.moveTo(0, horizon+40);
+        ctx.bezierCurveTo(W*0.20, horizon-10, W*0.32, horizon+90, W*0.55, horizon+45);
+        ctx.bezierCurveTo(W*0.72, horizon+10, W*0.85, horizon+110, W, horizon+55);
+        ctx.lineTo(W,H); ctx.lineTo(0,H);
+        ctx.closePath(); ctx.fill();
+
+        ctx.globalAlpha = 0.25;
+        for(let i=0;i<Math.floor(W/22);i++){
+          const x = (i*22 + (now*0.02)) % (W+22) - 11;
+          const hy = hash1(i*12.9898) * (H - horizon - 35) + 25;
+          const hr = lerp(0.6, 1.4, hash1(i*78.233));
+          const a  = 0.10 + 0.18 * Math.sin(now*0.002 + i*1.3);
+          drawStar(x, horizon + hy, hr, a);
+        }
+
+        ctx.restore();
+      }
+
+      function drawTree(now){
+        const { cx, baseY, treeH, treeW } = treeState;
+
+        drawGlowCircle(cx, baseY - treeH*0.35, treeW*1.15, "rgba(70,120,255,0.12)", 1);
+
+        // Trunk
+        ctx.save();
+        const trunkH = treeH*0.14;
+        const trunkW = treeW*0.16;
+        ctx.fillStyle = "rgba(80,45,25,0.95)";
+        ctx.beginPath();
+        ctx.roundRect(cx - trunkW/2, baseY - trunkH*0.05, trunkW, trunkH, trunkW*0.25);
+        ctx.fill();
+
+        ctx.globalAlpha = 0.22;
+        ctx.fillStyle = "rgba(255,255,255,0.85)";
+        ctx.beginPath();
+        ctx.roundRect(cx - trunkW/2 + trunkW*0.08, baseY - trunkH*0.02, trunkW*0.35, trunkH*0.75, trunkW*0.2);
+        ctx.fill();
+        ctx.restore();
+
+        // Tree layers
+        ctx.save();
+        const layers = 7;
+        for(let i=0;i<layers;i++){
+          const p = i/(layers-1);
+          const topY = baseY - treeH*lerp(0.98,0.24,p);
+          const botY = baseY - treeH*lerp(0.78,0.02,p);
+          const halfBot = treeW*lerp(0.16,0.56,p);
+
+          const g = ctx.createLinearGradient(0, topY, 0, botY);
+          g.addColorStop(0, `rgba(20,75,45,${lerp(0.95,0.85,p)})`);
+          g.addColorStop(1, `rgba(10,38,24,${lerp(0.98,0.92,p)})`);
+
+          ctx.fillStyle = g;
+          ctx.beginPath();
+          ctx.moveTo(cx, topY);
+          ctx.lineTo(cx - halfBot, botY);
+          ctx.quadraticCurveTo(cx, botY + treeH*0.04, cx + halfBot, botY);
+          ctx.closePath();
+          ctx.fill();
+
+          ctx.globalAlpha = 0.18;
+          ctx.strokeStyle = "rgba(210,255,235,0.7)";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          const teeth = 22;
+          for(let k=0;k<=teeth;k++){
+            const u = k/teeth;
+            const x = cx + lerp(-halfBot, halfBot, u);
+            const y = lerp(botY, topY, Math.pow(Math.abs(u-0.5)*2, 0.9));
+            const j = Math.sin((u+p)*Math.PI*6) * lerp(2,6,p);
+            ctx.lineTo(x, y + j);
+          }
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+        }
+        ctx.restore();
+
+        // Snow caps (precomputed)
+        ctx.save();
+        ctx.fillStyle = "rgba(240,250,255,0.95)";
+        for(const cap of branchCaps){
+          const y = baseY - treeH*cap.yFrac;
+          const yNorm = cap.yFrac;
+          const half = treeW*(0.54*(1-yNorm)+0.06);
+          const x = cx + cap.xNorm * half;
+
+          const w = cap.wBase * lerp(0.7, 1.25, 1 - yNorm);
+          const h = w * cap.hFrac;
+
+          ctx.globalAlpha = cap.a;
+          ctx.beginPath();
+          ctx.ellipse(x, y, w, h, cap.rot, 0, Math.PI*2);
+          ctx.fill();
+        }
+        ctx.restore();
+
+        // Star topper
+        const starY = baseY - treeH*0.98;
+        const starR = Math.min(22, Math.max(12, treeW*0.06));
+        drawGlowCircle(cx, starY, starR*6.5, "rgba(255,230,150,0.25)", 1);
+
+        ctx.save();
+        ctx.translate(cx, starY);
+        ctx.rotate(Math.sin(now*0.0015)*0.08);
+        ctx.globalAlpha = 0.95;
+        ctx.fillStyle = "rgba(255,225,140,0.95)";
+        ctx.beginPath();
+        const spikes=5;
+        for(let i=0;i<spikes*2;i++){
+          const a=(i/(spikes*2))*Math.PI*2;
+          const r=(i%2===0)?starR:starR*0.45;
+          ctx.lineTo(Math.cos(a)*r, Math.sin(a)*r);
+        }
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+
+        // Ornaments
+        ctx.save();
+        for(const o of ornaments){
+          const tw = 0.55 + 0.45*Math.sin(now*0.002 + o.phase);
+          const shine = o.shine * tw;
+
+          ctx.globalAlpha = 0.22;
+          ctx.fillStyle = "rgba(0,0,0,0.55)";
+          ctx.beginPath(); ctx.arc(o.x+2,o.y+3,o.r*0.92,0,Math.PI*2); ctx.fill();
+
+          ctx.globalAlpha = 0.95;
+          const og = ctx.createRadialGradient(o.x - o.r*0.35, o.y - o.r*0.35, o.r*0.2, o.x, o.y, o.r);
+          og.addColorStop(0, `hsla(${o.hue},85%,72%,1)`);
+          og.addColorStop(0.6, `hsla(${o.hue},90%,48%,1)`);
+          og.addColorStop(1, `hsla(${o.hue},95%,34%,1)`);
+          ctx.fillStyle = og;
+          ctx.beginPath(); ctx.arc(o.x,o.y,o.r,0,Math.PI*2); ctx.fill();
+
+          ctx.globalAlpha = 0.35*shine;
+          ctx.fillStyle = "rgba(255,255,255,0.9)";
+          ctx.beginPath();
+          ctx.ellipse(o.x - o.r*0.25, o.y - o.r*0.32, o.r*0.35, o.r*0.22, -0.6, 0, Math.PI*2);
+          ctx.fill();
+        }
+        ctx.restore();
+
+        // Lights
+        ctx.save();
+        for(const L of lights){
+          const tw = 0.55 + 0.45*Math.sin(now*0.004*L.speed + L.phase);
+          const flick = 0.85 + 0.15*Math.sin(now*0.014 + L.phase*3);
+
+          const j =
+            (smoothNoise(now*0.013, L.seed)*0.6 +
+             smoothNoise(now*0.021, L.seed*1.7)*0.4) - 0.5;
+
+          const a = clamp(tw*flick + j*L.jitter, 0, 1);
+
+          const core = `hsla(${L.hue},95%,70%,1)`;
+          const halo = `hsla(${L.hue},95%,62%,0.22)`;
+
+          drawGlowCircle(L.x, L.y, L.r*6.5, halo, 0.9*a);
+
+          ctx.globalAlpha = 0.95*a;
+          ctx.fillStyle = core;
+          ctx.beginPath(); ctx.arc(L.x,L.y,L.r,0,Math.PI*2); ctx.fill();
+
+          ctx.globalAlpha = 0.25*a;
+          ctx.fillStyle = "rgba(255,255,255,0.95)";
+          ctx.beginPath();
+          ctx.arc(L.x - L.r*0.25, L.y - L.r*0.25, L.r*0.35, 0, Math.PI*2);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+
+      function drawSnow(now, dt){
+        gust *= 0.965;
+        wind = wind*0.96 + gust*0.04;
+        const baseWind = Math.sin(now*0.00035)*0.18 + Math.sin(now*0.0009)*0.08;
+        const windX = (baseWind + wind) * 180;
+
+        const batches=[[],[]];
+        for(const f of snow) (f.depth<0.62 ? batches[0] : batches[1]).push(f);
+
+        for(let pass=0; pass<2; pass++){
+          ctx.save();
+          for(const f of batches[pass]){
+            f.wob += dt*0.0012*(0.8+f.depth);
+            const sway = Math.sin(f.wob)*(18*(1-f.depth)+10) + f.drift*10;
+
+            f.x += ((windX*f.depth)*dt/1000) + (sway*dt/1000);
+            f.y += (f.vy*dt/1000);
+
+            if(f.y>H+20 || f.x<-80 || f.x>W+80){
+              Object.assign(f, makeFlake(false));
+              f.x = (Math.random()*(W+200)) - 100;
+            }
+
+            const alpha = f.a*(pass===0 ? 0.75 : 1.0);
+            ctx.globalAlpha = alpha;
+
+            const g = ctx.createRadialGradient(f.x,f.y,0,f.x,f.y,f.r*2.2);
+            g.addColorStop(0, "rgba(255,255,255,0.9)");
+            g.addColorStop(1, "rgba(255,255,255,0)");
+            ctx.fillStyle = g;
+            ctx.beginPath(); ctx.arc(f.x,f.y,f.r*2.2,0,Math.PI*2); ctx.fill();
+          }
+          ctx.restore();
+        }
+      }
+
+      function drawSky(now){
+        ctx.clearRect(0,0,W,H);
+
+        ctx.save();
+        for(const s of stars){
+          const tw = 0.6 + 0.4*Math.sin(now*0.0012 + s.tw);
+          drawStar(s.x, s.y, s.r*tw, s.a*tw);
+        }
+        ctx.restore();
+
+        drawMoon();
+
+        ctx.save();
+        ctx.globalAlpha = 0.08;
+        const hx = (Math.sin(now*0.00022)*0.5 + 0.5)*W;
+        const hy = H*0.18;
+        drawGlowCircle(hx, hy, Math.min(W,H)*0.42, "rgba(160,190,255,0.20)", 1);
+        ctx.restore();
+      }
+
+      function frame(now){
+        const dt = clamp(now - t0, 0, 33);
+        t0 = now;
+
+        drawSky(now);
+        drawSnow(now, dt);
+        drawGround(now);
+        drawTree(now);
+
+        requestAnimationFrame(frame);
+      }
+
+      // Kick everything off
+      resize();
+      requestAnimationFrame(frame);
+    })();
+  </script>
+</body>
+</html>
+

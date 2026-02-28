@@ -1,0 +1,655 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Goose Chase</title>
+  <style>
+    :root{
+      --bg1:#0b1220;
+      --bg2:#0a2a3a;
+      --glow:#9be8ff;
+      --text:#e9f3ff;
+      --muted:rgba(233,243,255,.72);
+    }
+    html,body{
+      width:100%;
+      height:100%;
+      margin:0;
+      overflow:hidden;
+      background: radial-gradient(1200px 800px at 20% 20%, rgba(155,232,255,.12), transparent 60%),
+                  radial-gradient(900px 700px at 85% 35%, rgba(78,255,199,.08), transparent 55%),
+                  linear-gradient(135deg, var(--bg1), var(--bg2));
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
+      color:var(--text);
+      user-select:none;
+      cursor: default;
+    }
+
+    /* Soft vignette */
+    .vignette{
+      position:fixed; inset:0;
+      background: radial-gradient(1200px 800px at 50% 40%, transparent 35%, rgba(0,0,0,.55) 100%);
+      pointer-events:none;
+      mix-blend-mode:multiply;
+    }
+
+    /* Subtle grain */
+    .grain{
+      position:fixed; inset:-40%;
+      background-image:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160"><filter id="n"><feTurbulence type="fractalNoise" baseFrequency=".9" numOctaves="3" stitchTiles="stitch"/></filter><rect width="160" height="160" filter="url(%23n)" opacity=".35"/></svg>');
+      opacity:.07;
+      transform: rotate(7deg);
+      pointer-events:none;
+    }
+
+    /* HUD */
+    .hud{
+      position:fixed;
+      left:24px; top:20px;
+      display:flex;
+      align-items:flex-start;
+      gap:14px;
+      z-index:10;
+      pointer-events:none;
+    }
+    .badge{
+      pointer-events:none;
+      padding:10px 12px;
+      border-radius:14px;
+      background: rgba(255,255,255,.06);
+      border: 1px solid rgba(155,232,255,.18);
+      backdrop-filter: blur(10px);
+      box-shadow: 0 10px 30px rgba(0,0,0,.25);
+    }
+    .badge .title{
+      font-weight:650;
+      letter-spacing:.2px;
+      font-size:14px;
+      display:flex;
+      align-items:center;
+      gap:8px;
+    }
+    .dot{
+      width:10px; height:10px;
+      border-radius:999px;
+      background: rgba(155,232,255,.9);
+      box-shadow: 0 0 18px rgba(155,232,255,.75);
+      margin-top:2px;
+      flex:0 0 auto;
+    }
+    .badge .sub{
+      margin-top:6px;
+      font-size:12px;
+      color:var(--muted);
+      line-height:1.35;
+    }
+    .stats{
+      display:flex;
+      gap:10px;
+      margin-top:8px;
+      flex-wrap:wrap;
+    }
+    .pill{
+      font-size:12px;
+      padding:6px 10px;
+      border-radius:999px;
+      background: rgba(255,255,255,.06);
+      border: 1px solid rgba(255,255,255,.10);
+      color: rgba(233,243,255,.85);
+    }
+
+    /* Click-to-enable audio overlay */
+    .overlay{
+      position:fixed; inset:0;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      z-index:20;
+      background: rgba(0,0,0,.22);
+      backdrop-filter: blur(10px);
+    }
+    .overlay.hidden{ display:none; }
+    .overlay .card{
+      width:min(560px, calc(100% - 48px));
+      border-radius:22px;
+      background: rgba(255,255,255,.07);
+      border: 1px solid rgba(155,232,255,.22);
+      box-shadow: 0 25px 80px rgba(0,0,0,.45);
+      padding:18px 18px 16px;
+    }
+    .overlay h1{
+      margin:0;
+      font-size:18px;
+      letter-spacing:.2px;
+      font-weight:750;
+      display:flex;
+      align-items:center;
+      gap:10px;
+    }
+    .overlay p{
+      margin:10px 0 0;
+      font-size:13px;
+      color:rgba(233,243,255,.82);
+      line-height:1.45;
+    }
+    .overlay .btnrow{
+      margin-top:14px;
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+    }
+    .btn{
+      pointer-events:auto;
+      appearance:none;
+      border: 1px solid rgba(155,232,255,.28);
+      background: rgba(155,232,255,.12);
+      color: var(--text);
+      padding:10px 12px;
+      border-radius:14px;
+      font-size:13px;
+      font-weight:650;
+      cursor:pointer;
+      transition: transform .08s ease, background .18s ease, border-color .18s ease;
+    }
+    .btn:hover{ background: rgba(155,232,255,.16); border-color: rgba(155,232,255,.38); }
+    .btn:active{ transform: scale(.98); }
+
+    /* Goose */
+    #world{
+      position:fixed; inset:0;
+    }
+    #goose{
+      position:absolute;
+      width: 150px;
+      height: 120px;
+      transform: translate(-75px,-60px);
+      filter: drop-shadow(0 14px 22px rgba(0,0,0,.35));
+      will-change: transform;
+    }
+    #goose .wrap{
+      width:100%; height:100%;
+      transform-origin: 50% 60%;
+      will-change: transform;
+    }
+    /* Waddle / bob */
+    @keyframes waddle {
+      0%   { transform: translateY(0px) rotate(-1deg); }
+      25%  { transform: translateY(2px) rotate(1deg); }
+      50%  { transform: translateY(0px) rotate(-1deg); }
+      75%  { transform: translateY(3px) rotate(1deg); }
+      100% { transform: translateY(0px) rotate(-1deg); }
+    }
+    .waddling{ animation: waddle .55s infinite linear; }
+    /* Chomp */
+    @keyframes peck {
+      0%   { transform: translateY(0px) scale(1); }
+      20%  { transform: translateY(2px) scale(1.02); }
+      55%  { transform: translateY(-3px) scale(.98); }
+      100% { transform: translateY(0px) scale(1); }
+    }
+    .pecking{ animation: peck .24s ease-in-out 1; }
+
+    /* Little honk ring */
+    .ring{
+      position:absolute;
+      width: 18px; height:18px;
+      border-radius:999px;
+      border: 2px solid rgba(155,232,255,.95);
+      box-shadow: 0 0 24px rgba(155,232,255,.55);
+      transform: translate(-50%,-50%) scale(.4);
+      opacity:0;
+      pointer-events:none;
+      animation: ring .6s ease-out forwards;
+      mix-blend-mode: screen;
+    }
+    @keyframes ring{
+      0%   { opacity:.0; transform: translate(-50%,-50%) scale(.35); }
+      15%  { opacity:.95; }
+      100% { opacity:0; transform: translate(-50%,-50%) scale(3.2); }
+    }
+
+    /* Optional: show a target marker (subtle) */
+    #target{
+      position:absolute;
+      width: 14px; height:14px;
+      transform: translate(-50%,-50%);
+      border-radius:999px;
+      background: rgba(255,255,255,.05);
+      border: 1px solid rgba(255,255,255,.18);
+      box-shadow: 0 0 20px rgba(155,232,255,.18);
+      pointer-events:none;
+      opacity:.55;
+    }
+    #target::after{
+      content:"";
+      position:absolute; inset:-10px;
+      border-radius:999px;
+      border: 1px solid rgba(155,232,255,.15);
+    }
+
+    /* Small helper text bottom-right */
+    .corner{
+      position:fixed;
+      right:18px; bottom:14px;
+      font-size:12px;
+      color: rgba(233,243,255,.55);
+      z-index:10;
+      pointer-events:none;
+    }
+    .corner b{ color: rgba(233,243,255,.78); font-weight:650; }
+  </style>
+</head>
+<body>
+  <div id="world">
+    <div id="target" aria-hidden="true"></div>
+
+    <div id="goose" aria-label="Goose">
+      <div class="wrap waddling" id="gooseWrap">
+        <!-- Simple inline SVG goose (cute + readable at distance) -->
+        <svg viewBox="0 0 300 240" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg">
+          <!-- Body -->
+          <defs>
+            <linearGradient id="b" x1="0" x2="1" y1="0" y2="1">
+              <stop offset="0" stop-color="rgba(255,255,255,0.98)"/>
+              <stop offset="1" stop-color="rgba(230,240,255,0.98)"/>
+            </linearGradient>
+            <linearGradient id="s" x1="0" x2="1">
+              <stop offset="0" stop-color="rgba(255,255,255,0.0)"/>
+              <stop offset="1" stop-color="rgba(0,0,0,0.10)"/>
+            </linearGradient>
+          </defs>
+
+          <!-- legs -->
+          <path d="M128 188 C120 205,118 215,120 226" stroke="rgba(255,170,90,.95)" stroke-width="10" stroke-linecap="round" fill="none"/>
+          <path d="M170 188 C165 204,166 214,168 226" stroke="rgba(255,170,90,.95)" stroke-width="10" stroke-linecap="round" fill="none"/>
+          <path d="M110 226 C120 226,134 226,144 226" stroke="rgba(255,170,90,.95)" stroke-width="10" stroke-linecap="round"/>
+          <path d="M154 226 C165 226,180 226,190 226" stroke="rgba(255,170,90,.95)" stroke-width="10" stroke-linecap="round"/>
+
+          <!-- body blob -->
+          <path d="M68 130
+                   C68 80, 118 58, 170 66
+                   C230 75, 252 116, 238 155
+                   C228 184, 196 200, 154 198
+                   C118 196, 86 176, 74 156
+                   C70 148, 68 140, 68 130 Z"
+                fill="url(#b)" stroke="rgba(255,255,255,.65)" stroke-width="3" />
+
+          <!-- wing -->
+          <path d="M120 108
+                   C132 92, 164 90, 190 104
+                   C208 114, 214 134, 204 150
+                   C192 170, 150 170, 126 152
+                   C114 142, 110 122, 120 108 Z"
+                fill="rgba(220,235,250,.95)" stroke="rgba(210,225,245,.9)" stroke-width="3"/>
+
+          <!-- subtle shading -->
+          <path d="M78 136
+                   C88 172, 126 196, 164 194
+                   C204 192, 230 174, 236 150
+                   C230 168, 206 188, 166 189
+                   C126 190, 92 170, 78 136 Z"
+                fill="url(#s)" opacity=".9"/>
+
+          <!-- neck -->
+          <path d="M182 52
+                   C186 36, 198 28, 212 28
+                   C226 28, 236 36, 236 52
+                   C236 74, 226 96, 220 114
+                   C214 132, 214 152, 218 166
+                   C222 180, 210 188, 198 182
+                   C188 178, 186 164, 186 152
+                   C186 128, 198 96, 202 78
+                   C206 60, 202 52, 182 52 Z"
+                fill="url(#b)" stroke="rgba(255,255,255,.65)" stroke-width="3"/>
+
+          <!-- head -->
+          <ellipse cx="214" cy="52" rx="28" ry="22" fill="url(#b)" stroke="rgba(255,255,255,.65)" stroke-width="3"/>
+
+          <!-- eye -->
+          <circle cx="224" cy="50" r="4.8" fill="rgba(20,30,45,.95)"/>
+          <circle cx="226" cy="49" r="1.6" fill="rgba(255,255,255,.85)"/>
+
+          <!-- beak -->
+          <path d="M236 58
+                   C264 58, 280 66, 286 74
+                   C278 80, 262 84, 236 82 Z"
+                fill="rgba(255,170,70,.95)" stroke="rgba(255,160,60,.95)" stroke-width="3" stroke-linejoin="round"/>
+          <path d="M236 70
+                   C258 70, 270 74, 276 78
+                   C268 82, 256 84, 236 84 Z"
+                fill="rgba(255,140,50,.95)" opacity=".85"/>
+
+          <!-- tiny tail -->
+          <path d="M62 132
+                   C50 120, 48 104, 54 90
+                   C40 100, 36 118, 44 136
+                   C50 150, 58 154, 62 156 Z"
+                fill="rgba(230,240,255,.95)" stroke="rgba(210,225,245,.9)" stroke-width="3"/>
+        </svg>
+      </div>
+    </div>
+  </div>
+
+  <div class="hud" aria-hidden="true">
+    <div class="badge">
+      <div class="title"><span class="dot"></span>Goose Mode</div>
+      <div class="sub">The goose chases your mouse.<br>When it catches you (or you click), it honks.</div>
+      <div class="stats">
+        <div class="pill">Honks: <span id="honkCount">0</span></div>
+        <div class="pill">Speed: <span id="speedLabel">—</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="corner" aria-hidden="true">
+    Tip: <b>click once</b> to enable sound, then move your mouse 👀
+  </div>
+
+  <div class="overlay" id="overlay">
+    <div class="card">
+      <h1>🔊 Enable Honks</h1>
+      <p>
+        Browsers usually require a user gesture before audio can play.
+        Click below once to arm the honk sound. After that, the goose can honk
+        when it catches your cursor, too.
+      </p>
+      <div class="btnrow">
+        <button class="btn" id="enableBtn">Enable sound</button>
+        <button class="btn" id="silentBtn" style="background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.14);">
+          Stay silent
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="vignette"></div>
+  <div class="grain"></div>
+
+  <script>
+    (() => {
+      // --- Config ---
+      const CFG = {
+        baseSpeed: 420,        // px/s baseline
+        maxSpeed: 860,         // px/s when far away
+        catchRadius: 34,       // px distance to "catch" target
+        clickHonkCooldown: 140,// ms (avoid double-trigger)
+        catchCooldown: 600,    // ms (avoid honk spam)
+        wobbleAmp: 8,          // px
+        wobbleFreq: 2.2,       // Hz
+        turnSmoothing: 0.14,   // 0..1
+      };
+
+      // --- DOM ---
+      const goose = document.getElementById("goose");
+      const gooseWrap = document.getElementById("gooseWrap");
+      const targetEl = document.getElementById("target");
+      const honkCountEl = document.getElementById("honkCount");
+      const speedLabelEl = document.getElementById("speedLabel");
+      const overlay = document.getElementById("overlay");
+      const enableBtn = document.getElementById("enableBtn");
+      const silentBtn = document.getElementById("silentBtn");
+
+      // --- State ---
+      let target = { x: window.innerWidth * 0.7, y: window.innerHeight * 0.55 };
+      let pos    = { x: window.innerWidth * 0.25, y: window.innerHeight * 0.6 };
+      let vel    = { x: 0, y: 0 };
+      let facing = 0; // radians
+      let honks = 0;
+
+      let lastT = performance.now();
+      let lastCatchHonk = 0;
+      let lastClickHonk = 0;
+
+      // Audio state
+      let audioEnabled = false;
+      let audioCtx = null;
+
+      // --- Helpers ---
+      const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+      const lerp = (a,b,t) => a + (b-a)*t;
+      const dist = (ax,ay,bx,by) => Math.hypot(ax-bx, ay-by);
+
+      function setOverlayVisible(visible){
+        overlay.classList.toggle("hidden", !visible);
+      }
+
+      // --- Honk synthesis (WebAudio) ---
+      function ensureAudio(){
+        if (audioEnabled && audioCtx) return true;
+        try{
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          audioEnabled = true;
+          return true;
+        }catch(e){
+          audioEnabled = false;
+          audioCtx = null;
+          return false;
+        }
+      }
+
+      function honk(atX, atY){
+        // Visual ring always works.
+        spawnRing(atX, atY);
+        honks++;
+        honkCountEl.textContent = String(honks);
+        gooseWrap.classList.remove("pecking");
+        // restart peck animation
+        void gooseWrap.offsetWidth;
+        gooseWrap.classList.add("pecking");
+
+        if (!audioEnabled || !audioCtx) return;
+
+        // In some browsers audio context may be suspended until gesture; try resume.
+        if (audioCtx.state === "suspended") audioCtx.resume().catch(()=>{});
+
+        const now = audioCtx.currentTime;
+
+        // Master
+        const master = audioCtx.createGain();
+        master.gain.setValueAtTime(0.0, now);
+        master.gain.linearRampToValueAtTime(0.55, now + 0.01);
+        master.gain.exponentialRampToValueAtTime(0.0001, now + 0.34);
+        master.connect(audioCtx.destination);
+
+        // "Honk" tone: two detuned saws + bandpass noise for rasp
+        const o1 = audioCtx.createOscillator();
+        const o2 = audioCtx.createOscillator();
+        o1.type = "sawtooth";
+        o2.type = "sawtooth";
+
+        // Pitch envelope (a quick fall feels goose-y)
+        const f0 = 420; // start
+        const f1 = 210; // end
+        o1.frequency.setValueAtTime(f0, now);
+        o1.frequency.exponentialRampToValueAtTime(f1, now + 0.22);
+        o2.frequency.setValueAtTime(f0 * 1.02, now);
+        o2.frequency.exponentialRampToValueAtTime(f1 * 0.98, now + 0.22);
+
+        // Filter to make it less harsh
+        const lp = audioCtx.createBiquadFilter();
+        lp.type = "lowpass";
+        lp.frequency.setValueAtTime(1200, now);
+        lp.frequency.exponentialRampToValueAtTime(650, now + 0.22);
+
+        const og = audioCtx.createGain();
+        og.gain.setValueAtTime(0.0, now);
+        og.gain.linearRampToValueAtTime(0.55, now + 0.02);
+        og.gain.exponentialRampToValueAtTime(0.0001, now + 0.30);
+
+        o1.connect(og); o2.connect(og);
+        og.connect(lp);
+        lp.connect(master);
+
+        // Noise (rasp)
+        const noiseBuf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.22, audioCtx.sampleRate);
+        const data = noiseBuf.getChannelData(0);
+        for (let i=0; i<data.length; i++) data[i] = (Math.random()*2-1) * 0.35;
+
+        const noise = audioCtx.createBufferSource();
+        noise.buffer = noiseBuf;
+
+        const bp = audioCtx.createBiquadFilter();
+        bp.type = "bandpass";
+        bp.frequency.setValueAtTime(700, now);
+        bp.Q.setValueAtTime(7.5, now);
+
+        const ng = audioCtx.createGain();
+        ng.gain.setValueAtTime(0.0, now);
+        ng.gain.linearRampToValueAtTime(0.22, now + 0.02);
+        ng.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+
+        noise.connect(bp);
+        bp.connect(ng);
+        ng.connect(master);
+
+        // Start/stop
+        o1.start(now);
+        o2.start(now);
+        noise.start(now);
+
+        const stopAt = now + 0.36;
+        o1.stop(stopAt);
+        o2.stop(stopAt);
+        noise.stop(stopAt);
+      }
+
+      function spawnRing(x,y){
+        const r = document.createElement("div");
+        r.className = "ring";
+        r.style.left = x + "px";
+        r.style.top  = y + "px";
+        document.body.appendChild(r);
+        r.addEventListener("animationend", () => r.remove(), { once:true });
+      }
+
+      // --- Input ---
+      window.addEventListener("mousemove", (e) => {
+        target.x = e.clientX;
+        target.y = e.clientY;
+        targetEl.style.left = target.x + "px";
+        targetEl.style.top  = target.y + "px";
+      }, { passive:true });
+
+      window.addEventListener("touchmove", (e) => {
+        if (!e.touches || !e.touches[0]) return;
+        target.x = e.touches[0].clientX;
+        target.y = e.touches[0].clientY;
+        targetEl.style.left = target.x + "px";
+        targetEl.style.top  = target.y + "px";
+      }, { passive:true });
+
+      window.addEventListener("click", (e) => {
+        const t = performance.now();
+        if (t - lastClickHonk < CFG.clickHonkCooldown) return;
+        lastClickHonk = t;
+        // If audio isn't enabled yet, try enabling on first click (best-effort)
+        if (!audioEnabled) {
+          ensureAudio();
+          setOverlayVisible(false);
+        }
+        honk(e.clientX, e.clientY);
+      }, { passive:true });
+
+      enableBtn.addEventListener("click", () => {
+        ensureAudio();
+        setOverlayVisible(false);
+        // Friendly first honk
+        honk(window.innerWidth*0.5, window.innerHeight*0.5);
+      });
+
+      silentBtn.addEventListener("click", () => {
+        audioEnabled = false;
+        audioCtx = null;
+        setOverlayVisible(false);
+      });
+
+      // --- Resize ---
+      window.addEventListener("resize", () => {
+        target.x = clamp(target.x, 0, window.innerWidth);
+        target.y = clamp(target.y, 0, window.innerHeight);
+      });
+
+      // --- Animation loop ---
+      function tick(tNow){
+        const dt = Math.min(0.033, (tNow - lastT) / 1000); // cap dt
+        lastT = tNow;
+
+        const dx = target.x - pos.x;
+        const dy = target.y - pos.y;
+        const d  = Math.hypot(dx, dy) || 1;
+
+        // Speed scales with distance: slow when close, fast when far
+        const speed = clamp(CFG.baseSpeed + (d * 0.55), CFG.baseSpeed, CFG.maxSpeed);
+        speedLabelEl.textContent = Math.round(speed) + " px/s";
+
+        // Desired direction
+        const ux = dx / d;
+        const uy = dy / d;
+
+        // Smooth turning (helps realism)
+        vel.x = lerp(vel.x, ux * speed, CFG.turnSmoothing);
+        vel.y = lerp(vel.y, uy * speed, CFG.turnSmoothing);
+
+        pos.x += vel.x * dt;
+        pos.y += vel.y * dt;
+
+        // Keep goose in bounds a bit (with padding)
+        const pad = 30;
+        pos.x = clamp(pos.x, pad, window.innerWidth - pad);
+        pos.y = clamp(pos.y, pad, window.innerHeight - pad);
+
+        // Facing angle with smoothing
+        const desiredAngle = Math.atan2(vel.y, vel.x);
+        // shortest angle difference
+        let diff = desiredAngle - facing;
+        diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+        facing += diff * 0.18;
+
+        // Wobble for "waddle"
+        const wobble = Math.sin(tNow/1000 * Math.PI * 2 * CFG.wobbleFreq) * CFG.wobbleAmp;
+
+        // Apply transform
+        // Base translate(-75,-60) is in CSS; here we position with left/top and rotate + slight bob
+        goose.style.left = pos.x + "px";
+        goose.style.top  = (pos.y + wobble) + "px";
+
+        // Flip & rotate in one: SVG points right; rotate with facing
+        // Use scaleY(1) and scaleX for mirroring based on direction? We'll keep rotation only (cleaner).
+        // However, a tiny scaleX based on velocity makes it feel alive.
+        const squash = 1 + (Math.min(1, speed/CFG.maxSpeed) * 0.02);
+        gooseWrap.style.transform = `rotate(${facing}rad) scale(${squash})`;
+
+        // Catch detection
+        const caught = d < CFG.catchRadius;
+        if (caught){
+          const t = performance.now();
+          if (t - lastCatchHonk > CFG.catchCooldown){
+            lastCatchHonk = t;
+            // Try to honk at target position
+            // (May be silent if audio wasn't enabled.)
+            honk(target.x, target.y);
+          }
+        }
+
+        requestAnimationFrame(tick);
+      }
+
+      // Init UI positions
+      targetEl.style.left = target.x + "px";
+      targetEl.style.top  = target.y + "px";
+      goose.style.left = pos.x + "px";
+      goose.style.top  = pos.y + "px";
+
+      // Show overlay first (audio gesture requirement)
+      setOverlayVisible(true);
+
+      requestAnimationFrame((t) => {
+        lastT = t;
+        requestAnimationFrame(tick);
+      });
+    })();
+  </script>
+</body>
+</html>
+

@@ -1,0 +1,669 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Slow Growing Forest</title>
+  <style>
+    html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#050607; }
+    canvas { display:block; width:100vw; height:100vh; cursor:none; }
+    /* Optional: tiny, unobtrusive hint in a corner (disabled by default) */
+    .hint { position:fixed; left:16px; bottom:14px; color:rgba(255,255,255,.35);
+      font: 12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      letter-spacing:.02em; user-select:none; pointer-events:none; display:none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="hint">Forest growth • Press “F” for fullscreen</div>
+
+<script>
+(() => {
+  // ------------------------------------------------------------
+  // Tuning knobs (edit these):
+  // ------------------------------------------------------------
+  const CONFIG = {
+    // How long it takes for the whole scene to go from "seedlings" -> "mature forest"
+    // (then it loops gently). Bigger = slower, more meditative.
+    cycleSeconds: 18 * 60,     // 18 minutes
+
+    // Tree count: raise for denser forest (performance cost).
+    treeCount: 140,
+
+    // Wind feel
+    windStrength: 0.9,         // 0..2
+
+    // Atmosphere
+    haze: 0.75,                // 0..1
+    sunRays: 0.65,             // 0..1
+
+    // Seedling visibility at the beginning
+    seedlingBoost: 1.0,        // 0..1.5
+
+    // For consistent visuals across reloads
+    seed: 1337
+  };
+
+  // ------------------------------------------------------------
+  // Canvas setup
+  // ------------------------------------------------------------
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
+
+  let W=0, H=0, DPR=1;
+  function resize() {
+    DPR = Math.min(2, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    canvas.width  = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  window.addEventListener("resize", resize, { passive:true });
+  resize();
+
+  // Fullscreen on "F"
+  window.addEventListener("keydown", (e) => {
+    if (e.key.toLowerCase() === "f") {
+      if (!document.fullscreenElement) canvas.requestFullscreen?.();
+      else document.exitFullscreen?.();
+    }
+  });
+
+  // ------------------------------------------------------------
+  // Utilities: RNG + smooth + noise
+  // ------------------------------------------------------------
+  function clamp(x,a,b){ return Math.max(a, Math.min(b,x)); }
+  function lerp(a,b,t){ return a + (b-a)*t; }
+  function smoothstep(t){ t=clamp(t,0,1); return t*t*(3-2*t); }
+  function easeInOutCubic(t){ t=clamp(t,0,1); return t<0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2,3)/2; }
+
+  // Xorshift32 RNG
+  function RNG(seed){
+    let x = seed|0;
+    return () => {
+      x ^= x << 13; x ^= x >>> 17; x ^= x << 5;
+      return ((x>>>0) / 4294967296);
+    };
+  }
+
+  // Lightweight value-noise (2D) for organic shapes
+  function hash2(ix, iy, seed){
+    let h = ix*374761393 + iy*668265263 + seed*1442695041;
+    h = (h ^ (h >>> 13)) * 1274126177;
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+  }
+  function vnoise2(x, y, seed){
+    const xi = Math.floor(x), yi = Math.floor(y);
+    const xf = x - xi,       yf = y - yi;
+    const u = xf*xf*(3-2*xf);
+    const v = yf*yf*(3-2*yf);
+
+    const a = hash2(xi, yi, seed);
+    const b = hash2(xi+1, yi, seed);
+    const c = hash2(xi, yi+1, seed);
+    const d = hash2(xi+1, yi+1, seed);
+
+    return lerp(lerp(a,b,u), lerp(c,d,u), v);
+  }
+  function fbm(x,y,seed){
+    let sum=0, amp=0.6, freq=1;
+    for(let i=0;i<4;i++){
+      sum += amp*(vnoise2(x*freq,y*freq,seed+i*19)*2-1);
+      amp*=0.5; freq*=2;
+    }
+    return sum;
+  }
+
+  // ------------------------------------------------------------
+  // Scene layout helpers
+  // ------------------------------------------------------------
+  const horizonY = () => H * 0.33;
+  const groundLineY = () => H * 0.64;
+
+  function depthToY(z){
+    // z: 0 far -> 1 near
+    const hz = horizonY();
+    const gy = H * 0.985;
+    // emphasize depth (more space near camera)
+    const t = Math.pow(z, 1.75);
+    return lerp(hz, gy, t);
+  }
+
+  function depthToScale(z){
+    return lerp(0.25, 1.0, Math.pow(z, 1.35));
+  }
+
+  function depthFog(z){
+    // far trees get more haze
+    return clamp(1 - Math.pow(z, 0.55), 0, 1);
+  }
+
+  // ------------------------------------------------------------
+  // Forest generation
+  // ------------------------------------------------------------
+  const rng = RNG(CONFIG.seed);
+
+  const trees = [];
+  function makeForest(){
+    trees.length = 0;
+    for(let i=0;i<CONFIG.treeCount;i++){
+      // depth distribution: more in mid/far for "forest" feel
+      const z = Math.pow(rng(), 0.72); // bias toward near-ish slightly
+      const x = lerp(-0.12, 1.12, rng()); // some offscreen
+      const y = depthToY(z);
+
+      const scale = depthToScale(z);
+      const baseH = lerp(70, 360, Math.pow(z, 1.15)) * scale;
+      const w = lerp(2.2, 10.0, Math.pow(z, 1.1)) * scale;
+
+      const kind = rng(); // variation per tree
+      const start = rng() * (CONFIG.cycleSeconds * 0.62); // stagger germination
+      const growWindow = lerp(CONFIG.cycleSeconds*0.22, CONFIG.cycleSeconds*0.36, rng());
+
+      const hueShift = lerp(-10, 12, rng());
+      const trunkTint = lerp(0.18, 0.34, rng()); // used in color mix
+
+      trees.push({
+        id: i,
+        z, x, y,
+        baseH, w,
+        kind,
+        start,
+        growWindow,
+        phase: rng()*Math.PI*2,
+        hueShift,
+        trunkTint,
+        seed: Math.floor(rng()*1e9)
+      });
+    }
+
+    // Sort back-to-front for painterly layering
+    trees.sort((a,b)=>a.z-b.z);
+  }
+  makeForest();
+
+  // ------------------------------------------------------------
+  // Drawing primitives
+  // ------------------------------------------------------------
+  function setFill(color){ ctx.fillStyle = color; }
+  function setStroke(color, lw){
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lw;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+  }
+
+  function drawVignette(){
+    const g = ctx.createRadialGradient(W*0.5, H*0.55, Math.min(W,H)*0.2, W*0.5, H*0.55, Math.max(W,H)*0.75);
+    g.addColorStop(0, "rgba(0,0,0,0)");
+    g.addColorStop(1, "rgba(0,0,0,0.55)");
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,W,H);
+  }
+
+  function drawSky(t){
+    // Deep dawn-to-morning vibe with subtle drift
+    const drift = fbm(t*0.02, 0.7, 101) * 0.04;
+    const g = ctx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0.00, `rgb(10,16,26)`);
+    g.addColorStop(0.38+drift, `rgb(15,24,34)`);
+    g.addColorStop(0.70, `rgb(18,24,20)`);
+    g.addColorStop(1.00, `rgb(10,12,10)`);
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,W,H);
+
+    // Sun glow (soft, off-center for realism)
+    const sx = W*0.68, sy = H*0.22;
+    const sunR = Math.min(W,H)*0.22;
+    const sg = ctx.createRadialGradient(sx,sy,0, sx,sy,sunR);
+    sg.addColorStop(0.0, "rgba(255,240,210,0.22)");
+    sg.addColorStop(0.3, "rgba(255,210,140,0.12)");
+    sg.addColorStop(1.0, "rgba(255,180,110,0)");
+    ctx.fillStyle = sg;
+    ctx.fillRect(0,0,W,H);
+
+    // Subtle cloud haze near horizon
+    const hz = horizonY();
+    const hg = ctx.createLinearGradient(0,hz-60,0,hz+120);
+    hg.addColorStop(0, "rgba(255,255,255,0)");
+    hg.addColorStop(0.5, `rgba(180,200,190,${0.08*CONFIG.haze})`);
+    hg.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = hg;
+    ctx.fillRect(0,hz-70,W,220);
+  }
+
+  function drawDistantHills(t){
+    const hz = horizonY();
+    ctx.save();
+    ctx.globalAlpha = 0.75;
+    ctx.beginPath();
+    ctx.moveTo(0, hz+70);
+
+    const steps = 80;
+    for(let i=0;i<=steps;i++){
+      const x = (i/steps)*W;
+      const n = fbm(i*0.07, t*0.02, 200) * 0.55;
+      const y = hz + 55 + n*35;
+      ctx.lineTo(x,y);
+    }
+    ctx.lineTo(W, H);
+    ctx.lineTo(0, H);
+    ctx.closePath();
+
+    const g = ctx.createLinearGradient(0,hz,0,hz+220);
+    g.addColorStop(0, "rgba(20,30,26,0.65)");
+    g.addColorStop(1, "rgba(10,14,12,0.95)");
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawGround(t){
+    const gy = groundLineY();
+    const g = ctx.createLinearGradient(0,gy,0,H);
+    g.addColorStop(0, "rgb(9,14,10)");
+    g.addColorStop(0.6, "rgb(7,10,8)");
+    g.addColorStop(1, "rgb(4,6,5)");
+    ctx.fillStyle = g;
+    ctx.fillRect(0,gy,W,H-gy);
+
+    // Soft grass texture
+    ctx.save();
+    ctx.globalAlpha = 0.18;
+    ctx.globalCompositeOperation = "overlay";
+    const stripes = 120;
+    for(let i=0;i<stripes;i++){
+      const x = (i/stripes)*W;
+      const n = fbm(i*0.15, t*0.2, 310);
+      const y0 = gy + lerp(0, (H-gy)*0.82, (i/stripes)) + n*8;
+      ctx.beginPath();
+      ctx.moveTo(x, y0);
+      ctx.lineTo(x + n*10, y0 + 40 + Math.abs(n)*45);
+      ctx.strokeStyle = "rgba(140,170,120,0.18)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // Near-ground fog/mist
+    ctx.save();
+    ctx.globalAlpha = 0.20 * CONFIG.haze;
+    const mg = ctx.createLinearGradient(0, gy-10, 0, H);
+    mg.addColorStop(0, "rgba(180,210,195,0)");
+    mg.addColorStop(0.25, "rgba(160,190,170,0.10)");
+    mg.addColorStop(1, "rgba(120,160,140,0.03)");
+    ctx.fillStyle = mg;
+    ctx.fillRect(0, gy-30, W, H-gy+40);
+    ctx.restore();
+  }
+
+  function colorForTree(z, trunkTint, hueShift, alpha=1){
+    // Depth-based atmospheric perspective: far trees bluer/greyer, near trees richer
+    const fog = depthFog(z);
+    const near = 1 - fog;
+
+    // Trunk base
+    const r = lerp(60, 92, near) * (0.9 + trunkTint*0.25);
+    const g = lerp(66, 88, near) * (0.9 + trunkTint*0.2);
+    const b = lerp(68, 76, near) * (0.92 + trunkTint*0.1);
+
+    // Slight hue shift
+    const rr = clamp(r + hueShift*0.6, 0, 255);
+    const gg = clamp(g + hueShift*0.25, 0, 255);
+    const bb = clamp(b - hueShift*0.15, 0, 255);
+
+    // Mix with fog color
+    const fr = lerp(rr, 130, fog*CONFIG.haze);
+    const fg = lerp(gg, 150, fog*CONFIG.haze);
+    const fb = lerp(bb, 150, fog*CONFIG.haze);
+
+    return `rgba(${fr|0},${fg|0},${fb|0},${alpha})`;
+  }
+
+  function leafColor(z, alpha=1){
+    const fog = depthFog(z);
+    const r = lerp(28, 70, fog*0.9);
+    const g = lerp(72, 140, 1 - fog*0.7);
+    const b = lerp(34, 90, fog*0.85);
+    return `rgba(${r|0},${g|0},${b|0},${alpha})`;
+  }
+
+  // ------------------------------------------------------------
+  // Tree drawing: trunk + recursive branches + leaf blobs
+  // ------------------------------------------------------------
+  function drawSeedling(x, y, z, p, wind){
+    // p small: 0..~0.25. Seedling scales with p.
+    const s = lerp(0.2, 1.0, smoothstep(p*4)) * lerp(0.6, 1.2, z);
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(wind * 0.4);
+    ctx.globalAlpha = clamp(0.0 + p*6, 0, 1) * CONFIG.seedlingBoost * (0.35 + 0.55*z);
+
+    // Stem
+    setStroke(`rgba(90,130,90,0.55)`, 2*s);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(3*s, -10*s, 2*s, -24*s);
+    ctx.stroke();
+
+    // Two little leaves
+    ctx.globalCompositeOperation = "lighter";
+    ctx.fillStyle = `rgba(120,190,120,0.28)`;
+    ctx.beginPath(); ctx.ellipse(-6*s, -18*s, 7*s, 4*s, -0.5, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse( 6*s, -16*s, 7*s, 4*s,  0.5, 0, Math.PI*2); ctx.fill();
+
+    ctx.restore();
+  }
+
+
+  function stableRand(seed, path, depth, slot){
+    // Deterministic pseudo-random in [0,1) based only on integers (stable across frames)
+    const s = seed * 0.000001 + path * 0.1031 + depth * 0.1733 + slot * 0.2719;
+    const v = Math.sin(s * 43758.5453123) * 143758.5453;
+    return v - Math.floor(v);
+  }
+
+  function branch(ctx, x, y, len, ang, width, depth, growth, z, seed, wind, endpoints, path){
+  if (depth <= 0 || len < 2) return;
+
+  // Stable per-branch values (do NOT depend on ang/len)
+  const r0 = stableRand(seed, path, depth, 0);
+  const r1 = stableRand(seed, path, depth, 1);
+  const r2 = stableRand(seed, path, depth, 2);
+  const r3 = stableRand(seed, path, depth, 3);
+
+  const sway = wind * (0.25 + 0.75*growth) * (0.35 + 0.65*(1 - depthFog(z)));
+  const bend = (r0 - 0.5) * 0.18 + sway * 0.22;
+
+  const a2 = ang + bend;
+  const x2 = x + Math.cos(a2) * len;
+  const y2 = y + Math.sin(a2) * len;
+
+  // Draw segment
+  ctx.lineWidth = width;
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.quadraticCurveTo(
+    x + Math.cos(a2) * len * 0.55 + Math.sin(a2) * len * 0.08,
+    y + Math.sin(a2) * len * 0.55 - Math.cos(a2) * len * 0.08,
+    x2, y2
+  );
+  ctx.stroke();
+
+  // Leaves endpoints
+  if (growth > 0.45 && depth <= 2) endpoints.push([x2, y2, depth]);
+
+  // Branching only as the tree grows
+  const g = clamp((growth - 0.15) / 0.85, 0, 1);
+  const branchChance = lerp(0.15, 0.85, g);
+
+  // Stable decision: no popping
+  if (r1 < branchChance) {
+    const split = 1 + (r3 < 0.55 ? 1 : 0);
+    for (let i = 0; i < split; i++) {
+      const childPath = path * 3 + i + 1;
+
+      const jitter = (stableRand(seed, childPath, depth, 4) - 0.5);
+      const widen  = lerp(0.35, 0.95, stableRand(seed, childPath, depth, 5));
+      const childAng = a2 + jitter * widen * (0.65 + 0.35 * g);
+
+      const childLen = len * lerp(0.62, 0.78, stableRand(seed, childPath, depth, 6));
+      const childW   = width * lerp(0.62, 0.74, stableRand(seed, childPath, depth, 7));
+
+      branch(ctx, x2, y2, childLen, childAng, childW, depth - 1, growth, z, seed, wind, endpoints, childPath);
+    }
+  }
+  }
+
+  function drawLeaves(endpoints, z, growth, t){
+    if (growth < 0.42) return;
+
+    const fog = depthFog(z);
+    const dens = lerp(0.15, 1.0, easeInOutCubic((growth-0.4)/0.6));
+    const wobble = fbm(t*0.18, z*2.4, 701) * 0.6;
+
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+
+    for (let i=0;i<endpoints.length;i++){
+      const [x,y,d] = endpoints[i];
+      const depthFactor = 1 - clamp(d/3, 0, 1);
+
+      const r0 = lerp(6, 22, (1-fog)) * lerp(0.6, 1.2, depthFactor) * lerp(0.65, 1.0, dens);
+      const puff = 1.0 + (vnoise2(x*0.01, y*0.01, 888) - 0.5) * 0.35;
+
+      const a = (0.09 + 0.15*dens) * lerp(0.35, 1.0, (1-fog)) * (0.75 + 0.25*Math.sin(wobble + i*0.3));
+      ctx.fillStyle = leafColor(z, a);
+
+      // blob cluster
+      const blobs = 2 + Math.floor(4*dens);
+      for (let b=0;b<blobs;b++){
+        const ox = (vnoise2(i*1.7, b*2.3, 990)-0.5) * r0*1.2;
+        const oy = (vnoise2(i*2.1, b*1.9, 991)-0.5) * r0*1.2;
+        ctx.beginPath();
+        ctx.ellipse(x+ox, y+oy, r0*puff, r0*0.75*puff, (b*0.6+wobble)*0.5, 0, Math.PI*2);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawTree(tree, t, globalAge){
+    const { z, x, y, baseH, w, kind, start, growWindow, phase, trunkTint, hueShift, seed } = tree;
+    const px = x * W;
+
+    // Growth progress for this tree
+    const local = (t - start) / growWindow;
+    const p = clamp(local, 0, 1);
+    const growth = easeInOutCubic(p);
+
+    // Add a gentle "breathing" when mature so loop feels alive
+    const matureBreath = 1 + (0.008 * Math.sin((t*0.35 + phase)) * (growth > 0.98 ? 1 : 0));
+    const h = baseH * lerp(0.12, 1.0, growth) * matureBreath;
+    const trunkW = w * lerp(0.35, 1.0, growth);
+
+    // Wind depends on depth; nearer sways more
+    const wind = Math.sin(t*0.55 + phase) * (0.03 + 0.05*(1 - depthFog(z))) * CONFIG.windStrength;
+
+    // Seedlings first
+    if (growth < 0.22) {
+      drawSeedling(px, y, z, growth, wind);
+      return;
+    }
+
+    // Trunk/branch style
+    const fog = depthFog(z);
+    const alpha = lerp(0.45, 0.98, 1 - fog);
+    setStroke(colorForTree(z, trunkTint, hueShift, alpha), trunkW);
+
+    // Draw trunk as a slightly curving path
+    ctx.save();
+    ctx.translate(px, y);
+    ctx.rotate(wind * (0.35 + 0.65*growth));
+
+    const tilt = (kind - 0.5) * 0.22; // slight individuality
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(
+      Math.sin(tilt)*h*0.15, -h*0.45,
+      Math.sin(tilt)*h*0.08, -h
+    );
+    ctx.stroke();
+
+    // Branches from upper trunk
+    const endpoints = [];
+    const maxDepth = 3 + Math.floor(3 * growth); // 3..6
+    const topX = Math.sin(tilt)*h*0.08;
+    const topY = -h;
+
+    // Branch base
+    ctx.lineWidth = trunkW * 0.72;
+    ctx.beginPath();
+    ctx.moveTo(0, -h*0.35);
+    ctx.quadraticCurveTo(topX*0.6, -h*0.65, topX, topY);
+    ctx.stroke();
+
+    // Recursive branches
+    const baseLen = h * lerp(0.18, 0.30, (1 - fog)) * lerp(0.7, 1.15, kind);
+    const baseAng = -Math.PI/2 + tilt*0.9;
+    branch(ctx, topX, topY, baseLen,      baseAng + 0.32, trunkW*0.55, maxDepth,   growth, z, seed+1, wind, endpoints, 1);
+    branch(ctx, topX, topY, baseLen*0.92, baseAng - 0.28, trunkW*0.52, maxDepth,   growth, z, seed+2, wind, endpoints, 2);
+
+    // A third branch appears later for richer canopy
+    if (growth > 0.55){
+      branch(ctx, topX, topY, baseLen*0.85, baseAng + 0.02, trunkW*0.46, maxDepth-1, growth, z, seed+3, wind, endpoints, 3);
+    }
+
+    // Leaves/canopy
+    const ageBoost = clamp((globalAge - 0.35) / 0.65, 0, 1);
+    const leafGrowth = clamp(growth + ageBoost*0.15, 0, 1);
+    drawLeaves(endpoints, z, leafGrowth, t);
+
+    ctx.restore();
+
+    // Soft ground shadow (subtle)
+    ctx.save();
+    ctx.globalAlpha = 0.08 * (1 - fog);
+    ctx.fillStyle = "rgba(0,0,0,1)";
+    ctx.beginPath();
+    ctx.ellipse(px + wind*90, y + 6, trunkW*10, trunkW*4, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // ------------------------------------------------------------
+  // Sun rays + drifting motes
+  // ------------------------------------------------------------
+  const motes = [];
+  function initMotes(){
+    motes.length = 0;
+    const n = 90;
+    for(let i=0;i<n;i++){
+      motes.push({
+        x: rng()*1.1 - 0.05,
+        y: rng()*0.9,
+        r: lerp(0.6, 2.0, rng()),
+        v: lerp(0.004, 0.016, rng()),
+        p: rng()*Math.PI*2
+      });
+    }
+  }
+  initMotes();
+
+  function drawSunRays(t){
+    if (CONFIG.sunRays <= 0) return;
+
+    const sx = W*0.68, sy = H*0.22;
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.globalAlpha = 0.14 * CONFIG.sunRays;
+
+    // Rays as soft wedges
+    const rayCount = 14;
+    for(let i=0;i<rayCount;i++){
+      const a = (-0.55 + i*(1.1/(rayCount-1))) + Math.sin(t*0.07 + i)*0.06;
+      const len = Math.min(W,H) * (0.95 + 0.05*Math.sin(t*0.03+i));
+      const w = 0.09 + 0.02*Math.sin(t*0.09 + i*1.7);
+
+      const gx = sx + Math.cos(a)*len;
+      const gy = sy + Math.sin(a)*len;
+
+      const grad = ctx.createLinearGradient(sx,sy,gx,gy);
+      grad.addColorStop(0, "rgba(255,240,210,0.35)");
+      grad.addColorStop(0.25, "rgba(255,230,190,0.10)");
+      grad.addColorStop(1, "rgba(255,220,180,0)");
+
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(sx + Math.cos(a-w)*len, sy + Math.sin(a-w)*len);
+      ctx.lineTo(sx + Math.cos(a+w)*len, sy + Math.sin(a+w)*len);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawMotes(t){
+    const sx = W*0.68, sy = H*0.22;
+
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.globalAlpha = 0.18 * CONFIG.haze;
+
+    for(const m of motes){
+      m.y += m.v;
+      m.x += Math.sin(t*0.6 + m.p) * 0.00025;
+      if (m.y > 1.02) { m.y = -0.02; m.x = rng()*1.1 - 0.05; }
+
+      // Keep motes mostly around the light shaft region
+      const px = lerp(sx - W*0.22, sx + W*0.12, clamp(m.x,0,1));
+      const py = lerp(sy + H*0.05, H*0.92, clamp(m.y,0,1));
+
+      const falloff = clamp(1 - (Math.abs(px - sx)/(W*0.45)), 0, 1);
+      const a = 0.08 * falloff;
+
+      ctx.fillStyle = `rgba(255,248,230,${a})`;
+      ctx.beginPath();
+      ctx.arc(px, py, m.r, 0, Math.PI*2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
+  function drawForegroundHaze(){
+    ctx.save();
+    ctx.globalAlpha = 0.10 * CONFIG.haze;
+    const g = ctx.createLinearGradient(0, H*0.35, 0, H);
+    g.addColorStop(0, "rgba(240,255,250,0)");
+    g.addColorStop(0.65, "rgba(200,230,220,0.08)");
+    g.addColorStop(1, "rgba(160,210,200,0.06)");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, H*0.35, W, H*0.65);
+    ctx.restore();
+  }
+
+  // ------------------------------------------------------------
+  // Animation loop
+  // ------------------------------------------------------------
+  const t0 = performance.now();
+
+  function frame(now){
+    const elapsed = (now - t0) / 1000;
+    const t = elapsed;
+
+    // Global cycle: 0..1 over cycleSeconds (loops)
+    const cycle = CONFIG.cycleSeconds;
+    const tm = t % cycle;
+    const globalAge = smoothstep(tm / cycle); // 0..1
+
+    // Clear
+    ctx.clearRect(0,0,W,H);
+
+    // Layers
+    drawSky(t);
+    drawSunRays(t);
+    drawDistantHills(t);
+    drawGround(t);
+
+    // Trees
+    for (const tr of trees){
+      drawTree(tr, tm, globalAge);
+    }
+
+    // Atmospherics
+    drawMotes(t);
+    drawForegroundHaze();
+    drawVignette();
+
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
+

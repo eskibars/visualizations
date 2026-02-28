@@ -1,0 +1,701 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Spaceship Porthole</title>
+  <style>
+    :root{
+      --bg:#05060a;
+      --rimDark:#2b2f3a;
+      --rimMid:#4a5162;
+      --rimLight:#cdd6e6;
+      --bolt:#9aa6c0;
+      --glassTint: rgba(140, 200, 255, 0.05);
+      --glow: rgba(150, 210, 255, 0.10);
+    }
+
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: radial-gradient(1200px 800px at 50% 50%, #070914 0%, #04050a 55%, #020308 100%);
+      overflow: hidden;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    /* Centered porthole */
+    .wrap{
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      background:
+        radial-gradient(900px 600px at 50% 40%, rgba(255,255,255,0.04), transparent 60%),
+        radial-gradient(1400px 900px at 50% 60%, rgba(20,30,60,0.22), transparent 65%);
+    }
+
+    .porthole {
+      position: relative;
+      width: min(86vmin, 1080px);
+      aspect-ratio: 1 / 1;
+      border-radius: 50%;
+      filter: drop-shadow(0 28px 40px rgba(0,0,0,0.6));
+      user-select: none;
+    }
+
+    /* Outer rim (metal) */
+    .porthole::before{
+      content:"";
+      position:absolute;
+      inset: -6.5%;
+      border-radius: 50%;
+      background:
+        radial-gradient(circle at 50% 50%,
+          rgba(255,255,255,0.08) 0%,
+          rgba(255,255,255,0.04) 30%,
+          rgba(0,0,0,0.35) 65%,
+          rgba(0,0,0,0.55) 100%),
+        conic-gradient(from 210deg,
+          rgba(255,255,255,0.25),
+          rgba(255,255,255,0.06),
+          rgba(255,255,255,0.18),
+          rgba(255,255,255,0.05),
+          rgba(255,255,255,0.22));
+      box-shadow:
+        inset 0 2px 18px rgba(255,255,255,0.08),
+        inset 0 -24px 46px rgba(0,0,0,0.55),
+        0 36px 60px rgba(0,0,0,0.50);
+      border: 1px solid rgba(255,255,255,0.10);
+    }
+
+    /* Inner bezel */
+    .bezel{
+      position:absolute;
+      inset: -1.5%;
+      border-radius: 50%;
+      background:
+        radial-gradient(circle at 30% 25%,
+          rgba(255,255,255,0.22),
+          rgba(255,255,255,0.05) 28%,
+          rgba(0,0,0,0.25) 70%,
+          rgba(0,0,0,0.55) 100%),
+        linear-gradient(135deg, rgba(255,255,255,0.10), rgba(0,0,0,0.25));
+      box-shadow:
+        inset 0 10px 20px rgba(255,255,255,0.08),
+        inset 0 -18px 30px rgba(0,0,0,0.55);
+      border: 1px solid rgba(255,255,255,0.16);
+    }
+
+    /* The window opening that clips space */
+    .window {
+      position:absolute;
+      inset: 8.5%;
+      border-radius: 50%;
+      overflow: hidden;
+      background: #000;
+      box-shadow:
+        inset 0 0 0 2px rgba(255,255,255,0.10),
+        inset 0 0 32px rgba(120,180,255,0.08),
+        inset 0 0 120px rgba(0,0,0,0.8);
+    }
+
+    canvas{
+      position:absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    /* Glass: tint + reflections + micro-scratches */
+    .glass{
+      position:absolute;
+      inset: 0;
+      pointer-events: none;
+      border-radius: 50%;
+      background:
+        radial-gradient(120% 120% at 30% 25%, rgba(255,255,255,0.18), transparent 35%),
+        radial-gradient(120% 120% at 70% 80%, rgba(120,190,255,0.10), transparent 42%),
+        linear-gradient(180deg, rgba(255,255,255,0.05), rgba(0,0,0,0.10));
+      mix-blend-mode: screen;
+      opacity: 0.9;
+    }
+
+    .glass::before{
+      content:"";
+      position:absolute;
+      inset: -35%;
+      border-radius: 50%;
+      background:
+        conic-gradient(from 120deg,
+          transparent 0deg,
+          rgba(255,255,255,0.15) 18deg,
+          transparent 48deg,
+          rgba(255,255,255,0.08) 70deg,
+          transparent 120deg,
+          rgba(255,255,255,0.10) 160deg,
+          transparent 360deg);
+      filter: blur(1px);
+      opacity: 0.55;
+      animation: sweep 18s linear infinite;
+      transform-origin: 50% 50%;
+    }
+
+    .glass::after{
+      content:"";
+      position:absolute;
+      inset: 0;
+      border-radius: 50%;
+      background:
+        repeating-linear-gradient(115deg,
+          rgba(255,255,255,0.020) 0px,
+          rgba(255,255,255,0.020) 1px,
+          transparent 2px,
+          transparent 10px),
+        repeating-linear-gradient(20deg,
+          rgba(255,255,255,0.012) 0px,
+          rgba(255,255,255,0.012) 1px,
+          transparent 2px,
+          transparent 14px);
+      opacity: 0.35;
+      mix-blend-mode: overlay;
+      filter: blur(0.2px);
+    }
+
+    @keyframes sweep{
+      from { transform: rotate(0deg); }
+      to   { transform: rotate(360deg); }
+    }
+
+    /* Bolts around rim */
+    .bolts{
+      position:absolute;
+      inset: -3.5%;
+      border-radius: 50%;
+      pointer-events:none;
+      filter: drop-shadow(0 2px 2px rgba(0,0,0,0.45));
+    }
+    .bolt{
+      position:absolute;
+      width: 2.2%;
+      aspect-ratio: 1/1;
+      border-radius: 50%;
+      background:
+        radial-gradient(circle at 35% 30%,
+          rgba(255,255,255,0.55),
+          rgba(255,255,255,0.12) 35%,
+          rgba(0,0,0,0.35) 75%,
+          rgba(0,0,0,0.55) 100%);
+      border: 1px solid rgba(255,255,255,0.16);
+      box-shadow:
+        inset 0 1px 2px rgba(255,255,255,0.18),
+        inset 0 -2px 3px rgba(0,0,0,0.45);
+    }
+    .bolt::after{
+      content:"";
+      position:absolute;
+      inset: 26%;
+      border-radius: 50%;
+      background: linear-gradient(135deg, rgba(0,0,0,0.55), rgba(255,255,255,0.12));
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10);
+      opacity: 0.8;
+    }
+
+    /* subtle outer vignette */
+    .vignette{
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background: radial-gradient(1200px 900px at 50% 50%, transparent 35%, rgba(0,0,0,0.55) 78%, rgba(0,0,0,0.85) 100%);
+    }
+
+    /* tiny status hint (optional, hidden by default) */
+    .hud{
+      position:absolute;
+      left: 10%;
+      bottom: 10%;
+      font-size: clamp(10px, 1.2vmin, 14px);
+      letter-spacing: 0.12em;
+      color: rgba(200,230,255,0.55);
+      text-transform: uppercase;
+      text-shadow: 0 0 12px rgba(140,200,255,0.22);
+      opacity: 0.0; /* flip to 1 if you want it visible */
+      user-select: none;
+    }
+
+    @media (prefers-reduced-motion: reduce){
+      .glass::before{ animation: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="porthole" aria-label="Spaceship porthole view">
+      <div class="bezel"></div>
+
+      <div class="bolts" id="bolts"></div>
+
+      <div class="window">
+        <canvas id="space"></canvas>
+        <div class="glass"></div>
+        <div class="hud" id="hud">CRUISE • 0.12C</div>
+      </div>
+    </div>
+  </div>
+  <div class="vignette"></div>
+
+  <script>
+    (() => {
+      // ====== CONFIG (tweak to taste) ======
+      const CONFIG = {
+        starDensity: 1.05,          // stars per 10k px^2 (scaled with window size)
+        starLayers: 3,
+        driftSpeed: 0.22,           // base drift speed
+        twinkleStrength: 0.45,
+        asteroid: {
+          minIntervalMs: 12000,
+          maxIntervalMs: 26000,
+          chancePerCheck: 0.75,     // chance an asteroid spawns when interval elapses
+        },
+        warp: {
+          minIntervalMs: 45000,
+          maxIntervalMs: 105000,
+          chargeMs: 1800,
+          durationMs: 3200,
+          coolDownMs: 1400,
+          streakScale: 10.5,
+          bloomStrength: 0.25,
+        },
+        vignetteStrength: 0.45,
+        dpiCap: 2.0,                // cap devicePixelRatio for performance
+      };
+
+      // ====== ELEMENTS / CANVAS SETUP ======
+      const canvas = document.getElementById('space');
+      const ctx = canvas.getContext('2d', { alpha: false });
+
+      let W = 0, H = 0, DPR = 1;
+      let cx = 0, cy = 0;
+
+      function resize() {
+        const rect = canvas.getBoundingClientRect();
+        DPR = Math.min(window.devicePixelRatio || 1, CONFIG.dpiCap);
+        W = Math.max(2, Math.floor(rect.width * DPR));
+        H = Math.max(2, Math.floor(rect.height * DPR));
+        canvas.width = W;
+        canvas.height = H;
+        cx = W * 0.5;
+        cy = H * 0.5;
+        rebuildStars();
+      }
+      window.addEventListener('resize', resize, { passive: true });
+
+      // ====== RNG HELPERS ======
+      const rand = (a=1,b=0) => Math.random()*(a-b)+b;
+      const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+      const lerp = (a,b,t) => a + (b-a)*t;
+      const smoothstep = (t) => t*t*(3-2*t);
+
+      // ====== STARS ======
+      let stars = [];
+      let starCount = 0;
+
+      function rebuildStars() {
+        const area = (W*H)/(DPR*DPR); // logical pixels
+        starCount = Math.floor((area / 10000) * CONFIG.starDensity * 90);
+        starCount = clamp(starCount, 450, 2200);
+
+        stars = [];
+        for (let i=0; i<starCount; i++) {
+          const layer = Math.floor(Math.random()*CONFIG.starLayers);
+          const depth = (layer+1)/CONFIG.starLayers;     // 0..1
+          const baseSize = lerp(0.55, 1.8, depth);
+          stars.push({
+            x: Math.random()*W,
+            y: Math.random()*H,
+            layer,
+            depth,
+            r: baseSize * DPR,
+            tw: Math.random()*Math.PI*2,
+            tws: lerp(0.4, 1.25, depth),
+            a: lerp(0.25, 0.95, depth),
+            hue: rand(235, 200), // cool-ish
+          });
+        }
+      }
+
+      // ====== ASTEROIDS ======
+      const asteroids = [];
+      let nextAsteroidAt = performance.now() + rand(CONFIG.asteroid.maxIntervalMs, CONFIG.asteroid.minIntervalMs);
+
+      function makeAsteroid() {
+        // Spawn offscreen with a path crossing the circle-ish view.
+        const angle = rand(Math.PI*2);
+        const pad = Math.max(W,H) * 0.18;
+        const startX = cx + Math.cos(angle) * (Math.max(W,H)*0.65 + pad);
+        const startY = cy + Math.sin(angle) * (Math.max(W,H)*0.65 + pad);
+
+        const endAngle = angle + rand(0.9, 1.8) * (Math.random()<0.5 ? 1 : -1);
+        const endX = cx + Math.cos(endAngle) * (Math.max(W,H)*0.65 + pad);
+        const endY = cy + Math.sin(endAngle) * (Math.max(W,H)*0.65 + pad);
+
+        const size = rand(38, 110) * DPR;
+        const speed = rand(0.6, 1.35) * DPR;
+
+        // Make a lumpy polygon silhouette
+        const verts = [];
+        const n = Math.floor(rand(16, 26));
+        for (let i=0; i<n; i++){
+          const t = (i/n) * Math.PI*2;
+          const wobble = lerp(0.70, 1.15, Math.random());
+          verts.push({
+            a: t,
+            rr: size * wobble * lerp(0.82, 1.08, Math.random())
+          });
+        }
+
+        // Texture speckle seed
+        const specks = [];
+        const speckCount = Math.floor(rand(14, 32));
+        for (let i=0; i<speckCount; i++){
+          specks.push({
+            x: rand(size*0.7, -size*0.7),
+            y: rand(size*0.7, -size*0.7),
+            r: rand(3.2, 10.0) * DPR,
+            a: rand(0.22, 0.06)
+          });
+        }
+
+        return {
+          t: 0,
+          x0: startX, y0: startY,
+          x1: endX, y1: endY,
+          rot: rand(Math.PI*2),
+          rotV: rand(0.010, 0.003) * (Math.random()<0.5?-1:1),
+          size,
+          speed,
+          verts,
+          specks,
+          life: 1,
+          blur: rand(0.9, 1.8) * DPR,
+        };
+      }
+
+      function spawnAsteroid(now){
+        nextAsteroidAt = now + rand(CONFIG.asteroid.maxIntervalMs, CONFIG.asteroid.minIntervalMs);
+        if (Math.random() > CONFIG.asteroid.chancePerCheck) return;
+        asteroids.push(makeAsteroid());
+      }
+
+      // ====== WARP STATE MACHINE ======
+      const warp = {
+        state: "normal", // normal -> charge -> warp -> cooldown -> normal
+        t: 0,
+        nextAt: performance.now() + rand(CONFIG.warp.maxIntervalMs, CONFIG.warp.minIntervalMs),
+      };
+
+      function startWarp(now){
+        warp.state = "charge";
+        warp.t = 0;
+      }
+
+      function updateWarp(now, dt){
+        if (warp.state === "normal") {
+          if (now >= warp.nextAt) startWarp(now);
+          return;
+        }
+
+        warp.t += dt;
+
+        if (warp.state === "charge" && warp.t >= CONFIG.warp.chargeMs){
+          warp.state = "warp";
+          warp.t = 0;
+          // Optional: show HUD briefly
+          // document.getElementById('hud').textContent = "WARP • ENGAGED";
+        } else if (warp.state === "warp" && warp.t >= CONFIG.warp.durationMs){
+          warp.state = "cooldown";
+          warp.t = 0;
+        } else if (warp.state === "cooldown" && warp.t >= CONFIG.warp.coolDownMs){
+          warp.state = "normal";
+          warp.t = 0;
+          warp.nextAt = now + rand(CONFIG.warp.maxIntervalMs, CONFIG.warp.minIntervalMs);
+          // document.getElementById('hud').textContent = "CRUISE • 0.12C";
+        }
+      }
+
+      function warpIntensity(){
+        if (warp.state === "normal") return 0;
+        if (warp.state === "charge"){
+          const t = clamp(warp.t / CONFIG.warp.chargeMs, 0, 1);
+          return 0.15 * smoothstep(t);
+        }
+        if (warp.state === "warp"){
+          const t = clamp(warp.t / CONFIG.warp.durationMs, 0, 1);
+          // ramp up quickly, then taper slightly
+          return lerp(0.65, 1.0, smoothstep(Math.min(1, t*1.5))) * (0.92 + 0.08*Math.sin(t*Math.PI*2));
+        }
+        if (warp.state === "cooldown"){
+          const t = clamp(warp.t / CONFIG.warp.coolDownMs, 0, 1);
+          return lerp(0.55, 0.0, smoothstep(t));
+        }
+        return 0;
+      }
+
+      // ====== RENDER HELPERS ======
+      function drawBackground(iWarp){
+        // Deep space gradient, slight warp bloom
+        const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W,H)*0.7);
+        g.addColorStop(0, `rgb(${Math.floor(7 + 10*iWarp)}, ${Math.floor(8 + 12*iWarp)}, ${Math.floor(18 + 35*iWarp)})`);
+        g.addColorStop(0.55, `rgb(3, 4, ${Math.floor(10 + 16*iWarp)})`);
+        g.addColorStop(1, `rgb(1, 2, 5)`);
+        ctx.fillStyle = g;
+        ctx.fillRect(0,0,W,H);
+
+        // subtle vignette inside the window
+        const vg = ctx.createRadialGradient(cx, cy, Math.min(W,H)*0.05, cx, cy, Math.max(W,H)*0.62);
+        vg.addColorStop(0, `rgba(0,0,0,0)`);
+        vg.addColorStop(0.65, `rgba(0,0,0,${0.10 + CONFIG.vignetteStrength*0.25})`);
+        vg.addColorStop(1, `rgba(0,0,0,${0.45 + CONFIG.vignetteStrength*0.30})`);
+        ctx.fillStyle = vg;
+        ctx.fillRect(0,0,W,H);
+      }
+
+      function drawStars(now, dt, iWarp){
+        const drift = CONFIG.driftSpeed * DPR;
+        const warpMove = iWarp > 0 ? (6.0 + 18.0*iWarp) * DPR : 0;
+        const streaks = iWarp > 0.35;
+
+        // Precompute for warp direction
+        for (let s of stars){
+          const depth = s.depth;
+
+          // twinkle
+          s.tw += dt * 0.001 * s.tws;
+          const tw = (Math.sin(s.tw) * 0.5 + 0.5);
+          const alpha = clamp(s.a * (1 - CONFIG.twinkleStrength*0.35 + CONFIG.twinkleStrength*tw), 0, 1);
+
+          // update positions
+          let px = s.x, py = s.y; // previous
+          if (iWarp > 0.02){
+            // warp: move away from center (stars streak outward)
+            const dx = s.x - cx;
+            const dy = s.y - cy;
+            const mag = Math.max(0.001, Math.hypot(dx, dy));
+            const ux = dx / mag;
+            const uy = dy / mag;
+
+            const speed = warpMove * lerp(0.85, 1.6, depth);
+            s.x += ux * speed * (dt/16.67);
+            s.y += uy * speed * (dt/16.67);
+
+            // respawn if out of bounds
+            const margin = 40 * DPR;
+            if (s.x < -margin || s.x > W+margin || s.y < -margin || s.y > H+margin){
+              // respawn near center for convincing warp tunnel
+              const a = rand(Math.PI*2);
+              const r = rand(Math.min(W,H)*0.03, Math.min(W,H)*0.18);
+              s.x = cx + Math.cos(a)*r;
+              s.y = cy + Math.sin(a)*r;
+            }
+          } else {
+            // normal drift with mild parallax
+            const vx = drift * lerp(0.30, 1.0, depth);
+            const vy = drift * lerp(0.12, 0.55, depth);
+            s.x += vx * (dt/16.67);
+            s.y += vy * (dt/16.67);
+
+            // wrap
+            if (s.x > W) s.x = 0;
+            if (s.y > H) s.y = 0;
+          }
+
+          // draw
+          if (streaks) {
+            // line streaks in warp
+            const dx = s.x - px;
+            const dy = s.y - py;
+            const len = Math.hypot(dx, dy);
+            const stretch = clamp(len * CONFIG.warp.streakScale * 0.08, 0, 110*DPR) * lerp(0.3, 1.0, depth);
+
+            const mag = Math.max(0.0001, len);
+            const ux = dx / mag, uy = dy / mag;
+
+            const x2 = s.x;
+            const y2 = s.y;
+            const x1 = x2 - ux * stretch;
+            const y1 = y2 - uy * stretch;
+
+            ctx.strokeStyle = `rgba(210,235,255,${alpha * (0.45 + 0.55*iWarp)})`;
+            ctx.lineWidth = clamp(s.r * lerp(0.7, 1.3, iWarp), 0.8*DPR, 2.2*DPR);
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.stroke();
+          } else {
+            // crisp stars
+            const rr = s.r * (1 + 0.12*iWarp);
+            ctx.fillStyle = `hsla(${s.hue}, 45%, 92%, ${alpha})`;
+            ctx.beginPath();
+            ctx.arc(s.x, s.y, rr, 0, Math.PI*2);
+            ctx.fill();
+
+            // occasional subtle glow on bright stars
+            if (s.a > 0.78 && Math.random() < 0.003){
+              ctx.fillStyle = `rgba(160,210,255,${alpha*0.08})`;
+              ctx.beginPath();
+              ctx.arc(s.x, s.y, rr*4.2, 0, Math.PI*2);
+              ctx.fill();
+            }
+          }
+        }
+
+        // bloom flash near peak warp
+        if (iWarp > 0.6){
+          const b = (iWarp - 0.6) / 0.4;
+          const gg = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W,H)*0.65);
+          gg.addColorStop(0, `rgba(160,220,255,${b*CONFIG.warp.bloomStrength})`);
+          gg.addColorStop(0.35, `rgba(120,170,255,${b*CONFIG.warp.bloomStrength*0.55})`);
+          gg.addColorStop(1, `rgba(0,0,0,0)`);
+          ctx.fillStyle = gg;
+          ctx.fillRect(0,0,W,H);
+        }
+      }
+
+      function drawAsteroids(now, dt, iWarp){
+        // During warp, asteroids should be rare / fade (you're moving too fast)
+        const warpFade = clamp(1 - iWarp*1.4, 0, 1);
+
+        for (let i=asteroids.length-1; i>=0; i--){
+          const a = asteroids[i];
+          a.t += (a.speed * (dt/16.67)) / Math.max(1, Math.hypot(a.x1-a.x0, a.y1-a.y0)) * 520; // normalized-ish
+          a.rot += a.rotV * (dt/16.67);
+
+          // interpolate along path with easing
+          const tt = clamp(a.t, 0, 1);
+          const ease = tt*tt*(3-2*tt);
+          const x = lerp(a.x0, a.x1, ease);
+          const y = lerp(a.y0, a.y1, ease);
+
+          // fade in/out
+          const fade = smoothstep(clamp(tt/0.12, 0, 1)) * (1 - smoothstep(clamp((tt-0.78)/0.22, 0, 1)));
+          const alpha = fade * warpFade;
+
+          if (tt >= 1.02 || alpha <= 0.001){
+            asteroids.splice(i,1);
+            continue;
+          }
+
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.rotate(a.rot);
+
+          // soft shadow + slight blur effect
+          ctx.shadowColor = `rgba(0,0,0,${0.55*alpha})`;
+          ctx.shadowBlur = a.blur;
+
+          // body gradient
+          const lg = ctx.createLinearGradient(-a.size, -a.size, a.size, a.size);
+          lg.addColorStop(0, `rgba(210,200,190,${0.75*alpha})`);
+          lg.addColorStop(0.35, `rgba(120,110,100,${0.85*alpha})`);
+          lg.addColorStop(1, `rgba(45,40,38,${0.95*alpha})`);
+
+          ctx.fillStyle = lg;
+          ctx.beginPath();
+          for (let vi=0; vi<a.verts.length; vi++){
+            const v = a.verts[vi];
+            const px = Math.cos(v.a) * v.rr;
+            const py = Math.sin(v.a) * v.rr;
+            if (vi === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+          }
+          ctx.closePath();
+          ctx.fill();
+
+          // edge highlight
+          ctx.shadowBlur = 0;
+          ctx.strokeStyle = `rgba(255,255,255,${0.10*alpha})`;
+          ctx.lineWidth = 1.2*DPR;
+          ctx.stroke();
+
+          // craters/specks
+          for (let s of a.specks){
+            ctx.fillStyle = `rgba(0,0,0,${s.a*alpha})`;
+            ctx.beginPath();
+            ctx.arc(s.x, s.y, s.r, 0, Math.PI*2);
+            ctx.fill();
+
+            ctx.strokeStyle = `rgba(255,255,255,${s.a*0.35*alpha})`;
+            ctx.lineWidth = 0.9*DPR;
+            ctx.beginPath();
+            ctx.arc(s.x - s.r*0.15, s.y - s.r*0.15, s.r*0.85, 0, Math.PI*2);
+            ctx.stroke();
+          }
+
+          // tiny specular
+          ctx.fillStyle = `rgba(255,255,255,${0.06*alpha})`;
+          ctx.beginPath();
+          ctx.ellipse(-a.size*0.25, -a.size*0.22, a.size*0.22, a.size*0.14, 0.25, 0, Math.PI*2);
+          ctx.fill();
+
+          ctx.restore();
+        }
+
+        // spawn logic
+        if (now >= nextAsteroidAt && iWarp < 0.25){
+          spawnAsteroid(now);
+        } else if (now >= nextAsteroidAt && iWarp >= 0.25){
+          // delay asteroid spawn until after warp
+          nextAsteroidAt = now + rand(6000, 11000);
+        }
+      }
+
+      // ====== MAIN LOOP ======
+      let last = performance.now();
+
+      function frame(now){
+        const dt = clamp(now - last, 0, 42);
+        last = now;
+
+        updateWarp(now, dt);
+        const iWarp = warpIntensity();
+
+        drawBackground(iWarp);
+        drawStars(now, dt, iWarp);
+        drawAsteroids(now, dt, iWarp);
+
+        requestAnimationFrame(frame);
+      }
+
+      // ====== BOLTS LAYOUT ======
+      function buildBolts(){
+        const boltsWrap = document.getElementById('bolts');
+        boltsWrap.innerHTML = "";
+        const count = 12;
+        for (let i=0; i<count; i++){
+          const b = document.createElement('div');
+          b.className = 'bolt';
+          const ang = (i/count) * Math.PI*2 - Math.PI/2;
+          const r = 50; // percent
+          const x = 50 + Math.cos(ang) * r;
+          const y = 50 + Math.sin(ang) * r;
+          b.style.left = `${x}%`;
+          b.style.top  = `${y}%`;
+          b.style.transform = `translate(-50%, -50%)`;
+          boltsWrap.appendChild(b);
+        }
+      }
+
+      // ====== START ======
+      buildBolts();
+      resize();
+      requestAnimationFrame(frame);
+
+      // Optional: click/tap to force a warp jump
+      window.addEventListener('pointerdown', () => {
+        if (warp.state === "normal") startWarp(performance.now());
+      }, { passive: true });
+    })();
+  </script>
+</body>
+</html>
+
