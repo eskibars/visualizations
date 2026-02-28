@@ -1,0 +1,637 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Butterflies</title>
+  <style>
+    html, body { height: 100%; width: 100%; margin: 0; background: #05070c; overflow: hidden; }
+    canvas { display: block; width: 100vw; height: 100vh; cursor: default; }
+    .hint {
+      position: fixed; left: 50%; top: 22px; transform: translateX(-50%);
+      padding: 10px 14px; border-radius: 999px;
+      background: rgba(255,255,255,0.07);
+      border: 1px solid rgba(255,255,255,0.14);
+      color: rgba(255,255,255,0.86);
+      font: 500 14px/1.2 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      letter-spacing: 0.2px;
+      backdrop-filter: blur(10px);
+      box-shadow: 0 8px 30px rgba(0,0,0,0.35);
+      user-select: none; pointer-events: none;
+      opacity: 1;
+      transition: opacity 800ms ease;
+    }
+    .hint.fade { opacity: 0; }
+    .vignette {
+      pointer-events: none;
+      position: fixed; inset: 0;
+      background:
+        radial-gradient(80vmax 70vmax at 50% 30%, rgba(255,255,255,0.06), rgba(0,0,0,0) 60%),
+        radial-gradient(90vmax 80vmax at 20% 90%, rgba(168,120,255,0.06), rgba(0,0,0,0) 55%),
+        radial-gradient(90vmax 80vmax at 80% 90%, rgba(84,210,255,0.06), rgba(0,0,0,0) 55%),
+        radial-gradient(120vmax 100vmax at 50% 50%, rgba(0,0,0,0) 40%, rgba(0,0,0,0.55) 78%, rgba(0,0,0,0.85) 100%);
+      mix-blend-mode: screen;
+      opacity: 0.9;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="hint" id="hint">Hold your mouse still — a butterfly will land. Move to let it flutter away.</div>
+  <div class="vignette"></div>
+
+  <script>
+    (() => {
+      const canvas = document.getElementById('c');
+      const ctx = canvas.getContext('2d', { alpha: true });
+      const hint = document.getElementById('hint');
+
+      // DPR-aware sizing
+      let W = 0, H = 0, DPR = Math.max(1, Math.min(2.5, window.devicePixelRatio || 1));
+      function resize() {
+        DPR = Math.max(1, Math.min(2.5, window.devicePixelRatio || 1));
+        W = Math.floor(window.innerWidth);
+        H = Math.floor(window.innerHeight);
+        canvas.width = Math.floor(W * DPR);
+        canvas.height = Math.floor(H * DPR);
+        canvas.style.width = W + 'px';
+        canvas.style.height = H + 'px';
+        ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      }
+      window.addEventListener('resize', resize, { passive: true });
+      resize();
+
+      // Mouse tracking + stillness detection
+      const mouse = {
+        x: W * 0.5,
+        y: H * 0.55,
+        vx: 0,
+        vy: 0,
+        lastX: W * 0.5,
+        lastY: H * 0.55,
+        lastMoveAt: performance.now(),
+        still: false
+      };
+
+      function onMove(x, y) {
+        const now = performance.now();
+        mouse.vx = x - mouse.x;
+        mouse.vy = y - mouse.y;
+        mouse.lastX = mouse.x;
+        mouse.lastY = mouse.y;
+        mouse.x = x;
+        mouse.y = y;
+        mouse.lastMoveAt = now;
+        mouse.still = false;
+        hint.classList.add('fade');
+        // Any landed butterflies should take off.
+        butterflies.forEach(b => {
+          if (b.state === 'landed' || b.state === 'approach') {
+            b.state = 'flee';
+            b.fleeUntil = now + rand(700, 1200);
+            // Kick velocity away from cursor
+            const dx = b.x - mouse.x, dy = b.y - mouse.y;
+            const inv = 1 / Math.max(1e-3, Math.hypot(dx, dy));
+            b.vx += dx * inv * rand(2.2, 4.0);
+            b.vy += dy * inv * rand(2.2, 4.0);
+          }
+        });
+      }
+
+      window.addEventListener('mousemove', (e) => onMove(e.clientX, e.clientY), { passive: true });
+      window.addEventListener('touchstart', (e) => {
+        if (!e.touches || !e.touches[0]) return;
+        onMove(e.touches[0].clientX, e.touches[0].clientY);
+      }, { passive: true });
+      window.addEventListener('touchmove', (e) => {
+        if (!e.touches || !e.touches[0]) return;
+        onMove(e.touches[0].clientX, e.touches[0].clientY);
+      }, { passive: true });
+
+      // Helpers
+      const TAU = Math.PI * 2;
+      const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+      const lerp = (a, b, t) => a + (b - a) * t;
+      const rand = (a, b) => a + Math.random() * (b - a);
+      const randi = (a, b) => Math.floor(rand(a, b + 1));
+      const pick = (arr) => arr[(Math.random() * arr.length) | 0];
+
+      function hsla(h, s, l, a=1) { return `hsla(${h},${s}%,${l}%,${a})`; }
+      function wrapAngle(a) {
+        while (a > Math.PI) a -= TAU;
+        while (a < -Math.PI) a += TAU;
+        return a;
+      }
+
+      // Soft bokeh background particles (very subtle)
+      const bokeh = Array.from({ length: 26 }, () => ({
+        x: rand(0, W),
+        y: rand(0, H),
+        r: rand(20, 120),
+        a: rand(0.02, 0.07),
+        h: rand(160, 320),
+        vx: rand(-0.08, 0.08),
+        vy: rand(-0.06, 0.06),
+      }));
+
+      // Butterfly model
+      const palettes = [
+        // vivid but natural-leaning palettes
+        { baseH: [28, 58],  accentH: [190, 220] },  // monarch-ish + teal
+        { baseH: [300, 330], accentH: [35, 55] },   // magenta + amber
+        { baseH: [200, 235], accentH: [285, 315] }, // blue + violet
+        { baseH: [80, 135],  accentH: [20, 45] },   // green + orange
+        { baseH: [15, 40],   accentH: [340, 360] }, // warm + rose
+        { baseH: [240, 270], accentH: [160, 190] }, // indigo + aqua
+      ];
+
+      function makePatternSeed() {
+        return {
+          spots: randi(2, 6),
+          stripes: randi(0, 3),
+          vein: Math.random() < 0.65,
+          edge: Math.random() < 0.8,
+          sparkle: Math.random() < 0.35,
+          asym: rand(0.85, 1.15),
+        };
+      }
+
+      function makeButterfly() {
+        const pal = pick(palettes);
+        const baseHue = rand(pal.baseH[0], pal.baseH[1]);
+        const accHue  = rand(pal.accentH[0], pal.accentH[1]);
+        const scale = rand(0.65, 1.2);
+
+        const wing1 = {
+          h1: baseHue,
+          h2: accHue,
+          s1: rand(55, 85),
+          s2: rand(55, 90),
+          l1: rand(38, 58),
+          l2: rand(45, 66),
+        };
+
+        const wing2 = {
+          h1: baseHue + rand(-12, 12),
+          h2: accHue + rand(-18, 18),
+          s1: clamp(wing1.s1 + rand(-8, 8), 45, 95),
+          s2: clamp(wing1.s2 + rand(-8, 8), 45, 95),
+          l1: clamp(wing1.l1 + rand(-8, 8), 28, 70),
+          l2: clamp(wing1.l2 + rand(-8, 8), 30, 78),
+        };
+
+        const seed = makePatternSeed();
+
+        // Start somewhere random with gentle velocity
+        const x = rand(W * 0.1, W * 0.9);
+        const y = rand(H * 0.2, H * 0.85);
+        const a = rand(0, TAU);
+        const sp = rand(0.6, 1.8);
+
+        return {
+          x, y,
+          vx: Math.cos(a) * sp,
+          vy: Math.sin(a) * sp,
+          angle: a,
+          angV: rand(-0.02, 0.02),
+          scale,
+          wing1, wing2,
+          seed,
+          flapPhase: rand(0, TAU),
+          flapSpeed: rand(7.5, 12.0),
+          flapAmp: rand(0.55, 0.95),
+          hover: rand(0.6, 1.5),
+          state: 'fly', // fly | approach | landed | flee
+          landedAt: 0,
+          fleeUntil: 0,
+          wanderT: rand(0, 1000),
+          // subtle personality
+          shiver: rand(0.3, 1.0),
+          // preferred altitude range
+          bandY: rand(H * 0.25, H * 0.8),
+        };
+      }
+
+      const N = 18; // number of butterflies
+      const butterflies = Array.from({ length: N }, makeButterfly);
+
+      // Choose which butterfly should land when still
+      let lastLandAttemptAt = 0;
+
+      function pickBestToLand() {
+        // prefer a butterfly not already landed, not currently fleeing, and somewhat close
+        let best = null;
+        let bestScore = Infinity;
+        for (const b of butterflies) {
+          if (b.state === 'landed') continue;
+          if (b.state === 'flee') continue;
+          const dx = b.x - mouse.x;
+          const dy = b.y - mouse.y;
+          const d = Math.hypot(dx, dy);
+          // small bias for ones already heading toward mouse
+          const heading = Math.abs(wrapAngle(Math.atan2(mouse.y - b.y, mouse.x - b.x) - b.angle));
+          const score = d * (1 + heading * 0.15);
+          if (score < bestScore) { bestScore = score; best = b; }
+        }
+        return best;
+      }
+
+      // Drawing: butterfly in local space facing +X direction
+      function drawButterfly(b, t) {
+        const flap = Math.sin(b.flapPhase) * b.flapAmp;
+        const landed = (b.state === 'landed');
+        const flapFactor = landed ? 0.25 : 1.0;
+        const wingAngle = flap * flapFactor;
+
+        // A touch of vertical bob when flying
+        const bob = (!landed ? Math.sin(t * 0.002 * b.hover + b.wanderT) : 0) * 2.2;
+
+        // Shadow for depth
+        const shadowScale = b.scale * (landed ? 1.15 : 1.0);
+        const shadowAlpha = landed ? 0.22 : 0.12;
+        ctx.save();
+        ctx.translate(b.x, b.y + 10 + bob);
+        ctx.rotate(b.angle);
+        ctx.scale(shadowScale, shadowScale);
+        ctx.filter = 'blur(6px)';
+        ctx.globalAlpha = shadowAlpha;
+        ctx.fillStyle = 'rgba(0,0,0,1)';
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 18, 7, 0, 0, TAU);
+        ctx.fill();
+        ctx.restore();
+
+        ctx.save();
+        ctx.translate(b.x, b.y + bob);
+        ctx.rotate(b.angle);
+
+        // Slight tilt based on speed for realism
+        const speed = Math.hypot(b.vx, b.vy);
+        ctx.rotate(clamp(speed * 0.02, -0.25, 0.25));
+
+        ctx.scale(b.scale, b.scale);
+
+        // body
+        const bodyGrad = ctx.createLinearGradient(-8, -2, 10, 2);
+        bodyGrad.addColorStop(0, 'rgba(30,24,22,0.95)');
+        bodyGrad.addColorStop(1, 'rgba(8,10,14,0.9)');
+
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = bodyGrad;
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 7.5, 2.6, 0, 0, TAU);
+        ctx.fill();
+
+        // head
+        ctx.beginPath();
+        ctx.ellipse(8.5, 0, 2.2, 1.8, 0, 0, TAU);
+        ctx.fill();
+
+        // antennae
+        ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+        ctx.lineWidth = 0.9;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(9.2, -0.2);
+        ctx.quadraticCurveTo(14, -5.5, 18, -9.5);
+        ctx.moveTo(9.2, 0.2);
+        ctx.quadraticCurveTo(14, 5.5, 18, 9.5);
+        ctx.stroke();
+
+        // Wings
+        // We draw 4 lobes: upper/lower left and upper/lower right with slight asymmetry & patterns.
+        function wingGradient(wing, sign) {
+          const g = ctx.createRadialGradient(0, 0, 2, -10*sign, -8, 38);
+          g.addColorStop(0, hsla(wing.h2, wing.s2, wing.l2, 0.95));
+          g.addColorStop(0.55, hsla(wing.h1, wing.s1, wing.l1, 0.92));
+          g.addColorStop(1, 'rgba(0,0,0,0.15)');
+          return g;
+        }
+
+        function drawWingPair(sign, wing, wobble) {
+          ctx.save();
+          // flap around body center
+          ctx.rotate(sign * wingAngle);
+
+          const g = wingGradient(wing, sign);
+
+          // Outer wing silhouette (upper)
+          ctx.fillStyle = g;
+          ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+          ctx.lineWidth = 0.9;
+
+          // Upper wing
+          ctx.beginPath();
+          ctx.moveTo(0, 0);
+          ctx.bezierCurveTo(-10*sign, -20*wobble, -42*sign, -26*wobble, -60*sign, -8*wobble);
+          ctx.bezierCurveTo(-72*sign, 5*wobble, -58*sign, 24*wobble, -36*sign, 22*wobble);
+          ctx.bezierCurveTo(-18*sign, 20*wobble, -8*sign, 12*wobble, 0, 0);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+
+          // Lower wing
+          ctx.beginPath();
+          ctx.moveTo(0, 0);
+          ctx.bezierCurveTo(-8*sign, 10*wobble, -30*sign, 20*wobble, -46*sign, 34*wobble);
+          ctx.bezierCurveTo(-55*sign, 44*wobble, -42*sign, 56*wobble, -26*sign, 50*wobble);
+          ctx.bezierCurveTo(-10*sign, 44*wobble, -4*sign, 22*wobble, 0, 0);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+
+          // Patterns
+          const s = b.seed;
+          // edge
+          if (s.edge) {
+            ctx.globalAlpha = 0.22;
+            ctx.strokeStyle = hsla(wing.h2 + 10, 90, 80, 0.55);
+            ctx.lineWidth = 2.2;
+            ctx.beginPath();
+            ctx.moveTo(-60*sign, -8*wobble);
+            ctx.bezierCurveTo(-72*sign, 5*wobble, -58*sign, 24*wobble, -36*sign, 22*wobble);
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+          }
+
+          // veins
+          if (s.vein) {
+            ctx.globalAlpha = 0.18;
+            ctx.strokeStyle = 'rgba(0,0,0,0.9)';
+            ctx.lineWidth = 1.1;
+            for (let i=0;i<4;i++){
+              const yy = lerp(-10, 16, i/3) * wobble;
+              ctx.beginPath();
+              ctx.moveTo(-5*sign, yy);
+              ctx.quadraticCurveTo(-22*sign, yy-12*wobble, -44*sign, yy-6*wobble);
+              ctx.stroke();
+            }
+            ctx.globalAlpha = 1;
+          }
+
+          // stripes
+          if (s.stripes > 0) {
+            ctx.globalAlpha = 0.16;
+            ctx.strokeStyle = hsla(wing.h1 + 180, 40, 92, 0.75);
+            ctx.lineWidth = 1.6;
+            for (let i=0;i<s.stripes;i++){
+              const k = (i+1)/(s.stripes+1);
+              ctx.beginPath();
+              ctx.moveTo(-10*sign, -14*wobble + 28*wobble*k);
+              ctx.quadraticCurveTo(-26*sign, -22*wobble + 34*wobble*k, -50*sign, -10*wobble + 20*wobble*k);
+              ctx.stroke();
+            }
+            ctx.globalAlpha = 1;
+          }
+
+          // spots
+          ctx.globalAlpha = 0.18;
+          for (let i=0;i<s.spots;i++){
+            const rx = lerp(-14, -52, Math.random()) * sign;
+            const ry = lerp(-16, 48, Math.random()) * wobble;
+            const rr = rand(2.2, 5.4);
+            const spotHue = (Math.random() < 0.55 ? wing.h2 : wing.h1) + rand(-10, 10);
+            ctx.fillStyle = hsla(spotHue, rand(40,90), rand(70,92), 0.85);
+            ctx.beginPath();
+            ctx.ellipse(rx, ry, rr*1.05, rr, rand(-0.6,0.6), 0, TAU);
+            ctx.fill();
+
+            // tiny dark core
+            ctx.fillStyle = 'rgba(0,0,0,0.22)';
+            ctx.beginPath();
+            ctx.ellipse(rx + rand(-1,1), ry + rand(-1,1), rr*0.35, rr*0.28, 0, 0, TAU);
+            ctx.fill();
+          }
+          ctx.globalAlpha = 1;
+
+          // subtle iridescent highlight
+          ctx.globalAlpha = 0.10;
+          const hg = ctx.createLinearGradient(-55*sign, -18*wobble, -8*sign, 30*wobble);
+          hg.addColorStop(0, 'rgba(255,255,255,0)');
+          hg.addColorStop(0.5, 'rgba(255,255,255,0.65)');
+          hg.addColorStop(1, 'rgba(255,255,255,0)');
+          ctx.fillStyle = hg;
+          ctx.beginPath();
+          ctx.moveTo(-52*sign, -10*wobble);
+          ctx.bezierCurveTo(-56*sign, 8*wobble, -40*sign, 24*wobble, -20*sign, 16*wobble);
+          ctx.bezierCurveTo(-18*sign, 2*wobble, -26*sign, -8*wobble, -52*sign, -10*wobble);
+          ctx.closePath();
+          ctx.fill();
+          ctx.globalAlpha = 1;
+
+          // sparkle dust (rare)
+          if (s.sparkle) {
+            ctx.globalAlpha = 0.14;
+            ctx.fillStyle = 'rgba(255,255,255,0.9)';
+            for (let i=0;i<8;i++){
+              const px = lerp(-12, -54, Math.random()) * sign;
+              const py = lerp(-18, 50, Math.random()) * wobble;
+              ctx.beginPath();
+              ctx.arc(px, py, rand(0.6, 1.2), 0, TAU);
+              ctx.fill();
+            }
+            ctx.globalAlpha = 1;
+          }
+
+          ctx.restore();
+        }
+
+        // Back wings first for depth
+        ctx.globalAlpha = 0.92;
+        drawWingPair(-1, b.wing1, 1.0 * b.seed.asym);
+        drawWingPair(+1, b.wing2, 1.0 / b.seed.asym);
+
+        // Body line
+        ctx.globalAlpha = 0.22;
+        ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(-6, 0);
+        ctx.lineTo(7, 0);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+
+        ctx.restore();
+      }
+
+      // Background render
+      function drawBackground(t) {
+        // Deep gradient
+        const g = ctx.createLinearGradient(0, 0, 0, H);
+        g.addColorStop(0, 'rgba(10,12,20,1)');
+        g.addColorStop(0.45, 'rgba(6,8,14,1)');
+        g.addColorStop(1, 'rgba(2,3,7,1)');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+
+        // bokeh drift
+        ctx.save();
+        ctx.globalCompositeOperation = 'screen';
+        for (const p of bokeh) {
+          p.x += p.vx;
+          p.y += p.vy;
+          if (p.x < -p.r) p.x = W + p.r;
+          if (p.x > W + p.r) p.x = -p.r;
+          if (p.y < -p.r) p.y = H + p.r;
+          if (p.y > H + p.r) p.y = -p.r;
+
+          const gg = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r);
+          gg.addColorStop(0, hsla(p.h, 70, 70, p.a));
+          gg.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.fillStyle = gg;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r, 0, TAU);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+
+      // Simulation update
+      function updateButterfly(b, now, dt) {
+        // animate flapping
+        b.flapPhase += (b.flapSpeed * (dt / 1000)) * (b.state === 'landed' ? 0.35 : 1.0);
+
+        // Simple state machine
+        const stillFor = now - mouse.lastMoveAt;
+        const isStill = stillFor > 650 && Math.hypot(mouse.vx, mouse.vy) < 0.1;
+
+        // wander target (slowly changing)
+        b.wanderT += dt * 0.0012;
+
+        // Basic forces
+        let ax = 0, ay = 0;
+
+        // Keep in bounds with gentle steering
+        const margin = 80;
+        if (b.x < margin) ax += 0.05;
+        if (b.x > W - margin) ax -= 0.05;
+        if (b.y < margin) ay += 0.05;
+        if (b.y > H - margin) ay -= 0.05;
+
+        // Soft attract to its altitude band
+        ay += (b.bandY - b.y) * 0.0002;
+
+        if (b.state === 'fly') {
+          // Organic wandering using sin/cos fields
+          const s1 = Math.sin(b.wanderT * 1.2 + b.x * 0.004);
+          const s2 = Math.cos(b.wanderT * 1.1 + b.y * 0.004);
+          ax += s1 * 0.06;
+          ay += s2 * 0.06;
+
+          // Slight avoidance of cursor when moving
+          if (!isStill && stillFor < 200) {
+            const dx = b.x - mouse.x, dy = b.y - mouse.y;
+            const d = Math.hypot(dx, dy);
+            if (d < 140) {
+              const inv = 1 / Math.max(1e-3, d);
+              ax += dx * inv * 0.10;
+              ay += dy * inv * 0.10;
+            }
+          }
+        }
+
+        if (b.state === 'approach') {
+          // Steer toward cursor and slow down to "land"
+          const tx = mouse.x, ty = mouse.y;
+          const dx = tx - b.x, dy = ty - b.y;
+          const d = Math.hypot(dx, dy);
+          const inv = 1 / Math.max(1e-3, d);
+          ax += dx * inv * 0.16;
+          ay += dy * inv * 0.16;
+
+          // gentle braking as it closes in
+          b.vx *= (d < 70 ? 0.965 : 0.985);
+          b.vy *= (d < 70 ? 0.965 : 0.985);
+
+          if (d < 18) {
+            b.state = 'landed';
+            b.landedAt = now;
+            // settle exactly at cursor with tiny offset to avoid jitter
+            b.x = tx + rand(-3, 3);
+            b.y = ty + rand(-3, 3);
+            b.vx = 0; b.vy = 0;
+          }
+        }
+
+        if (b.state === 'landed') {
+          // Stay on cursor with micro jitter to feel alive
+          const settle = clamp((now - b.landedAt) / 350, 0, 1);
+          b.x = lerp(b.x, mouse.x + Math.sin(now * 0.006 * b.shiver) * 1.2, 0.08 * settle);
+          b.y = lerp(b.y, mouse.y + Math.cos(now * 0.005 * b.shiver) * 1.2, 0.08 * settle);
+          b.vx = 0; b.vy = 0;
+        }
+
+        if (b.state === 'flee') {
+          // Faster, more chaotic movement briefly
+          ax += rand(-0.08, 0.08);
+          ay += rand(-0.08, 0.08);
+          // After a moment, return to normal flight
+          if (now > b.fleeUntil) {
+            b.state = 'fly';
+          }
+        }
+
+        // Apply acceleration
+        b.vx += ax;
+        b.vy += ay;
+
+        // Speed limits per state
+        const maxSp = (b.state === 'flee') ? 4.6 : (b.state === 'approach') ? 3.2 : 2.6;
+        const sp = Math.hypot(b.vx, b.vy);
+        if (sp > maxSp) {
+          const k = maxSp / sp;
+          b.vx *= k; b.vy *= k;
+        }
+
+        // Integrate
+        if (b.state !== 'landed') {
+          b.x += b.vx * (dt / 16.67);
+          b.y += b.vy * (dt / 16.67);
+        }
+
+        // Orientation toward velocity (with smoothing)
+        const targetAng = (b.state === 'landed') ? 0 : Math.atan2(b.vy, b.vx);
+        const delta = wrapAngle(targetAng - b.angle);
+        b.angle += delta * (b.state === 'flee' ? 0.16 : 0.10);
+
+        // Subtle per-frame damping
+        if (b.state === 'fly') { b.vx *= 0.995; b.vy *= 0.995; }
+        if (b.state === 'flee') { b.vx *= 0.992; b.vy *= 0.992; }
+      }
+
+      // Main loop
+      let last = performance.now();
+      function frame(now) {
+        const dt = Math.min(34, now - last);
+        last = now;
+
+        // Determine stillness
+        const stillFor = now - mouse.lastMoveAt;
+        const isStill = stillFor > 650;
+
+        drawBackground(now);
+
+        // Try to initiate landing when mouse is still (rate-limited)
+        if (isStill && (now - lastLandAttemptAt) > 450) {
+          lastLandAttemptAt = now;
+          const candidate = pickBestToLand();
+          if (candidate) {
+            candidate.state = 'approach';
+          }
+        }
+
+        // Update + draw butterflies, with mild z-sorting by y for depth
+        const sorted = butterflies.slice().sort((a, b) => (a.y - b.y));
+        for (const b of sorted) {
+          updateButterfly(b, now, dt);
+          drawButterfly(b, now);
+        }
+
+        requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+    })();
+  </script>
+</body>
+</html>
+

@@ -1,0 +1,757 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Christmas Fireplace</title>
+  <style>
+    :root{
+      --bg0:#06060a;
+      --bg1:#0b0c14;
+      --brick0:#3a1d18;
+      --brick1:#24110e;
+      --mortar:rgba(255,255,255,.10);
+    }
+
+    *{ box-sizing:border-box; }
+    html,body{ height:100%; }
+    body{
+      margin:0;
+      overflow:hidden;
+      background:
+        radial-gradient(1100px 720px at 50% 70%, #161a26 0%, #0b0c14 40%, #04040a 72%, #000 100%);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      color:#f4f1ea;
+      cursor:none; /* nice for display screens */
+    }
+
+    /* vignette + subtle grain */
+    body::before{
+      content:"";
+      position:fixed; inset:-20%;
+      background:
+        radial-gradient(900px 520px at 50% 74%, rgba(255,135,75,.10) 0%, rgba(0,0,0,0) 58%),
+        radial-gradient(1000px 700px at 50% 18%, rgba(120,170,255,.06) 0%, rgba(0,0,0,0) 62%),
+        radial-gradient(closest-side at 50% 50%, rgba(0,0,0,0) 52%, rgba(0,0,0,.62) 100%);
+      pointer-events:none;
+    }
+    body::after{
+      content:"";
+      position:fixed; inset:0;
+      background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='.22'/%3E%3C/svg%3E");
+      background-size:240px 240px;
+      mix-blend-mode:soft-light;
+      opacity:.18;
+      pointer-events:none;
+    }
+
+    .stage{
+      position:fixed; inset:0;
+      display:grid;
+      place-items:center;
+      padding:min(5vw, 52px);
+    }
+
+    .fireplace{
+      width:min(1180px, 94vw);
+      aspect-ratio: 16/10;
+      max-height: 88vh;
+      position:relative;
+      border-radius: 34px;
+      filter: drop-shadow(0 22px 60px rgba(0,0,0,.55));
+    }
+
+    /* mantle */
+    .mantel{
+      position:absolute;
+      left: 7%;
+      right: 7%;
+      top: 7.5%;
+      height: 10%;
+      border-radius: 18px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.09), rgba(0,0,0,.22)),
+        linear-gradient(90deg, #1d1a17, #2a221c 42%, #1a1714);
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,.08),
+        inset 0 -12px 22px rgba(0,0,0,.35);
+    }
+
+    /* lights */
+    .lights{
+      position:absolute;
+      left: 9%;
+      right: 9%;
+      top: 5.8%;
+      height: 16%;
+      pointer-events:none;
+      opacity:.95;
+    }
+    .wire{
+      position:absolute; inset:0;
+      background:
+        radial-gradient(120% 60% at 50% 35%, rgba(0,0,0,0) 54%, rgba(0,0,0,.32) 55%, rgba(0,0,0,0) 56%);
+      opacity:.75;
+      filter: blur(.2px);
+    }
+    .bulb{
+      position:absolute;
+      width: 12px; height: 12px;
+      border-radius: 999px;
+      transform: translate(-50%, -50%);
+      background:
+        radial-gradient(circle at 30% 30%, rgba(255,255,255,.95), rgba(255,255,255,.35) 26%, rgba(255,255,255,0) 62%),
+        radial-gradient(circle at 50% 60%, rgba(255,220,120,.95), rgba(255,160,60,.15) 70%);
+      box-shadow: 0 0 20px rgba(255,190,90,.55), 0 0 44px rgba(255,140,60,.22);
+      filter:saturate(1.15);
+    }
+
+    /* bricks surround */
+    .surround{
+      position:absolute;
+      left: 5%;
+      right: 5%;
+      top: 16%;
+      bottom: 6%;
+      border-radius: 28px;
+      background:
+        radial-gradient(900px 520px at 50% 76%, rgba(255,120,70,.09), rgba(0,0,0,0) 60%),
+        radial-gradient(800px 520px at 50% 52%, rgba(0,0,0,.27), rgba(0,0,0,0) 62%),
+        linear-gradient(90deg, var(--mortar) 0 2px, transparent 2px 100%),
+        linear-gradient(180deg, var(--mortar) 0 2px, transparent 2px 100%),
+        linear-gradient(90deg, var(--brick0), var(--brick1));
+      background-size: 78px 44px, 78px 44px, 78px 44px, 78px 44px, 100% 100%;
+      box-shadow:
+        inset 0 0 0 2px rgba(255,255,255,.06),
+        inset 0 -30px 60px rgba(0,0,0,.48);
+      overflow:hidden;
+    }
+
+    /* opening */
+    .opening{
+      position:absolute;
+      left: 17%;
+      right: 17%;
+      top: 28%;
+      bottom: 16%;
+      border-radius: 22px;
+      background:
+        radial-gradient(1100px 800px at 50% 94%, rgba(255,120,70,.10), rgba(0,0,0,0) 55%),
+        linear-gradient(180deg, #07040a 0%, #040208 58%, #020104 100%);
+      box-shadow:
+        inset 0 0 0 2px rgba(255,255,255,.05),
+        inset 0 -70px 90px rgba(0,0,0,.70);
+      overflow:hidden;
+    }
+
+    /* glass reflection */
+    .opening::before{
+      content:"";
+      position:absolute; inset:0;
+      background:
+        linear-gradient(115deg, rgba(255,255,255,.10) 0%, rgba(255,255,255,0) 36%),
+        radial-gradient(820px 420px at 35% 18%, rgba(180,220,255,.09), rgba(0,0,0,0) 55%);
+      mix-blend-mode:screen;
+      opacity:.42;
+      pointer-events:none;
+    }
+
+    .floorGlow{
+      position:absolute;
+      left: 10%;
+      right: 10%;
+      bottom: -2%;
+      height: 24%;
+      background: radial-gradient(closest-side at 50% 40%, rgba(255,140,70,.18), rgba(0,0,0,0) 70%);
+      filter: blur(7px);
+      opacity:.9;
+      pointer-events:none;
+    }
+
+    canvas{
+      position:absolute;
+      inset:0;
+      width:100%;
+      height:100%;
+      display:block;
+    }
+
+    /* small hint (shows briefly on any interaction) */
+    .hint{
+      position:fixed;
+      left: 18px;
+      bottom: 14px;
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: rgba(0,0,0,.35);
+      backdrop-filter: blur(10px);
+      box-shadow: 0 10px 30px rgba(0,0,0,.35);
+      font-size: 12px;
+      letter-spacing: .2px;
+      opacity:0;
+      transform: translateY(6px);
+      transition: opacity .35s ease, transform .35s ease;
+      pointer-events:none;
+      color: rgba(255,255,255,.78);
+      user-select:none;
+    }
+    .hint strong{ color: rgba(255,255,255,.92); font-weight:600; }
+    .showHint .hint{ opacity:1; transform: translateY(0); }
+
+    @media (min-aspect-ratio: 19/10){
+      .fireplace{ width: min(1260px, 82vw); }
+    }
+  </style>
+</head>
+<body>
+  <div class="stage" id="stage">
+    <div class="fireplace" id="fp" aria-label="Animated Christmas fireplace">
+      <div class="lights" id="lights">
+        <div class="wire"></div>
+      </div>
+      <div class="mantel"></div>
+
+      <div class="surround">
+        <div class="opening" id="opening">
+          <canvas id="main"></canvas>
+          <div class="floorGlow"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="hint" id="hint">
+    <strong>Controls:</strong> F fullscreen · M mute crackle · Space pause · ↑/↓ flame
+  </div>
+
+<script>
+(() => {
+  // -------------------- DOM --------------------
+  const opening = document.getElementById('opening');
+  const canvas = document.getElementById('main');
+  const ctx = canvas.getContext('2d');
+
+  const lights = document.getElementById('lights');
+  const hint = document.getElementById('hint');
+
+  // -------------------- Bulbs --------------------
+  const bulbs = [];
+  const bulbCount = 22;
+  for (let i = 0; i < bulbCount; i++) {
+    const b = document.createElement('div');
+    b.className = 'bulb';
+    const t = i / (bulbCount - 1);
+    const x = 4 + t * 92;
+    const y = 34 + Math.sin(t * Math.PI) * 12 + (Math.random() * 5 - 2.5);
+    b.style.left = x + '%';
+    b.style.top = y + '%';
+    b.dataset.phase = (Math.random() * Math.PI * 2).toFixed(4);
+    b.dataset.speed = (0.7 + Math.random() * 1.0).toFixed(4);
+    b.dataset.hue = (Math.random() < 0.33 ? 45 : (Math.random() < 0.5 ? 140 : 210)).toFixed(0);
+    lights.appendChild(b);
+    bulbs.push(b);
+  }
+
+  // -------------------- Canvas sizing --------------------
+  function resize() {
+    const rect = opening.getBoundingClientRect();
+    const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    canvas.width = Math.floor(rect.width * dpr);
+    canvas.height = Math.floor(rect.height * dpr);
+    canvas._dpr = dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  window.addEventListener('resize', resize, { passive:true });
+  resize();
+
+  // -------------------- Fire simulation (Doom-ish) --------------------
+  // Low-res sim that we upscale smoothly for a realistic fireplace look.
+  const sim = {
+    w: 240,
+    h: 150,
+    buf: null,
+    img: null,
+    imgData: null,
+    palette: null,
+    intensity: 1.0,
+    paused: false
+  };
+
+  function makePalette() {
+    // 256-color palette: black -> deep red -> orange -> yellow -> near-white
+    const pal = new Array(256);
+    for (let i = 0; i < 256; i++) {
+      const t = i / 255;
+      // piecewise ramps
+      const r = Math.min(255, Math.floor(
+        255 * Math.pow(clamp((t - 0.02) / 0.98, 0, 1), 0.55)
+      ));
+      const g = Math.min(255, Math.floor(
+        255 * Math.pow(clamp((t - 0.22) / 0.78, 0, 1), 0.80)
+      ));
+      const b = Math.min(255, Math.floor(
+        255 * Math.pow(clamp((t - 0.60) / 0.40, 0, 1), 1.15)
+      ));
+      // Slightly warm whites
+      pal[i] = [r, Math.floor(g * 0.97), Math.floor(b * 0.90), 255];
+    }
+    return pal;
+  }
+
+  function initSim() {
+    sim.buf = new Uint8Array(sim.w * sim.h);
+    sim.palette = makePalette();
+    sim.img = document.createElement('canvas');
+    sim.img.width = sim.w;
+    sim.img.height = sim.h;
+    sim.imgData = sim.img.getContext('2d').createImageData(sim.w, sim.h);
+  }
+
+  function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
+  function lerp(a,b,t){ return a+(b-a)*t; }
+
+  initSim();
+
+  function seedBase() {
+    // Seed the bottom row with a shaped heat source (centered, log-width)
+    const y = sim.h - 1;
+    const cx = sim.w * 0.5;
+    const spread = sim.w * 0.22;
+    for (let x = 0; x < sim.w; x++) {
+      const dx = (x - cx) / spread;
+      const shape = Math.exp(-dx*dx);
+      const jitter = 0.85 + Math.random() * 0.35;
+      const v = Math.floor(255 * shape * jitter * sim.intensity);
+      sim.buf[y * sim.w + x] = v;
+    }
+  }
+
+  function stepFire() {
+    seedBase();
+    // Propagate upward with random decay + lateral drift
+    // Iterate from y=1 upward so it uses the row below as the source
+    for (let y = 1; y < sim.h; y++) {
+      const row = y * sim.w;
+      const below = (y + 1 < sim.h) ? (y + 1) * sim.w : row;
+
+      for (let x = 0; x < sim.w; x++) {
+        const src = below + x;
+        const rnd = (Math.random() * 4) | 0; // 0..3
+        const decay = rnd;                   // stronger decay near top naturally
+        const val = sim.buf[src];
+        let out = val - decay;
+        if (out < 0) out = 0;
+
+        // drift left/right
+        const shift = (rnd - 1); // -1..2
+        let dx = x + shift;
+        if (dx < 0) dx += sim.w;
+        if (dx >= sim.w) dx -= sim.w;
+
+        sim.buf[row + dx] = out;
+      }
+    }
+  }
+
+  function renderFireToImage() {
+    const data = sim.imgData.data;
+    // Add a gentle top fade to look like smoke/heat dissipation
+    for (let y = 0; y < sim.h; y++) {
+      const fade = 1 - Math.pow(y / sim.h, 2.2) * 0.65; // darker near top
+      for (let x = 0; x < sim.w; x++) {
+        const v = sim.buf[y * sim.w + x];
+        const p = sim.palette[v];
+        const i = (y * sim.w + x) * 4;
+
+        data[i+0] = (p[0] * fade) | 0;
+        data[i+1] = (p[1] * fade) | 0;
+        data[i+2] = (p[2] * fade) | 0;
+        data[i+3] = 255;
+      }
+    }
+    const ictx = sim.img.getContext('2d');
+    ictx.putImageData(sim.imgData, 0, 0);
+  }
+
+  // -------------------- Scene elements (logs, grate, embers, smoke) --------------------
+  const smoke = [];
+  function spawnSmoke(w,h){
+    const x = w*0.5 + (Math.random()-0.5)*w*0.22;
+    const y = h*0.55 + (Math.random()-0.5)*h*0.06;
+    smoke.push({
+      x, y,
+      r: 18 + Math.random()*32,
+      a: 0.04 + Math.random()*0.05,
+      vx: (Math.random()-0.5)*0.10,
+      vy: -(0.08 + Math.random()*0.20),
+      life: 0,
+      ttl: 180 + Math.random()*180
+    });
+  }
+
+  function drawLogs(w,h,t){
+    // ember bed shadow
+    ctx.save();
+    ctx.globalCompositeOperation = 'source-over';
+
+    const bedY = h*0.82;
+    const bed = ctx.createRadialGradient(w*0.5, bedY, 10, w*0.5, bedY, w*0.55);
+    bed.addColorStop(0, 'rgba(0,0,0,0)');
+    bed.addColorStop(1, 'rgba(0,0,0,.62)');
+    ctx.fillStyle = bed;
+    ctx.fillRect(0,0,w,h);
+
+    function roundRect(x,y,ww,hh,r){
+      const rr = Math.min(r, ww/2, hh/2);
+      ctx.beginPath();
+      ctx.moveTo(x+rr,y);
+      ctx.arcTo(x+ww,y,x+ww,y+hh,rr);
+      ctx.arcTo(x+ww,y+hh,x,y+hh,rr);
+      ctx.arcTo(x,y+hh,x,y,rr);
+      ctx.arcTo(x,y,x+ww,y,rr);
+      ctx.closePath();
+    }
+
+    function log(x, rot, scale){
+      ctx.save();
+      ctx.translate(x, bedY);
+      ctx.rotate(rot);
+      ctx.scale(scale, scale);
+
+      const rw = w*0.30;
+      const rh = h*0.10;
+
+      const g = ctx.createLinearGradient(-rw/2, -rh/2, rw/2, rh/2);
+      g.addColorStop(0, 'rgba(62,36,22,1)');
+      g.addColorStop(0.55, 'rgba(38,20,13,1)');
+      g.addColorStop(1, 'rgba(20,11,8,1)');
+      ctx.fillStyle = g;
+
+      roundRect(-rw/2, -rh/2, rw, rh, rh*0.50);
+      ctx.fill();
+
+      // bark striations
+      ctx.globalAlpha = 0.33;
+      ctx.strokeStyle = 'rgba(0,0,0,.62)';
+      ctx.lineWidth = 1.2;
+      for (let i=0;i<10;i++){
+        const yy = lerp(-rh*0.35, rh*0.35, i/9);
+        ctx.beginPath();
+        ctx.moveTo(-rw*0.42, yy + Math.sin(i*0.8+t*0.002)*2);
+        ctx.lineTo(rw*0.42, yy + Math.cos(i*0.9+t*0.002)*2);
+        ctx.stroke();
+      }
+
+      // ember glow on log top
+      ctx.globalAlpha = 0.95;
+      const glow = ctx.createRadialGradient(0, -rh*0.12, 2, 0, -rh*0.12, rw*0.55);
+      glow.addColorStop(0, 'rgba(255,160,90,.28)');
+      glow.addColorStop(0.45,'rgba(255,90,40,.16)');
+      glow.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = glow;
+      ctx.fillRect(-rw/2, -rh/2, rw, rh);
+
+      ctx.restore();
+    }
+
+    log(w*0.36, -0.08, 1.03);
+    log(w*0.64,  0.06, 0.98);
+    log(w*0.50,  0.00, 1.12);
+
+    // simple grate (subtle)
+    ctx.globalAlpha = 0.35;
+    ctx.strokeStyle = 'rgba(160,170,180,.55)';
+    ctx.lineWidth = 2;
+    const gy = h*0.86;
+    ctx.beginPath();
+    ctx.moveTo(w*0.22, gy);
+    ctx.lineTo(w*0.78, gy);
+    ctx.stroke();
+    for (let i=0;i<7;i++){
+      const xx = lerp(w*0.26, w*0.74, i/6);
+      ctx.beginPath();
+      ctx.moveTo(xx, gy);
+      ctx.lineTo(xx, gy - h*0.08);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
+  function drawEmbers(w,h,t){
+    // glowing ember bed in front
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const y = h*0.86;
+
+    // broad ember glow
+    ctx.globalAlpha = 0.55;
+    let g = ctx.createRadialGradient(w*0.5, y, 10, w*0.5, y, w*0.34);
+    g.addColorStop(0,'rgba(255,140,75,.18)');
+    g.addColorStop(0.45,'rgba(255,70,35,.10)');
+    g.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,w,h);
+
+    // small hot coals
+    ctx.globalAlpha = 0.9;
+    for (let i=0;i<24;i++){
+      const xx = w*0.5 + (Math.random()-0.5)*w*0.30;
+      const yy = y + (Math.random()-0.5)*h*0.03;
+      const r = 2 + Math.random()*5;
+      const a = 0.10 + Math.random()*0.20;
+      const gg = ctx.createRadialGradient(xx,yy,0,xx,yy,r*4);
+      gg.addColorStop(0,`rgba(255,190,120,${a})`);
+      gg.addColorStop(0.3,`rgba(255,120,70,${a*0.7})`);
+      gg.addColorStop(1,'rgba(0,0,0,0)');
+      ctx.fillStyle = gg;
+      ctx.beginPath(); ctx.arc(xx,yy,r*4,0,Math.PI*2); ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
+  function drawSmoke(w,h,dt){
+    // spawn rate tied to intensity; gentle
+    if (!sim.paused && Math.random() < 0.40 * sim.intensity) {
+      if (smoke.length < 80) spawnSmoke(w,h);
+    }
+    ctx.save();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.filter = 'blur(6px)';
+    for (let i = smoke.length - 1; i >= 0; i--) {
+      const s = smoke[i];
+      if (!sim.paused){
+        s.life += dt;
+        s.x += s.vx * dt;
+        s.y += s.vy * dt;
+      }
+      const age = s.life / s.ttl;
+      if (age >= 1 || s.y < -80) { smoke.splice(i,1); continue; }
+
+      const a = s.a * (1 - age);
+      ctx.globalAlpha = a;
+      const gr = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, s.r);
+      gr.addColorStop(0, 'rgba(120,140,160,.35)');
+      gr.addColorStop(0.5,'rgba(80,95,110,.18)');
+      gr.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = gr;
+      ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI*2); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // -------------------- Audio (optional) --------------------
+  let audio = null;
+  let muted = true;
+  function initAudio(){
+    if (audio) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    const a = new AC();
+
+    // Noise buffer
+    const seconds = 2.0;
+    const buf = a.createBuffer(1, a.sampleRate * seconds, a.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i=0;i<d.length;i++){
+      const w = Math.random()*2-1;
+      const w2 = Math.random()*2-1;
+      d[i] = (w + 0.6*w2) * 0.5;
+    }
+    const noise = a.createBufferSource();
+    noise.buffer = buf;
+    noise.loop = true;
+
+    const bp = a.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = 1200;
+    bp.Q.value = 0.7;
+
+    const lp = a.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 2600;
+    lp.Q.value = 0.7;
+
+    const bed = a.createGain();
+    bed.gain.value = 0.0;
+
+    const crack = a.createGain();
+    crack.gain.value = 0.0;
+
+    noise.connect(bp);
+    bp.connect(lp);
+    lp.connect(bed);
+    lp.connect(crack);
+
+    bed.connect(a.destination);
+    crack.connect(a.destination);
+
+    noise.start();
+
+    function schedule(){
+      if (!audio) return;
+      const now = a.currentTime;
+      bed.gain.setTargetAtTime(muted ? 0.0 : 0.010, now, 0.05);
+      if (!muted) {
+        const n = 2 + ((Math.random()*4)|0);
+        for (let i=0;i<n;i++){
+          const t = now + Math.random()*0.9;
+          const amp = 0.018 + Math.random()*0.05;
+          const dur = 0.02 + Math.random()*0.06;
+          crack.gain.setValueAtTime(0.0001, t);
+          crack.gain.linearRampToValueAtTime(amp, t + dur*0.25);
+          crack.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+        }
+      }
+      setTimeout(schedule, 420 + Math.random()*620);
+    }
+
+    audio = { a };
+    schedule();
+  }
+
+  function toggleMute(){
+    initAudio();
+    muted = !muted;
+    if (!muted && audio?.a?.state !== 'running') audio.a.resume?.();
+  }
+
+  // -------------------- Animation --------------------
+  let last = performance.now();
+
+  function showHint(){
+    document.body.classList.add('showHint');
+    clearTimeout(showHint._t);
+    showHint._t = setTimeout(() => document.body.classList.remove('showHint'), 1600);
+  }
+  window.addEventListener('pointerdown', () => { initAudio(); showHint(); }, { passive:true });
+  window.addEventListener('mousemove', showHint, { passive:true });
+
+  function render(now){
+    const dt = Math.max(8, Math.min(34, now - last));
+    last = now;
+
+    // Twinkle lights
+    for (const b of bulbs){
+      const phase = +b.dataset.phase;
+      const speed = +b.dataset.speed;
+      const hue = +b.dataset.hue;
+      const tw = 0.55 + 0.45*Math.sin(now*0.001*speed + phase) + (Math.random()*0.04 - 0.02);
+      const a = Math.max(0.18, Math.min(1.0, tw));
+      b.style.opacity = a.toFixed(3);
+      b.style.filter = `saturate(1.15) hue-rotate(${(hue-45)*0.55}deg)`;
+      b.style.boxShadow =
+        `0 0 ${lerp(10, 18, a)}px rgba(255,190,90,${0.22+0.35*a}),
+         0 0 ${lerp(22, 46, a)}px rgba(255,140,60,${0.08+0.22*a})`;
+    }
+
+    const dpr = canvas._dpr || 1;
+    const w = canvas.width / dpr;
+    const h = canvas.height / dpr;
+
+    // Background inside opening
+    ctx.clearRect(0,0,w,h);
+
+    // Warm light falloff on back wall
+    ctx.save();
+    const back = ctx.createRadialGradient(w*0.5, h*0.92, 30, w*0.5, h*0.92, w*0.75);
+    back.addColorStop(0, 'rgba(255,140,80,.08)');
+    back.addColorStop(0.5,'rgba(255,90,45,.04)');
+    back.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = back;
+    ctx.fillRect(0,0,w,h);
+    ctx.restore();
+
+    // Fire sim
+    if (!sim.paused){
+      // intensity gently breathes
+      sim.intensity = clamp(sim.intensity + (Math.sin(now*0.0012)*0.0008), 0.65, 1.25);
+      stepFire();
+    }
+    renderFireToImage();
+
+    // Draw fire: base (smooth upscale)
+    ctx.save();
+    ctx.imageSmoothingEnabled = true;
+
+    // Slightly squash to feel like it originates at logs
+    const fireX = w*0.12;
+    const fireY = h*0.18;
+    const fireW = w*0.76;
+    const fireH = h*0.86;
+
+    // Glow pass
+    ctx.globalCompositeOperation = 'screen';
+    ctx.globalAlpha = 0.50;
+    ctx.filter = 'blur(14px)';
+    ctx.drawImage(sim.img, fireX, fireY, fireW, fireH);
+
+    // Main flame pass
+    ctx.filter = 'blur(0px)';
+    ctx.globalAlpha = 0.96;
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.drawImage(sim.img, fireX, fireY, fireW, fireH);
+
+    // Tone it down a hair for realism
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 0.12;
+    ctx.fillStyle = 'rgba(0,0,0,1)';
+    ctx.fillRect(0,0,w,h);
+    ctx.restore();
+
+    // Logs & grate (sit in front of back glow but behind brightest tips)
+    drawLogs(w,h,now);
+
+    // Embers in front
+    drawEmbers(w,h,now);
+
+    // Smoke near top
+    drawSmoke(w,h,dt);
+
+    // Very subtle heat shimmer bands
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    ctx.globalAlpha = 0.06;
+    for (let i=0;i<7;i++){
+      const yy = h*(0.30 + i*0.06);
+      const x0 = w*0.18, x1 = w*0.82;
+      const amp = 10 + i*3;
+      const grad = ctx.createLinearGradient(x0, yy, x1, yy);
+      grad.addColorStop(0, 'rgba(255,150,90,0)');
+      grad.addColorStop(0.5,'rgba(255,150,90,.35)');
+      grad.addColorStop(1, 'rgba(255,150,90,0)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(x0 + Math.sin(now*0.0016 + i)*amp, yy, (x1-x0), 3);
+    }
+    ctx.restore();
+
+    requestAnimationFrame(render);
+  }
+  requestAnimationFrame(render);
+
+  // -------------------- Controls --------------------
+  async function toggleFullscreen(){
+    try{
+      if (!document.fullscreenElement) await document.documentElement.requestFullscreen();
+      else await document.exitFullscreen();
+    } catch {}
+  }
+
+  window.addEventListener('keydown', (e) => {
+    const k = e.key.toLowerCase();
+    if (k === 'f') toggleFullscreen();
+    if (k === 'm') toggleMute();
+    if (k === ' ') { e.preventDefault(); sim.paused = !sim.paused; }
+    if (k === 'arrowup') sim.intensity = clamp(sim.intensity + 0.08, 0.55, 1.45);
+    if (k === 'arrowdown') sim.intensity = clamp(sim.intensity - 0.08, 0.55, 1.45);
+    showHint();
+  });
+
+  // Brief hint on load
+  setTimeout(showHint, 350);
+})();
+</script>
+</body>
+</html>
+

@@ -1,0 +1,657 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Split-Flap Departures</title>
+  <style>
+    :root{
+      --bg:#07090d;
+      --board:#0b0f16;
+
+      --text:#f2c94c;          /* warm amber */
+      --radius:18px;
+
+      --char-w:22px;
+      --char-h:34px;
+      --gap:3px;
+      --row-h:56px;
+
+      --font: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    }
+
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0;
+      background:
+        radial-gradient(1200px 800px at 20% 10%, rgba(255,201,76,.08), transparent 55%),
+        radial-gradient(900px 600px at 80% 20%, rgba(90,156,255,.06), transparent 55%),
+        linear-gradient(180deg, #04060a 0%, #07090d 60%, #05070b 100%);
+      color:var(--text);
+      font-family:var(--font);
+      overflow:hidden;
+    }
+
+    .wrap{
+      height:100%;
+      display:grid;
+      place-items:center;
+      padding:28px;
+    }
+    .board{
+      width:min(1400px, 96vw);
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,0) 28%),
+        linear-gradient(180deg, #0b0f16, #070a10);
+      border-radius:var(--radius);
+      box-shadow:
+        0 30px 90px rgba(0,0,0,.65),
+        inset 0 1px 0 rgba(255,255,255,.08),
+        inset 0 -1px 0 rgba(0,0,0,.55);
+      border:1px solid rgba(255,255,255,.08);
+      overflow:hidden;
+      position:relative;
+    }
+
+    .topbar{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      padding:18px 22px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,0));
+      border-bottom:1px solid rgba(255,255,255,.10);
+    }
+    .brand{
+      display:flex;
+      gap:14px;
+      align-items:baseline;
+      letter-spacing:.12em;
+      text-transform:uppercase;
+    }
+    .brand .title{
+      font-size:18px;
+      font-weight:700;
+      color:rgba(255,255,255,.88);
+    }
+    .brand .subtitle{
+      font-size:12px;
+      color:rgba(255,255,255,.55);
+      letter-spacing:.18em;
+    }
+    .clock{
+      font-size:12px;
+      color:rgba(255,255,255,.65);
+      letter-spacing:.16em;
+      text-transform:uppercase;
+    }
+
+    .grid{
+      display:grid;
+      grid-auto-rows: var(--row-h);
+    }
+
+    .row{
+      display:grid;
+      grid-template-columns: 120px 140px 1fr 110px 200px;
+      align-items:center;
+      padding:0 16px;
+      border-bottom:1px solid rgba(255,255,255,.06);
+      background:
+        linear-gradient(90deg, rgba(255,255,255,.03), transparent 14%, transparent 86%, rgba(255,255,255,.03));
+    }
+    .row:nth-child(even){
+      background:
+        linear-gradient(90deg, rgba(255,255,255,.025), transparent 14%, transparent 86%, rgba(255,255,255,.025));
+    }
+
+    .header{
+      background: #0a0e15;
+      border-bottom:1px solid rgba(255,255,255,.12);
+    }
+    .header .label{
+      font-size:12px;
+      color:rgba(255,255,255,.65);
+      letter-spacing:.22em;
+      text-transform:uppercase;
+    }
+
+    .cell{
+      display:flex;
+      align-items:center;
+      height:100%;
+      padding:0 10px;
+      position:relative;
+    }
+    .cell + .cell{
+      border-left:1px solid rgba(255,255,255,.06);
+    }
+
+    .status-pill{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      font-size:12px;
+      letter-spacing:.12em;
+      text-transform:uppercase;
+      color:rgba(255,255,255,.75);
+    }
+    .dot{
+      width:8px;height:8px;border-radius:50%;
+      background:rgba(255,255,255,.35);
+      box-shadow:0 0 0 2px rgba(255,255,255,.08);
+    }
+    .dot.ok{background:#52ffa8; box-shadow:0 0 18px rgba(82,255,168,.25), 0 0 0 2px rgba(82,255,168,.14)}
+    .dot.warn{background:#ffd166; box-shadow:0 0 18px rgba(255,209,102,.22), 0 0 0 2px rgba(255,209,102,.12)}
+    .dot.bad{background:#ff5c7a; box-shadow:0 0 18px rgba(255,92,122,.20), 0 0 0 2px rgba(255,92,122,.12)}
+
+    /* Split-flap */
+    .flapline{
+      display:flex;
+      gap:var(--gap);
+      align-items:center;
+      filter: drop-shadow(0 8px 12px rgba(0,0,0,.35));
+    }
+
+    .flap{
+      width:var(--char-w);
+      height:var(--char-h);
+      position:relative;
+      perspective:900px;
+    }
+
+    .plate{
+      position:absolute; inset:0;
+      border-radius:6px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.06) 0%, rgba(255,255,255,0) 18%),
+        linear-gradient(180deg, #0e1420, #070a10 60%);
+      border:1px solid rgba(255,255,255,.07);
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,.05),
+        inset 0 -10px 18px rgba(0,0,0,.35);
+      overflow:hidden;
+      z-index:1;
+    }
+
+    .plate::after{
+      content:"";
+      position:absolute; left:0; right:0; top:50%;
+      height:1px;
+      background:rgba(255,255,255,.10);
+      box-shadow:0 1px 0 rgba(0,0,0,.45);
+      z-index:4;
+      pointer-events:none;
+    }
+
+    .panel{
+      position:absolute;
+      inset:0;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      font-weight:700;
+      font-size:20px;
+      line-height:1;                 /* prevents metric drift */
+      color:var(--text);
+      text-shadow:0 0 22px rgba(242,201,76,.08);
+      user-select:none;
+      backface-visibility:hidden;
+      transform-style:preserve-3d;
+      z-index:2;
+    }
+
+    /* Avoid overlap at seam (slight offset) */
+    .top    { clip-path: inset(0 0 calc(50% + 0.6px) 0); }
+    .bottom { clip-path: inset(calc(50% - 0.6px) 0 0 0); }
+
+    .flip{
+      z-index:3;
+      opacity:0;
+      will-change:transform;
+    }
+    .flap.animating .flip{ opacity:1; }
+
+    .flip-top{
+      transform-origin:50% 100%;
+      transform: rotateX(0deg);
+      filter:brightness(1);
+    }
+    .flip-bottom{
+      transform-origin:50% 0%;
+      transform: rotateX(90deg);
+      filter:brightness(.9);
+    }
+
+    /* Subtle scanline */
+    .board::before{
+      content:"";
+      position:absolute;
+      inset:-2px;
+      background: repeating-linear-gradient(
+        180deg,
+        rgba(255,255,255,.015),
+        rgba(255,255,255,.015) 1px,
+        rgba(0,0,0,0) 3px,
+        rgba(0,0,0,0) 6px
+      );
+      opacity:.08;
+      pointer-events:none;
+      mix-blend-mode:overlay;
+    }
+
+    .hint{
+      margin-top:12px;
+      font-size:11px;
+      color:rgba(255,255,255,.45);
+      letter-spacing:.14em;
+      text-transform:uppercase;
+      text-align:center;
+      user-select:none;
+    }
+    .kbd{
+      display:inline-block;
+      padding:2px 6px;
+      border:1px solid rgba(255,255,255,.18);
+      border-bottom-color: rgba(255,255,255,.08);
+      border-radius:6px;
+      background: rgba(255,255,255,.06);
+      color:rgba(255,255,255,.7);
+      letter-spacing:.18em;
+      margin:0 4px;
+    }
+
+    @media (max-width: 980px){
+      :root{ --char-w:20px; --char-h:32px; --row-h:52px; }
+      .row{ grid-template-columns: 110px 130px 1fr 90px 170px; }
+    }
+    @media (max-width: 780px){
+      :root{ --char-w:18px; --char-h:30px; --row-h:50px; }
+      .row{ grid-template-columns: 98px 120px 1fr 82px 150px; }
+      .topbar{ padding:14px 16px; }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <div class="board" id="board">
+      <div class="topbar">
+        <div class="brand">
+          <div class="title">Departures</div>
+          <div class="subtitle">Terminal A • Gate Info</div>
+        </div>
+        <div class="clock" id="clock">—</div>
+      </div>
+
+      <div class="grid" id="grid">
+        <div class="row header">
+          <div class="cell"><div class="label">Time</div></div>
+          <div class="cell"><div class="label">Flight</div></div>
+          <div class="cell"><div class="label">Destination</div></div>
+          <div class="cell"><div class="label">Gate</div></div>
+          <div class="cell"><div class="label">Status</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="hint">
+      Press <span class="kbd">F</span> to toggle fullscreen • <span class="kbd">Space</span> to pause/resume
+    </div>
+  </div>
+
+  <script>
+    // --- Configuration ---
+    const ROWS = 16;
+
+    const DEST_COL_WIDTH = 18;
+    const FLIGHT_COL_WIDTH = 6;
+    const TIME_COL_WIDTH = 5;
+    const GATE_COL_WIDTH = 4;
+
+    // Slow/airport-like per-row cadence
+    const ROW_UPDATE_MIN_MS = 8000;
+    const ROW_UPDATE_MAX_MS = 18000;
+
+    const CHARSET = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-'";
+
+    // 100+ destinations (real + funny)
+    const DESTINATIONS = [
+      "NEW YORK", "LONDON", "PARIS", "TOKYO", "SYDNEY", "SINGAPORE", "DUBAI", "HONG KONG", "SEOUL", "BERLIN",
+      "MUNICH", "FRANKFURT", "HAMBURG", "ZURICH", "GENEVA", "VIENNA", "PRAGUE", "WARSAW", "BUDAPEST", "ATHENS",
+      "ROME", "MILAN", "VENICE", "MADRID", "BARCELONA", "LISBON", "DUBLIN", "EDINBURGH", "OSLO", "STOCKHOLM",
+      "COPENHAGEN", "HELSINKI", "REYKJAVIK", "AMSTERDAM", "BRUSSELS", "LUXEMBOURG", "ISTANBUL", "ANKARA", "TEL AVIV", "CAIRO",
+      "MARRAKECH", "CASABLANCA", "TUNIS", "NAIROBI", "ADDIS ABABA", "JOHANNESBURG", "CAPE TOWN", "LAGOS", "ACCRA", "DAKAR",
+      "MEXICO CITY", "CANCUN", "HAVANA", "BOGOTA", "LIMA", "SANTIAGO", "BUENOS AIRES", "RIO DE JANEIRO", "SAO PAULO", "CARACAS",
+      "LOS ANGELES", "SAN FRANCISCO", "SEATTLE", "CHICAGO", "BOSTON", "WASHINGTON DC", "MIAMI", "ATLANTA", "DALLAS", "DENVER",
+      "VANCOUVER", "TORONTO", "MONTREAL", "CALGARY", "OTTAWA", "ANCHORAGE", "HONOLULU", "AUCKLAND", "WELLINGTON", "PERTH",
+      "MELBOURNE", "BRISBANE", "ADELAIDE", "MANILA", "BANGKOK", "HANOI", "HO CHI MINH", "KUALA LUMPUR", "JAKARTA", "BALI",
+      "NEW DELHI", "MUMBAI", "BENGALURU", "KATHMANDU", "COLOMBO", "MALE", "DOHA", "ABU DHABI", "RIYADH", "JEDDAH",
+      "MOSCOW", "ST PETERSBURG", "TBILISI", "YEREVAN", "BAKU", "ALMATY", "TASHKENT", "ULAANBAATAR", "BEIJING", "SHANGHAI",
+      "GUANGZHOU", "SHENZHEN", "TAIPEI", "OSAKA", "SAPPORO", "NAGOYA", "FUKUOKA", "BUSAN", "JEJU", "PHNOM PENH",
+
+      "MORDOR", "NAP TIME", "ATLANTIS", "HOGWARTS", "GOTHAM CITY", "WAKANDA", "KRYPTON", "METROPOLIS", "BIKINI BOTTOM", "SPRINGFIELD",
+      "RIVENDELL", "THE SHIRE", "NARNIA", "ELYSIUM", "ASGARD", "MIDGARD", "PANDORA", "ARRAKIS", "TRANTOR", "GALLIFREY",
+      "RACCOON CITY", "SILENT HILL", "TWIN PEAKS", "URSA MINOR", "MOON BASE", "MARS COLONY", "SATURN RINGS", "PLUTO (MAYBE)", "THE VOID", "OUTER RIM",
+      "DEEP SPACE 9", "CLOUD CITY", "HOTH", "ENDOR", "TATOOINE", "ALDERAAN", "HYPERSPACE", "THE UPSIDE DOWN", "AREA 51", "LOST & FOUND",
+      "THE BACKROOMS", "THE METAVERSE", "INTERNET CAFE", "CACHE MISS", "NULL ISLAND", "404 NOT FOUND", "BLUE SCREEN", "LOW BATTERY", "PASSWORD RESET",
+      "COFFEE RUN", "SECOND BREAKFAST", "SIESTA CITY", "BRUNCHTON", "MONDAY AGAIN", "FRIDAY EVE", "WEATHER DELAY", "LAUNDRY DAY",
+      "DRAGON'S LAIR", "WIZARD COUNCIL", "PIRATE COVE", "HAUNTED MANSN", "TIME LOOP", "TACO PLANET", "FREE WIFI", "MEETING ROOM B",
+      "CONF CALL", "BOSS FIGHT", "SIDE QUEST", "MAIN QUEST", "DLC ISLAND", "PATCH NOTES", "PROCRASTINATN", "DOOMSCROLLING",
+      "TOUCH GRASS", "VIBE CHECK", "MIC MUTED", "UNMUTE PLEASE", "SUDDEN UPDATES", "YOUR HOUSE", "MY HOUSE", "NEVERLAND",
+      "WONDERLAND", "UNDERLAND", "OVERTHERE", "NOT HERE", "SECRET TUNNEL", "TARDIS BAY", "HIDDEN LEVEL", "CAT HQ",
+      "DOG PARK", "UNICORN RANCH", "TRAIN STATION", "DELAYED AGAIN", "GATE CHANGED", "RUN FASTER", "BOARDING SOON", "SNACK TIME"
+    ];
+
+    const AIRLINES = ["LH","BA","AF","KL","UA","DL","AA","EK","QR","SQ","CX","JL","NH","IB","AZ","SK","DY","TK","AC","QF"];
+    const STATUSES = [
+      {text:"BOARDING",  dot:"ok"},
+      {text:"ON TIME",   dot:"ok"},
+      {text:"LAST CALL", dot:"warn"},
+      {text:"GATE CHG",  dot:"warn"},
+      {text:"DELAYED",   dot:"warn"},
+      {text:"CANCELLED", dot:"bad"},
+      {text:"WAITING",   dot:"warn"},
+      {text:"DEPARTED",  dot:"ok"}
+    ];
+
+    // --- Helpers ---
+    const clampToCharset = (s) => {
+      s = (s || "").toUpperCase();
+      let out = "";
+      for (const ch of s) out += CHARSET.includes(ch) ? ch : " ";
+      return out;
+    };
+    const fit = (s, width) => {
+      s = clampToCharset(s);
+      if (s.length > width) return s.slice(0, width);
+      return s.padEnd(width, " ");
+    };
+    const rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+    const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
+    function formatTime(d){
+      const hh = String(d.getHours()).padStart(2,"0");
+      const mm = String(d.getMinutes()).padStart(2,"0");
+      return `${hh}:${mm}`;
+    }
+    function randomFlight(){
+      const a = pick(AIRLINES);
+      const num = String(rand(20, 899)).padStart(3,"0");
+      return fit(`${a}${num}`, FLIGHT_COL_WIDTH);
+    }
+    function randomGate(){
+      const letters = "ABCDEFGHJK";
+      const g = `${letters[rand(0, letters.length-1)]}${rand(1, 36)}`;
+      return fit(g, GATE_COL_WIDTH);
+    }
+    function nextDepartureTime(baseMinutes){
+      const now = new Date();
+      const d = new Date(now.getTime() + baseMinutes * 60000);
+      return fit(formatTime(d), TIME_COL_WIDTH);
+    }
+
+    // --- Split-flap component (canonical 4-surface model) ---
+    function createFlapChar(initialChar=" "){
+      const flap = document.createElement("div");
+      flap.className = "flap";
+      flap.dataset.current = initialChar;
+
+      const plate = document.createElement("div");
+      plate.className = "plate";
+
+      const upperStatic = document.createElement("div");
+      upperStatic.className = "panel top";
+      upperStatic.textContent = initialChar;
+
+      const lowerStatic = document.createElement("div");
+      lowerStatic.className = "panel bottom";
+      lowerStatic.textContent = initialChar;
+
+      const flipTop = document.createElement("div");
+      flipTop.className = "panel top flip flip-top";
+      flipTop.textContent = initialChar;
+
+      const flipBottom = document.createElement("div");
+      flipBottom.className = "panel bottom flip flip-bottom";
+      flipBottom.textContent = initialChar;
+
+      flap.appendChild(plate);
+      flap.appendChild(upperStatic);
+      flap.appendChild(lowerStatic);
+      flap.appendChild(flipTop);
+      flap.appendChild(flipBottom);
+
+      flap._parts = { upperStatic, lowerStatic, flipTop, flipBottom };
+      flap._animating = false;
+      return flap;
+    }
+
+    function createFlapLine(width, initialText=""){
+      const line = document.createElement("div");
+      line.className = "flapline";
+      const chars = [];
+      const text = fit(initialText, width);
+
+      for(let i=0;i<width;i++){
+        const c = text[i] || " ";
+        const flap = createFlapChar(c);
+        chars.push(flap);
+        line.appendChild(flap);
+      }
+
+      line._chars = chars;
+      line._width = width;
+      line._text = text;
+      return line;
+    }
+
+    function setFlapLine(line, newText){
+      const next = fit(newText, line._width);
+      const chars = line._chars;
+
+      for(let i=0;i<line._width;i++){
+        const target = next[i];
+        const flap = chars[i];
+        const current = flap.dataset.current || " ";
+        if(current === target) continue;
+        flipTo(flap, target);
+      }
+      line._text = next;
+    }
+
+    function flipTo(flap, nextChar){
+      if(flap._animating) return;
+      flap._animating = true;
+
+      const { upperStatic, lowerStatic, flipTop, flipBottom } = flap._parts;
+      const current = flap.dataset.current || " ";
+
+      // Canonical setup:
+      // - Upper static shows NEXT (hidden under top flip)
+      // - Lower static shows CURRENT (until top flip completes)
+      // - Top flip shows CURRENT, bottom flip shows NEXT
+      upperStatic.textContent = nextChar;
+      lowerStatic.textContent = current;
+      flipTop.textContent = current;
+      flipBottom.textContent = nextChar;
+
+      // reset transforms (in case)
+      flipTop.style.transform = "rotateX(0deg)";
+      flipBottom.style.transform = "rotateX(90deg)";
+
+      flap.classList.add("animating");
+
+      const topAnim = flipTop.animate(
+        [{ transform: "rotateX(0deg)", filter: "brightness(1)" },
+         { transform: "rotateX(-90deg)", filter: "brightness(.82)" }],
+        { duration: 240, easing: "ease-in", fill: "forwards" }
+      );
+
+      topAnim.onfinish = () => {
+        // Now reveal NEXT in the lower half underneath the bottom flip
+        lowerStatic.textContent = nextChar;
+
+        const bottomAnim = flipBottom.animate(
+          [{ transform: "rotateX(90deg)", filter: "brightness(.9)" },
+           { transform: "rotateX(0deg)",  filter: "brightness(1)" }],
+          { duration: 240, easing: "ease-out", fill: "forwards" }
+        );
+
+        bottomAnim.onfinish = () => {
+          // Settle to NEXT on both halves
+          upperStatic.textContent = nextChar;
+          lowerStatic.textContent = nextChar;
+
+          // Reset flip panels and hide them
+          flipTop.style.transform = "rotateX(0deg)";
+          flipBottom.style.transform = "rotateX(90deg)";
+
+          flap.dataset.current = nextChar;
+          flap.classList.remove("animating");
+          flap._animating = false;
+        };
+      };
+    }
+
+    // --- Build board ---
+    const grid = document.getElementById("grid");
+    const rows = [];
+
+    function createRow(i){
+      const row = document.createElement("div");
+      row.className = "row";
+
+      const timeCell = document.createElement("div");
+      timeCell.className = "cell";
+      const timeLine = createFlapLine(TIME_COL_WIDTH, nextDepartureTime(8 + i*3));
+      timeCell.appendChild(timeLine);
+
+      const flightCell = document.createElement("div");
+      flightCell.className = "cell";
+      const flightLine = createFlapLine(FLIGHT_COL_WIDTH, randomFlight());
+      flightCell.appendChild(flightLine);
+
+      const destCell = document.createElement("div");
+      destCell.className = "cell";
+      const destLine = createFlapLine(DEST_COL_WIDTH, pick(DESTINATIONS));
+      destCell.appendChild(destLine);
+
+      const gateCell = document.createElement("div");
+      gateCell.className = "cell";
+      const gateLine = createFlapLine(GATE_COL_WIDTH, randomGate());
+      gateCell.appendChild(gateLine);
+
+      const statusCell = document.createElement("div");
+      statusCell.className = "cell";
+      const status = pick(STATUSES);
+      statusCell.innerHTML = `
+        <div class="status-pill">
+          <span class="dot ${status.dot}"></span>
+          <span class="txt">${status.text}</span>
+        </div>
+      `;
+
+      row.appendChild(timeCell);
+      row.appendChild(flightCell);
+      row.appendChild(destCell);
+      row.appendChild(gateCell);
+      row.appendChild(statusCell);
+
+      return {
+        el: row,
+        timeLine,
+        flightLine,
+        destLine,
+        gateLine,
+        statusCell,
+        baseMinutes: 8 + i*3,
+        destIndex: Math.floor(Math.random() * DESTINATIONS.length),
+        timer: null
+      };
+    }
+
+    for(let i=0;i<ROWS;i++){
+      const r = createRow(i);
+      rows.push(r);
+      grid.appendChild(r.el);
+    }
+
+    // --- Clock ---
+    const clock = document.getElementById("clock");
+    function tickClock(){
+      const d = new Date();
+      const days = ["SUN","MON","TUE","WED","THU","FRI","SAT"];
+      const months = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+      clock.textContent = `${days[d.getDay()]} ${String(d.getDate()).padStart(2,"0")} ${months[d.getMonth()]} ${d.getFullYear()} • ${formatTime(d)}`;
+    }
+    tickClock();
+    setInterval(tickClock, 1000);
+
+    // --- Realistic update scheduling ---
+    let paused = false;
+
+    function updateRow(r){
+      r.destIndex = (r.destIndex + 1 + rand(0,2)) % DESTINATIONS.length;
+      setFlapLine(r.destLine, DESTINATIONS[r.destIndex]);
+
+      if(Math.random() < 0.14) setFlapLine(r.flightLine, randomFlight());
+      if(Math.random() < 0.10) setFlapLine(r.gateLine, randomGate());
+
+      r.baseMinutes = Math.min(240, r.baseMinutes + (Math.random() < 0.35 ? 1 : 0));
+      setFlapLine(r.timeLine, nextDepartureTime(r.baseMinutes));
+
+      if(Math.random() < 0.18){
+        const s = pick(STATUSES);
+        const dot = r.statusCell.querySelector(".dot");
+        const txt = r.statusCell.querySelector(".txt");
+        dot.className = `dot ${s.dot}`;
+        txt.textContent = s.text;
+      }
+    }
+
+    function scheduleRow(r, initialDelayMs){
+      const delay = initialDelayMs ?? rand(600, 2400);
+      clearTimeout(r.timer);
+      r.timer = setTimeout(function loop(){
+        if(!paused) updateRow(r);
+        clearTimeout(r.timer);
+        r.timer = setTimeout(loop, rand(ROW_UPDATE_MIN_MS, ROW_UPDATE_MAX_MS));
+      }, delay);
+    }
+
+    for(let i=0;i<rows.length;i++){
+      scheduleRow(rows[i], i * 220);
+    }
+
+    // Gentle intro cascade
+    setTimeout(() => {
+      for(let i=0;i<rows.length;i++){
+        setTimeout(() => { if(!paused) updateRow(rows[i]); }, i * 120);
+      }
+    }, 1200);
+
+    // --- Controls ---
+    document.addEventListener("keydown", (e) => {
+      if(e.code === "Space"){
+        e.preventDefault();
+        paused = !paused;
+      }
+      if(e.key.toLowerCase() === "f"){
+        toggleFullscreen();
+      }
+    });
+
+    function toggleFullscreen(){
+      const el = document.documentElement;
+      if(!document.fullscreenElement){
+        el.requestFullscreen?.();
+      }else{
+        document.exitFullscreen?.();
+      }
+    }
+  </script>
+</body>
+</html>
+

@@ -1,0 +1,620 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Snow Globe</title>
+  <style>
+    :root{
+      --bg1:#07121f;
+      --bg2:#0b1f33;
+      --bg3:#0a1726;
+      --glow:#9fd6ff;
+      --base1:#2a1a12;
+      --base2:#4a2a1c;
+      --base3:#6a3a24;
+      --text:#d8f1ff;
+    }
+    html,body{height:100%;margin:0;background:#000;overflow:hidden;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;}
+    body{
+      background:
+        radial-gradient(1200px 800px at 30% 20%, rgba(120,190,255,.14), transparent 60%),
+        radial-gradient(900px 700px at 80% 35%, rgba(160,255,220,.10), transparent 60%),
+        radial-gradient(1000px 900px at 55% 75%, rgba(255,255,255,.06), transparent 55%),
+        linear-gradient(160deg, var(--bg1), var(--bg2) 55%, var(--bg3));
+    }
+    canvas{display:block;width:100vw;height:100vh;}
+    .hud{
+      position:fixed;left:24px;bottom:20px;
+      color:rgba(216,241,255,.85);
+      font-size:16px;letter-spacing:.2px;
+      background:rgba(8,18,30,.28);
+      border:1px solid rgba(170,225,255,.18);
+      padding:12px 14px;border-radius:14px;
+      backdrop-filter: blur(8px);
+      box-shadow: 0 18px 45px rgba(0,0,0,.35);
+      user-select:none;
+    }
+    .hud b{color:#fff;}
+    .hud .sub{opacity:.75;font-size:13px;margin-top:4px}
+    .hint{
+      position:fixed;right:22px;top:18px;
+      color:rgba(216,241,255,.65);
+      font-size:13px;
+      text-shadow: 0 2px 10px rgba(0,0,0,.45);
+      user-select:none;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="hud">
+    <div><b>Spacebar</b> to shake the snow globe</div>
+    <div class="sub">Tip: click/tap also shakes • scene rotates slowly</div>
+  </div>
+  <div class="hint" id="hint"></div>
+
+<script>
+(() => {
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d", { alpha: true });
+
+  // High DPI
+  let W=0,H=0,DPR=1;
+  function resize(){
+    DPR = Math.min(2, window.devicePixelRatio || 1);
+    W = Math.floor(innerWidth);
+    H = Math.floor(innerHeight);
+    canvas.width  = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + "px";
+    canvas.style.height = H + "px";
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+  }
+  addEventListener("resize", resize, {passive:true});
+  resize();
+
+  // Geometry
+  function globeGeom(){
+    const cx = W*0.5;
+    const cy = H*0.48;
+    const r  = Math.min(W,H)*0.30;
+    const baseH = r*0.42;
+    return {cx,cy,r,baseH};
+  }
+
+  // Particles (snow)
+  class Snow {
+    constructor(){ this.reset(true); }
+    reset(initial=false){
+      const g = globeGeom();
+      const rr = g.r * (0.10 + Math.random()*0.88);
+      const a  = Math.random()*Math.PI*2;
+      this.x = g.cx + Math.cos(a)*rr;
+      this.y = g.cy + Math.sin(a)*rr;
+      const sp = initial ? (0.02 + Math.random()*0.08) : (0.04 + Math.random()*0.12);
+      const av = Math.random()*Math.PI*2;
+      this.vx = Math.cos(av)*sp;
+      this.vy = Math.sin(av)*sp;
+      this.size = 0.6 + Math.random()*1.8;
+      this.tw   = Math.random()*Math.PI*2;
+      this.alpha = 0.25 + Math.random()*0.75;
+    }
+  }
+
+  let snow = [];
+  function seedSnow(){
+    const g = globeGeom();
+    const area = Math.PI*g.r*g.r;
+    const count = Math.round(Math.min(900, Math.max(320, area/850)));
+    snow = Array.from({length: count}, () => new Snow());
+  }
+  seedSnow();
+
+  // Scene rotation (now a gentle "turntable" yaw, not tumbling)
+  let sceneAngle = 0;
+  const ROTATE_SCENE = false;
+
+  // Shake impulse
+  let swirl = 0;
+  let swirlSpin = 0;
+  let shakeFlash = 0;
+
+  function shake(){
+    swirl = Math.min(1, swirl + 0.95);
+    swirlSpin = (Math.random() < 0.5 ? -1 : 1) * (0.9 + Math.random()*1.4);
+    shakeFlash = 1;
+
+    const g = globeGeom();
+    for (const p of snow){
+      const dx = p.x - g.cx;
+      const dy = p.y - g.cy;
+      const dist = Math.max(1e-3, Math.hypot(dx,dy));
+      const tx = -dy / dist;
+      const ty =  dx / dist;
+      const k  = (0.35 + Math.random()*0.85);
+      p.vx += tx * k * swirlSpin;
+      p.vy += ty * k * swirlSpin;
+      p.vx += (Math.random()-0.5)*0.35;
+      p.vy += (Math.random()-0.5)*0.35;
+    }
+  }
+
+  addEventListener("keydown", (e) => {
+    if (e.code === "Space") { e.preventDefault(); shake(); }
+  }, {passive:false});
+  addEventListener("pointerdown", () => shake(), {passive:true});
+
+  // Helpers
+  function circlePath(x,y,r){
+    ctx.beginPath();
+    ctx.arc(x,y,r,0,Math.PI*2);
+  }
+  function softVignette(){
+    const grd = ctx.createRadialGradient(W*0.5,H*0.52, Math.min(W,H)*0.08, W*0.5,H*0.52, Math.min(W,H)*0.70);
+    grd.addColorStop(0, "rgba(0,0,0,0)");
+    grd.addColorStop(1, "rgba(0,0,0,0.55)");
+    ctx.fillStyle = grd;
+    ctx.fillRect(0,0,W,H);
+  }
+
+  function drawBase(g){
+    const baseTopY = g.cy + g.r*0.88;
+    const baseY    = baseTopY;
+    const baseW    = g.r*2.15;
+    const baseH    = g.baseH;
+
+    ctx.save();
+    const sh = ctx.createRadialGradient(g.cx, baseTopY+baseH*0.65, g.r*0.2, g.cx, baseTopY+baseH*0.65, g.r*1.15);
+    sh.addColorStop(0, "rgba(0,0,0,0.35)");
+    sh.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = sh;
+    ctx.beginPath();
+    ctx.ellipse(g.cx, baseTopY+baseH*0.68, baseW*0.42, baseH*0.55, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+
+    const x = g.cx - baseW/2;
+    const y = baseY;
+    const rr = Math.min(26, baseH*0.30);
+
+    ctx.save();
+    const wood = ctx.createLinearGradient(0,y,0,y+baseH);
+    wood.addColorStop(0,  "#6a3a24");
+    wood.addColorStop(0.45,"#4a2a1c");
+    wood.addColorStop(1,  "#2a1a12");
+    ctx.fillStyle = wood;
+
+    ctx.beginPath();
+    ctx.moveTo(x+rr,y);
+    ctx.arcTo(x+baseW,y, x+baseW,y+baseH, rr);
+    ctx.arcTo(x+baseW,y+baseH, x,y+baseH, rr);
+    ctx.arcTo(x,y+baseH, x,y, rr);
+    ctx.arcTo(x,y, x+baseW,y, rr);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.globalAlpha = 0.22;
+    ctx.fillStyle = "rgba(255,255,255,0.20)";
+    for(let i=0;i<10;i++){
+      const sx = x + (i/10)*baseW;
+      ctx.fillRect(sx, y+baseH*0.10, 1.2, baseH*0.80);
+    }
+
+    ctx.globalAlpha = 1;
+    const hi = ctx.createLinearGradient(x,0,x+baseW,0);
+    hi.addColorStop(0, "rgba(255,255,255,0)");
+    hi.addColorStop(0.35,"rgba(255,255,255,0.14)");
+    hi.addColorStop(0.65,"rgba(255,255,255,0.06)");
+    hi.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = hi;
+    ctx.fillRect(x, y+baseH*0.16, baseW, baseH*0.22);
+
+    const lip = ctx.createLinearGradient(0,y,0,y+baseH*0.25);
+    lip.addColorStop(0,"rgba(255,255,255,0.22)");
+    lip.addColorStop(1,"rgba(255,255,255,0)");
+    ctx.fillStyle = lip;
+    ctx.fillRect(x, y, baseW, baseH*0.22);
+
+    ctx.strokeStyle = "rgba(255,255,255,0.08)";
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // --- Tiny scene drawing (now rotates as a "turntable" around vertical axis, i.e., no tumbling) ---
+  function drawScene(g){
+  const floorY = g.cy + g.r*0.52;
+
+  // snow floor (static base)
+  const floorGrad = ctx.createLinearGradient(0, floorY - g.r*0.22, 0, g.cy + g.r);
+  floorGrad.addColorStop(0, "rgba(255,255,255,0.90)");
+  floorGrad.addColorStop(1, "rgba(210,240,255,0.75)");
+  ctx.fillStyle = floorGrad;
+  ctx.beginPath();
+  ctx.ellipse(g.cx, floorY, g.r*0.82, g.r*0.34, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // distant haze
+  const haze = ctx.createRadialGradient(g.cx, g.cy - g.r*0.35, g.r*0.05, g.cx, g.cy - g.r*0.35, g.r*0.95);
+  haze.addColorStop(0, "rgba(220,245,255,0.30)");
+  haze.addColorStop(1, "rgba(220,245,255,0.00)");
+  ctx.fillStyle = haze;
+  ctx.fillRect(g.cx-g.r, g.cy-g.r, g.r*2, g.r*2);
+
+  // hill mound (static, symmetric)
+  ctx.save();
+  ctx.translate(g.cx, floorY);
+  ctx.fillStyle = "rgba(245,252,255,0.95)";
+  ctx.beginPath();
+  ctx.ellipse(0, 0, g.r*0.52, g.r*0.18, 0, 0, Math.PI*2);
+  ctx.fill();
+  ctx.restore();
+
+  // --- helpers to draw upright sprites at origin ---
+  function drawTreeSprite(){
+    ctx.fillStyle = "rgba(92,60,40,0.85)";
+    ctx.beginPath();
+    ctx.roundRect(-4, -6, 8, 18, 3);
+    ctx.fill();
+
+    const g1 = ctx.createLinearGradient(0,-34,0,14);
+    g1.addColorStop(0, "rgba(135,220,190,0.95)");
+    g1.addColorStop(1, "rgba(40,120,100,0.95)");
+    ctx.fillStyle = g1;
+
+    ctx.beginPath(); ctx.moveTo(0,-44); ctx.lineTo(-26,-10); ctx.lineTo(26,-10); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(0,-32); ctx.lineTo(-22,-2);  ctx.lineTo(22,-2);  ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(0,-22); ctx.lineTo(-18, 6);  ctx.lineTo(18, 6);  ctx.closePath(); ctx.fill();
+
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    ctx.beginPath(); ctx.moveTo(0,-44); ctx.lineTo(-12,-26); ctx.lineTo(12,-26); ctx.closePath(); ctx.fill();
+  }
+
+  function drawCabinSprite(){
+    const houseW = 58, houseH = 34;
+
+    const wallGrad = ctx.createLinearGradient(-houseW/2,0, houseW/2,0);
+    wallGrad.addColorStop(0,"rgba(255,220,190,0.90)");
+    wallGrad.addColorStop(1,"rgba(220,160,130,0.90)");
+    ctx.fillStyle = wallGrad;
+    ctx.beginPath();
+    ctx.roundRect(-houseW/2, -houseH, houseW, houseH, 8);
+    ctx.fill();
+
+    const roofGrad = ctx.createLinearGradient(0,-houseH-30,0,-houseH+10);
+    roofGrad.addColorStop(0,"rgba(130,70,60,0.95)");
+    roofGrad.addColorStop(1,"rgba(80,35,35,0.95)");
+    ctx.fillStyle = roofGrad;
+    ctx.beginPath();
+    ctx.moveTo(-houseW/2-6, -houseH);
+    ctx.lineTo(0, -houseH-32);
+    ctx.lineTo(houseW/2+6, -houseH);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = "rgba(255,255,255,0.78)";
+    ctx.beginPath();
+    ctx.moveTo(-houseW/2-2, -houseH);
+    ctx.quadraticCurveTo(0, -houseH-22, houseW/2+2, -houseH);
+    ctx.quadraticCurveTo(0, -houseH-10, -houseW/2-2, -houseH);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = "rgba(255,235,165,0.9)";
+    ctx.beginPath();
+    ctx.roundRect(-18, -26, 16, 14, 4);
+    ctx.roundRect(6,  -26, 16, 14, 4);
+    ctx.fill();
+
+    ctx.fillStyle = "rgba(85,55,45,0.9)";
+    ctx.beginPath();
+    ctx.roundRect(-6, -20, 12, 20, 5);
+    ctx.fill();
+
+    ctx.fillStyle = "rgba(90,55,55,0.95)";
+    ctx.beginPath();
+    ctx.roundRect(16, -houseH-22, 10, 14, 3);
+    ctx.fill();
+
+    ctx.globalAlpha = 0.26;
+    ctx.strokeStyle = "rgba(210,245,255,0.9)";
+    ctx.lineWidth = 2.2;
+    ctx.beginPath();
+    ctx.moveTo(21, -houseH-22);
+    ctx.bezierCurveTo(33, -houseH-36, 10, -houseH-50, 26, -houseH-64);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  function drawSnowmanSprite(){
+    ctx.fillStyle = "rgba(255,255,255,0.95)";
+    ctx.beginPath();
+    ctx.arc(0, -8, 12, 0, Math.PI*2);
+    ctx.arc(0, -26, 9,  0, Math.PI*2);
+    ctx.fill();
+
+    ctx.strokeStyle = "rgba(255,110,90,0.9)";
+    ctx.lineWidth = 4.5;
+    ctx.beginPath();
+    ctx.arc(0,-26, 8, 0.2, Math.PI-0.2);
+    ctx.stroke();
+
+    ctx.fillStyle = "rgba(25,35,45,0.8)";
+    for(let i=0;i<3;i++){
+      ctx.beginPath();
+      ctx.arc(0, -8 + i*8, 1.5, 0, Math.PI*2);
+      ctx.fill();
+    }
+
+    ctx.fillStyle = "rgba(255,160,80,0.95)";
+    ctx.beginPath();
+    ctx.moveTo(4,-26);
+    ctx.lineTo(16,-22);
+    ctx.lineTo(4,-20);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Draw positions in a rotating frame, but counter-rotate each sprite so it stays upright.
+  function placeUpright(x, y, s, spriteFn){
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(-sceneAngle);  // keep sprite upright while its position orbits
+    ctx.scale(s, s);
+    spriteFn();
+    ctx.restore();
+  }
+
+  // Now the “scene” rotates around Z (screen-normal)
+  ctx.save();
+  ctx.translate(g.cx, floorY);
+  ctx.rotate(sceneAngle);
+
+  // positions relative to the (rotating) scene origin
+  placeUpright(-g.r*0.28, -8, 1.00, drawTreeSprite);
+  placeUpright( g.r*0.12, -4, 0.95, drawTreeSprite);
+  placeUpright( g.r*0.30, -10, 0.85, drawTreeSprite);
+  placeUpright(-g.r*0.05, -12, 0.78, drawTreeSprite);
+
+  placeUpright( g.r*0.02, -8, 0.92, drawCabinSprite);
+  placeUpright(-g.r*0.22, -4, 0.90, drawSnowmanSprite);
+
+  ctx.restore();
+
+  // settled flakes on floor
+  ctx.globalAlpha = 0.22;
+  ctx.fillStyle = "rgba(255,255,255,0.9)";
+  for(let i=0;i<40;i++){
+    const x = g.cx + (Math.random()-0.5)*g.r*1.2;
+    const y = floorY + (Math.random()-0.5)*g.r*0.22;
+    const s = 0.6 + Math.random()*1.8;
+    ctx.beginPath();
+    ctx.arc(x,y,s,0,Math.PI*2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+  function drawGlass(g){
+    ctx.save();
+    ctx.lineWidth = 2.0;
+    ctx.strokeStyle = "rgba(255,255,255,0.16)";
+    circlePath(g.cx,g.cy,g.r);
+    ctx.stroke();
+
+    const glow = ctx.createRadialGradient(g.cx-g.r*0.18, g.cy-g.r*0.28, g.r*0.05, g.cx, g.cy, g.r*1.15);
+    glow.addColorStop(0, "rgba(190,245,255,0.20)");
+    glow.addColorStop(0.45,"rgba(120,200,255,0.06)");
+    glow.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = glow;
+    circlePath(g.cx,g.cy,g.r);
+    ctx.fill();
+
+    ctx.globalAlpha = 0.85;
+    ctx.strokeStyle = "rgba(255,255,255,0.26)";
+    ctx.lineWidth = g.r*0.08;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.arc(g.cx - g.r*0.20, g.cy - g.r*0.10, g.r*0.74, -1.05, 0.08);
+    ctx.stroke();
+
+    const spot = ctx.createRadialGradient(g.cx - g.r*0.32, g.cy - g.r*0.42, 0, g.cx - g.r*0.32, g.cy - g.r*0.42, g.r*0.42);
+    spot.addColorStop(0,"rgba(255,255,255,0.26)");
+    spot.addColorStop(1,"rgba(255,255,255,0)");
+    ctx.fillStyle = spot;
+    circlePath(g.cx,g.cy,g.r);
+    ctx.fill();
+
+    ctx.globalAlpha = 0.55;
+    const band = ctx.createLinearGradient(0, g.cy+g.r*0.35, 0, g.cy+g.r);
+    band.addColorStop(0,"rgba(255,255,255,0)");
+    band.addColorStop(0.5,"rgba(210,245,255,0.11)");
+    band.addColorStop(1,"rgba(255,255,255,0)");
+    ctx.fillStyle = band;
+    circlePath(g.cx,g.cy,g.r);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  function updateSnow(g, dt){
+    const gravity = 0.22;
+    const drag    = 0.995;
+    const swirlDecay = 0.55;
+    swirl = Math.max(0, swirl - swirlDecay*dt);
+    shakeFlash = Math.max(0, shakeFlash - 2.8*dt);
+
+    const swirlStrength = swirl*1.9;
+    const cx=g.cx, cy=g.cy;
+
+    for (const p of snow){
+      p.tw += dt * (1.0 + Math.random()*0.6);
+
+      const dx = p.x - cx;
+      const dy = p.y - cy;
+      const dist = Math.max(6, Math.hypot(dx,dy));
+      const tx = -dy / dist;
+      const ty =  dx / dist;
+
+      const topBias = Math.max(0, (cy - p.y) / (g.r));
+      const field = swirlStrength * (0.6 + 1.2*topBias);
+
+      p.vx += tx * field * swirlSpin * dt * 2.2;
+      p.vy += ty * field * swirlSpin * dt * 2.2;
+
+      p.vx += (Math.sin(p.tw)*0.08) * dt;
+      p.vy += gravity * dt;
+
+      p.vx *= Math.pow(drag, dt*60);
+      p.vy *= Math.pow(drag, dt*60);
+
+      p.x += p.vx * 60 * dt;
+      p.y += p.vy * 60 * dt;
+
+      const rIn = g.r*0.93;
+      const ddx = p.x - cx;
+      const ddy = p.y - cy;
+      const d = Math.hypot(ddx,ddy);
+      if (d > rIn){
+        const nx = ddx / d;
+        const ny = ddy / d;
+        p.x = cx + nx * rIn;
+        p.y = cy + ny * rIn;
+
+        const vn = p.vx*nx + p.vy*ny;
+        p.vx -= 1.65*vn*nx;
+        p.vy -= 1.65*vn*ny;
+
+        const bottom = (p.y > cy + g.r*0.35);
+        const damp = bottom ? 0.60 : 0.82;
+        p.vx *= damp;
+        p.vy *= damp;
+
+        if (bottom && Math.abs(p.vy) < 0.06 && Math.random() < 0.02){
+          p.vy -= 0.25*Math.random();
+          p.vx += (Math.random()-0.5)*0.15;
+        }
+      }
+
+      if (Math.random() < 0.00035){
+        p.reset(false);
+      }
+    }
+  }
+
+  function drawSnow(g){
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    for (const p of snow){
+      const tw = 0.75 + 0.25*Math.sin(p.tw*2.4);
+      const a = p.alpha * (0.35 + 0.65*tw);
+      ctx.globalAlpha = a;
+
+      ctx.fillStyle = "rgba(210,245,255,0.75)";
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size*1.8, 0, Math.PI*2);
+      ctx.fill();
+
+      ctx.globalAlpha = a*0.85;
+      ctx.fillStyle = "rgba(255,255,255,0.95)";
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size*0.9, 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.restore();
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+  }
+
+  // Render loop
+  let last = performance.now();
+  function frame(t){
+    const dt = Math.min(0.033, (t-last)/1000);
+    last = t;
+
+    const g = globeGeom();
+
+    // This is now a gentle "turntable" rotation. If you want it stationary, set the next line to:
+    // sceneAngle += 0;
+    if (ROTATE_SCENE) sceneAngle += dt * 0.18;
+
+    ctx.clearRect(0,0,W,H);
+
+    const back = ctx.createRadialGradient(g.cx, g.cy, g.r*0.10, g.cx, g.cy, g.r*1.45);
+    back.addColorStop(0, "rgba(160,225,255,0.11)");
+    back.addColorStop(0.55,"rgba(80,160,255,0.05)");
+    back.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = back;
+    ctx.fillRect(0,0,W,H);
+
+    ctx.save();
+    circlePath(g.cx,g.cy,g.r*0.93);
+    ctx.clip();
+
+    const sky = ctx.createLinearGradient(0, g.cy-g.r, 0, g.cy+g.r);
+    sky.addColorStop(0, "rgba(170,230,255,0.22)");
+    sky.addColorStop(0.5,"rgba(160,210,255,0.08)");
+    sky.addColorStop(1, "rgba(255,255,255,0.00)");
+    ctx.fillStyle = sky;
+    ctx.fillRect(g.cx-g.r, g.cy-g.r, g.r*2, g.r*2);
+
+    drawScene(g);
+    updateSnow(g, dt);
+    drawSnow(g);
+
+    const vin = ctx.createRadialGradient(g.cx, g.cy, g.r*0.30, g.cx, g.cy, g.r*1.02);
+    vin.addColorStop(0, "rgba(0,0,0,0)");
+    vin.addColorStop(1, "rgba(0,0,0,0.20)");
+    ctx.fillStyle = vin;
+    ctx.fillRect(g.cx-g.r, g.cy-g.r, g.r*2, g.r*2);
+
+    if (shakeFlash > 0){
+      ctx.globalAlpha = 0.12 * shakeFlash;
+      ctx.fillStyle = "rgba(200,245,255,0.9)";
+      ctx.fillRect(g.cx-g.r, g.cy-g.r, g.r*2, g.r*2);
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.restore();
+
+    drawBase(g);
+    drawGlass(g);
+    softVignette();
+
+    const hint = document.getElementById("hint");
+    if (swirl > 0.15) {
+      hint.textContent = "❄️ swirling…";
+      hint.style.opacity = "0.9";
+    } else {
+      hint.textContent = "";
+      hint.style.opacity = "0";
+    }
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // Burn-in-friendly HUD fade
+  const hud = document.querySelector(".hud");
+  let hudTimer = 0;
+  function bumpHUD(){
+    hudTimer = 6.0;
+    hud.style.opacity = "1";
+  }
+  bumpHUD();
+  addEventListener("pointerdown", bumpHUD, {passive:true});
+  addEventListener("keydown", bumpHUD, {passive:true});
+  (function hudLoop(){
+    const dt = 0.1;
+    hudTimer = Math.max(0, hudTimer - dt);
+    const target = hudTimer > 0 ? 1 : 0.12;
+    const cur = parseFloat(getComputedStyle(hud).opacity || "1");
+    hud.style.opacity = (cur + (target-cur)*0.08).toFixed(3);
+    setTimeout(hudLoop, 100);
+  })();
+})();
+</script>
+</body>
+</html>
+

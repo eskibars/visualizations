@@ -1,0 +1,1726 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Starship Engineering Terminal</title>
+  <style>
+    :root{
+      --bg0:#05070a;
+      --bg1:#070b12;
+      --panel:#0b1220cc;
+      --panel2:#0b1220aa;
+      --line:#2aa9ff33;
+      --line2:#88e0ff22;
+
+      --cyan:#7fe9ff;
+      --cyan2:#2fd0ff;
+      --mint:#6dffcc;
+      --amber:#ffcf6d;
+      --red:#ff4d6d;
+      --violet:#b08cff;
+
+      --text:#cfefff;
+      --muted:#86b6d4;
+
+      --glow: 0 0 18px #2fd0ff22, 0 0 42px #2fd0ff12;
+      --radius: 18px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
+      --sans: system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", sans-serif;
+    }
+
+    *{box-sizing:border-box}
+    html,body{height:100%;margin:0;background:radial-gradient(1200px 800px at 30% 20%, #0a1324 0%, var(--bg0) 60%, #020307 100%); color:var(--text); overflow:hidden}
+    body{font-family:var(--sans)}
+
+    /* Background starfield canvas */
+    #bg {
+      position:fixed; inset:0; z-index:0;
+      filter: contrast(1.05) saturate(1.05);
+    }
+
+    /* Subtle screen artifacts */
+    .screenFx{
+      position:fixed; inset:0; z-index:3; pointer-events:none;
+      background:
+        linear-gradient(to bottom, #ffffff08, transparent 10%, transparent 90%, #ffffff05),
+        repeating-linear-gradient(to bottom, #00000000 0px, #00000000 2px, #0000001c 3px);
+      mix-blend-mode: screen;
+      opacity: .55;
+    }
+    .vignette{
+      position:fixed; inset:-10%; z-index:4; pointer-events:none;
+      background: radial-gradient(ellipse at center, transparent 0%, transparent 55%, #00000088 85%, #000000cc 100%);
+    }
+    .noise{
+      position:fixed; inset:0; z-index:5; pointer-events:none;
+      opacity:.08;
+      background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='.35'/%3E%3C/svg%3E");
+      background-size: 220px 220px;
+      mix-blend-mode: overlay;
+    }
+
+    /* Layout container */
+    .wrap{
+      position:relative; z-index:2;
+      height:100%;
+      padding:24px;
+      display:grid;
+      grid-template-columns: 1.15fr .95fr .95fr;
+      grid-template-rows: auto 1fr 1fr auto;
+      gap:18px;
+    }
+
+    .topbar{
+      grid-column: 1 / -1;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      padding:14px 18px;
+      border-radius: var(--radius);
+      background: linear-gradient(180deg, #0c1a2b99, #071222aa);
+      box-shadow: var(--glow);
+      border: 1px solid var(--line);
+      backdrop-filter: blur(10px);
+    }
+
+    .brand{
+      display:flex; gap:14px; align-items:baseline;
+    }
+    .brand h1{
+      margin:0;
+      font-size:16px;
+      letter-spacing:.18em;
+      text-transform:uppercase;
+      font-weight:700;
+      color:var(--cyan);
+      text-shadow: 0 0 14px #2fd0ff2a;
+    }
+    .brand .sub{
+      font-family:var(--mono);
+      font-size:12px;
+      color:var(--muted);
+      opacity:.95;
+    }
+
+    .top-meta{
+      display:flex; gap:18px; align-items:center;
+      font-family:var(--mono);
+      font-size:12px;
+      color:var(--muted);
+    }
+    .pill{
+      padding:8px 12px;
+      border-radius: 999px;
+      border:1px solid var(--line2);
+      background: #061021aa;
+      box-shadow: 0 0 22px #2fd0ff10;
+      display:flex; gap:10px; align-items:center;
+    }
+    .dot{
+      width:8px;height:8px;border-radius:50%;
+      background:var(--mint);
+      box-shadow:0 0 10px #6dffcc66;
+    }
+    .dot.warn{background:var(--amber); box-shadow:0 0 10px #ffcf6d66;}
+    .dot.alarm{background:var(--red); box-shadow:0 0 10px #ff4d6d66;}
+
+    /* Panels */
+    .panel{
+      border-radius: var(--radius);
+      background: linear-gradient(180deg, #0a1526bb, #060c18cc);
+      border: 1px solid var(--line);
+      box-shadow: var(--glow);
+      backdrop-filter: blur(10px);
+      position:relative;
+      overflow:hidden;
+    }
+    .panel::before{
+      content:"";
+      position:absolute; inset:0;
+      background:
+        radial-gradient(800px 200px at 20% 0%, #2fd0ff12, transparent 60%),
+        radial-gradient(700px 200px at 80% 100%, #b08cff10, transparent 55%),
+        linear-gradient(90deg, transparent, #ffffff06, transparent);
+      opacity:.8;
+      pointer-events:none;
+    }
+
+    .panelHead{
+      display:flex; align-items:flex-end; justify-content:space-between;
+      padding:14px 16px 10px;
+      border-bottom:1px solid var(--line2);
+      position:relative;
+      z-index:1;
+    }
+    .title{
+      font-size:12px;
+      letter-spacing:.18em;
+      text-transform:uppercase;
+      margin:0;
+      color:#bfeaff;
+      opacity:.95;
+    }
+    .subtitle{
+      font-family:var(--mono);
+      font-size:11px;
+      color:var(--muted);
+      opacity:.95;
+    }
+    .panelBody{
+      padding:14px 16px 16px;
+      position:relative; z-index:1;
+    }
+
+    /* Grid placement */
+    #warp { grid-column: 1; grid-row: 2 / span 2; }
+    #power{ grid-column: 2; grid-row: 2; }
+    #react{ grid-column: 3; grid-row: 2; }
+    #env  { grid-column: 2; grid-row: 3; }
+    #nav  { grid-column: 3; grid-row: 3; }
+    #log  { grid-column: 1 / -1; grid-row: 4; }
+
+    /* Warp gauge */
+    .warpGrid{
+      display:grid;
+      grid-template-columns: 1.1fr .9fr;
+      gap:14px;
+      align-items:stretch;
+    }
+    .gaugeWrap{
+      background: #051026aa;
+      border:1px solid var(--line2);
+      border-radius: 16px;
+      padding:12px;
+      position:relative;
+      overflow:hidden;
+    }
+    .gaugeWrap::after{
+      content:"";
+      position:absolute; inset:0;
+      background: radial-gradient(500px 180px at 50% 0%, #2fd0ff14, transparent 60%);
+      pointer-events:none;
+    }
+    svg{display:block}
+    .warpReadout{
+      display:grid;
+      grid-template-columns: 1fr;
+      gap:10px;
+    }
+    .bigNumber{
+      background:#051026aa;
+      border:1px solid var(--line2);
+      border-radius:16px;
+      padding:14px 14px 12px;
+      box-shadow: inset 0 0 0 1px #ffffff06;
+    }
+    .bigNumber .label{
+      font-family:var(--mono);
+      letter-spacing:.16em;
+      text-transform:uppercase;
+      font-size:11px;
+      color:var(--muted);
+      margin-bottom:8px;
+    }
+    .bigNumber .value{
+      font-family:var(--mono);
+      font-size:38px;
+      line-height:1;
+      letter-spacing:.06em;
+      color:var(--cyan);
+      text-shadow:0 0 18px #2fd0ff22;
+      display:flex; align-items:baseline; gap:10px;
+    }
+    .bigNumber .value small{
+      font-size:13px;
+      color:#a9d8f2;
+      opacity:.9;
+    }
+    .kv{
+      display:grid;
+      grid-template-columns: 1fr auto;
+      gap:10px 12px;
+      align-items:center;
+      padding:12px 14px;
+      border-radius:16px;
+      border:1px solid var(--line2);
+      background:#051026aa;
+      font-family:var(--mono);
+      font-size:12px;
+      color:var(--muted);
+    }
+    .kv b{color:#d7f4ff; font-weight:600}
+    .kv .ok{color:var(--mint)}
+    .kv .warn{color:var(--amber)}
+    .kv .bad{color:var(--red)}
+
+    /* Bars */
+    .barRow{
+      display:grid;
+      grid-template-columns: 1fr 1.6fr auto;
+      gap:10px;
+      align-items:center;
+      margin:10px 0;
+      font-family:var(--mono);
+      font-size:12px;
+      color:var(--muted);
+    }
+    .barRow .name{white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+    .bar{
+      height:10px;
+      border-radius:999px;
+      background:#061022;
+      border:1px solid var(--line2);
+      overflow:hidden;
+      box-shadow: inset 0 0 10px #00000066;
+      position:relative;
+    }
+    .fill{
+      height:100%;
+      width:50%;
+      background: linear-gradient(90deg, #2fd0ff, #6dffcc);
+      box-shadow: 0 0 14px #2fd0ff33;
+      border-radius:999px;
+      transition: width .35s ease;
+    }
+    .fill.warn{
+      background: linear-gradient(90deg, #ffcf6d, #ff9a3d);
+      box-shadow: 0 0 14px #ffcf6d33;
+    }
+    .fill.bad{
+      background: linear-gradient(90deg, #ff4d6d, #ff7aa6);
+      box-shadow: 0 0 14px #ff4d6d33;
+    }
+    .pct{color:#d7f4ff}
+
+    /* Reactors / tanks */
+    .reactGrid{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap:12px;
+    }
+    .card{
+      border-radius:16px;
+      border:1px solid var(--line2);
+      background:#051026aa;
+      padding:12px;
+      position:relative;
+      overflow:hidden;
+      box-shadow: inset 0 0 0 1px #ffffff06;
+    }
+    .card h3{
+      margin:0 0 10px;
+      font-size:11px;
+      letter-spacing:.16em;
+      text-transform:uppercase;
+      color:#bfeaff;
+      opacity:.95;
+    }
+    .stat{
+      display:flex; justify-content:space-between; align-items:baseline;
+      font-family:var(--mono);
+      font-size:12px;
+      color:var(--muted);
+      margin:6px 0;
+    }
+    .stat span:last-child{color:#d7f4ff}
+    .tiny{
+      font-size:10px; opacity:.9
+    }
+
+    .tankWrap{
+      display:flex; gap:10px; align-items:stretch;
+    }
+    .tank{
+      width:30px;
+      border-radius:999px;
+      border:1px solid var(--line2);
+      background:#061022;
+      position:relative;
+      overflow:hidden;
+      box-shadow: inset 0 0 14px #00000066;
+    }
+    .tankFill{
+      position:absolute; left:0; right:0; bottom:0;
+      height:55%;
+      background: linear-gradient(180deg, #6dffcc, #2fd0ff);
+      box-shadow: 0 0 16px #2fd0ff22;
+      transition: height .35s ease;
+    }
+    .tankFill.am{
+      background: linear-gradient(180deg, #ffcf6d, #ff4d6d);
+      box-shadow: 0 0 16px #ffcf6d22;
+    }
+    .tankLabel{
+      display:flex; flex-direction:column; justify-content:space-between;
+      font-family:var(--mono);
+      font-size:11px;
+      color:var(--muted);
+      gap:8px;
+    }
+
+    /* ENV / NAV mini grids */
+    .miniGrid{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap:12px;
+    }
+
+    .spark{
+      height:34px;
+      width:100%;
+      border-radius:12px;
+      border:1px solid var(--line2);
+      background:#061022;
+      overflow:hidden;
+      position:relative;
+      box-shadow: inset 0 0 14px #00000066;
+    }
+    canvas.sparkline{
+      width:100%;
+      height:100%;
+      display:block;
+    }
+
+    /* Log / terminal */
+    .logWrap{
+      display:grid;
+      grid-template-columns: 1.1fr .9fr;
+      gap:14px;
+      align-items:stretch;
+    }
+    .term{
+      border-radius:16px;
+      border:1px solid var(--line2);
+      background:#02060fcc;
+      padding:12px;
+      box-shadow: inset 0 0 0 1px #ffffff05;
+      font-family:var(--mono);
+      overflow:hidden;
+      position:relative;
+    }
+    .term::before{
+      content:"";
+      position:absolute; inset:0;
+      background: radial-gradient(600px 140px at 20% 0%, #2fd0ff12, transparent 60%);
+      pointer-events:none;
+    }
+    .termHead{
+      display:flex; justify-content:space-between; align-items:center;
+      padding:6px 6px 10px;
+      border-bottom:1px solid #ffffff0d;
+      color:#9fd8ff;
+      font-size:11px;
+      letter-spacing:.12em;
+      text-transform:uppercase;
+    }
+    .termBody{
+      height:170px;
+      overflow:hidden;
+      padding:10px 6px 6px;
+      position:relative;
+    }
+    .line{
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      color:#bfeaff;
+      opacity:.96;
+      line-height:1.35;
+      font-size:12px;
+      text-shadow: 0 0 12px #2fd0ff12;
+    }
+    .line.dim{color:#8bbddc; opacity:.9}
+    .line.warn{color:var(--amber)}
+    .line.bad{color:var(--red)}
+    .cursor{
+      display:inline-block;
+      width:9px; height:14px;
+      background:#6dffccaa;
+      margin-left:6px;
+      vertical-align:-2px;
+      animation: blink 1s steps(1) infinite;
+      box-shadow:0 0 12px #6dffcc44;
+    }
+    @keyframes blink{50%{opacity:0}}
+
+    .alerts{
+      border-radius:16px;
+      border:1px solid var(--line2);
+      background:#051026aa;
+      padding:12px;
+      font-family:var(--mono);
+      position:relative;
+      overflow:hidden;
+      box-shadow: inset 0 0 0 1px #ffffff06;
+    }
+    .alerts h3{
+      margin:0 0 10px;
+      font-size:11px;
+      letter-spacing:.16em;
+      text-transform:uppercase;
+      color:#bfeaff;
+      opacity:.95;
+    }
+    .alertItem{
+      display:flex; align-items:center; justify-content:space-between;
+      padding:8px 10px;
+      border-radius:12px;
+      border:1px solid #ffffff10;
+      background:#061022;
+      margin:8px 0;
+    }
+    .alertItem .left{
+      display:flex; gap:10px; align-items:center;
+    }
+    .badge{
+      font-size:10px;
+      letter-spacing:.12em;
+      padding:4px 8px;
+      border-radius:999px;
+      border:1px solid #ffffff14;
+      text-transform:uppercase;
+      color:#d7f4ff;
+      opacity:.95;
+    }
+    .badge.ok{border-color:#6dffcc44; color:#bfffe9}
+    .badge.warn{border-color:#ffcf6d44; color:#ffe2a7}
+    .badge.bad{border-color:#ff4d6d44; color:#ffb0bf}
+    .alertItem .msg{
+      color:#a7d5ee; font-size:12px;
+      max-width: 330px;
+      white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    }
+    .alertItem .eta{
+      color:#86b6d4; font-size:11px;
+    }
+
+    /* Alarm overlay */
+    .alarmOverlay{
+      position:fixed; inset:0; z-index:10;
+      background: radial-gradient(700px 400px at 50% 30%, #ff4d6d25, transparent 60%),
+                  repeating-linear-gradient(135deg, #ff4d6d25 0px, #ff4d6d25 8px, transparent 8px, transparent 16px);
+      opacity:0;
+      pointer-events:none;
+      transition: opacity .35s ease;
+      mix-blend-mode: screen;
+    }
+    .alarmOverlay.on{opacity:.65}
+
+    /* Help hint */
+    .hint{
+      position:fixed; right:18px; bottom:14px; z-index:20;
+      font-family:var(--mono);
+      font-size:11px;
+      color:#7fb6d7;
+      opacity:.75;
+      user-select:none;
+    }
+
+    /* Responsive scaling for kiosks */
+    @media (max-width: 1100px){
+      .wrap{grid-template-columns: 1fr; grid-template-rows:auto; overflow:auto}
+      #warp,#power,#react,#env,#nav,#log{grid-column:1; grid-row:auto}
+      .termBody{height:220px}
+      body{overflow:auto}
+      .screenFx,.vignette,.noise{display:none}
+      #bg{display:none}
+    }
+  </style>
+</head>
+<body>
+  <canvas id="bg"></canvas>
+
+  <div class="wrap" id="wrap">
+    <div class="topbar">
+      <div class="brand">
+        <h1>ENGINEERING CONTROL • DECK 9</h1>
+        <div class="sub" id="shipId">NX-███ • UTOPIA PLANITIA INTEGRATION NODE</div>
+      </div>
+
+      <div class="top-meta">
+        <div class="pill">
+          <span class="dot" id="healthDot"></span>
+          <span id="overallStatus">ALL SYSTEMS NOMINAL</span>
+        </div>
+        <div class="pill">
+          <span>SHIPTIME</span>
+          <span id="shipTime">00:00:00</span>
+        </div>
+        <div class="pill">
+          <span>STARDATE</span>
+          <span id="stardate">00000.0</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Warp / Propulsion -->
+    <section class="panel" id="warp">
+      <div class="panelHead">
+        <div>
+          <p class="title">Propulsion Telemetry</p>
+          <div class="subtitle">Warp field harmonics • Inertial dampers • Nacelle plasma flow</div>
+        </div>
+        <div class="subtitle" id="warpMode">MODE: CRUISE</div>
+      </div>
+      <div class="panelBody">
+        <div class="warpGrid">
+          <div class="gaugeWrap">
+            <svg viewBox="0 0 340 240" width="100%" height="100%" aria-label="warp gauge">
+              <!-- arcs -->
+              <defs>
+                <filter id="softGlow">
+                  <feGaussianBlur stdDeviation="2.2" result="b"/>
+                  <feMerge>
+                    <feMergeNode in="b"/>
+                    <feMergeNode in="SourceGraphic"/>
+                  </feMerge>
+                </filter>
+              </defs>
+              <g transform="translate(170,180)">
+                <path d="" id="arcBg" fill="none" stroke="#88e0ff22" stroke-width="16" stroke-linecap="round"></path>
+                <path d="" id="arcFg" fill="none" stroke="#2fd0ff" stroke-width="16" stroke-linecap="round" filter="url(#softGlow)"></path>
+                <!-- ticks -->
+                <g id="ticks"></g>
+
+                <!-- needle -->
+                <g id="needle" transform="rotate(-120)">
+                  <line x1="0" y1="0" x2="0" y2="-120" stroke="#6dffcc" stroke-width="3" filter="url(#softGlow)"></line>
+                  <circle cx="0" cy="0" r="8" fill="#061022" stroke="#88e0ff55"></circle>
+                  <circle cx="0" cy="0" r="4" fill="#6dffcc"></circle>
+                </g>
+
+                <!-- labels -->
+                <text x="0" y="18" text-anchor="middle" fill="#86b6d4" font-size="10" font-family="ui-monospace, monospace" letter-spacing="2">WARP FIELD</text>
+              </g>
+            </svg>
+          </div>
+
+          <div class="warpReadout">
+            <div class="bigNumber">
+              <div class="label">Current Warp Factor</div>
+              <div class="value">
+                <span id="warpFactor">0.00</span>
+                <small id="warpDesc">IMPULSE HOLD</small>
+              </div>
+            </div>
+
+            <div class="kv">
+              <div>Field Coherence</div><b id="coherence" class="ok">99.92%</b>
+              <div>Nacelle Temp</div><b id="nacelleTemp">—</b>
+              <div>Plasma Flow</div><b id="plasmaFlow">—</b>
+              <div>Inertial Dampers</div><b id="dampers" class="ok">SYNC</b>
+              <div>Subspace Drag</div><b id="drag">—</b>
+            </div>
+
+            <div class="kv">
+              <div>FTL Interlocks</div><b id="interlocks" class="ok">GREEN</b>
+              <div>EPS Backpressure</div><b id="epsBack">—</b>
+              <div>Warp Core Coupling</div><b id="coupling">—</b>
+              <div>Gravimetric Shear</div><b id="shear">—</b>
+              <div>Hull Stress</div><b id="stress" class="ok">LOW</b>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Power Distribution -->
+    <section class="panel" id="power">
+      <div class="panelHead">
+        <div>
+          <p class="title">EPS Power Distribution</p>
+          <div class="subtitle">Primary bus • Secondary bus • Load balancing</div>
+        </div>
+        <div class="subtitle" id="epsNote">BUS A: 63% • BUS B: 58%</div>
+      </div>
+      <div class="panelBody" id="powerBody"></div>
+    </section>
+
+    <!-- Reactor / M/AM -->
+    <section class="panel" id="react">
+      <div class="panelHead">
+        <div>
+          <p class="title">Matter/Antimatter Assembly</p>
+          <div class="subtitle">Dilithium matrix • Containment • Injector sync</div>
+        </div>
+        <div class="subtitle" id="coreState">CORE: STABLE</div>
+      </div>
+
+      <div class="panelBody">
+        <div class="reactGrid">
+          <div class="card">
+            <h3>Core Metrics</h3>
+            <div class="stat"><span>Reaction Temp</span><span id="coreTemp">—</span></div>
+            <div class="stat"><span>Plasma Pressure</span><span id="plasmaPressure">—</span></div>
+            <div class="stat"><span>Containment</span><span id="containment">—</span></div>
+            <div class="stat"><span>Dilithium Phase</span><span id="dilithium">—</span></div>
+            <div class="stat"><span>Injector Sync</span><span id="injectors">—</span></div>
+            <div class="stat tiny"><span>Diagnostic Drift</span><span id="drift">—</span></div>
+          </div>
+
+          <div class="card">
+            <h3>Fuel Reserves</h3>
+            <div class="tankWrap">
+              <div class="tank" aria-label="matter tank">
+                <div class="tankFill" id="matterFill"></div>
+              </div>
+              <div class="tank" aria-label="antimatter tank">
+                <div class="tankFill am" id="antiFill"></div>
+              </div>
+              <div class="tankLabel">
+                <div>
+                  <div class="stat"><span>Deuterium</span><span id="matterPct">—</span></div>
+                  <div class="stat"><span>Antideuterium</span><span id="antiPct">—</span></div>
+                </div>
+                <div>
+                  <div class="stat"><span>Burn Rate</span><span id="burn">—</span></div>
+                  <div class="stat"><span>Mix Ratio</span><span id="mix">—</span></div>
+                </div>
+              </div>
+            </div>
+
+            <div style="height:10px"></div>
+            <div class="stat"><span>Magnetic Bottle</span><span id="bottle" class="tiny">—</span></div>
+            <div class="bar" aria-label="magnetic bottle integrity">
+              <div class="fill" id="bottleBar" style="width:92%"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Environmental -->
+    <section class="panel" id="env">
+      <div class="panelHead">
+        <div>
+          <p class="title">Environmental & Life Support</p>
+          <div class="subtitle">Atmospheric mix • Thermal loops • Radiation</div>
+        </div>
+        <div class="subtitle" id="envState">HAB: GREEN</div>
+      </div>
+
+      <div class="panelBody">
+        <div class="miniGrid">
+          <div class="card">
+            <h3>Atmospheric Mix</h3>
+            <div class="stat"><span>O₂</span><span id="o2">—</span></div>
+            <div class="stat"><span>N₂</span><span id="n2">—</span></div>
+            <div class="stat"><span>CO₂</span><span id="co2">—</span></div>
+            <div class="stat"><span>Humidity</span><span id="hum">—</span></div>
+            <div class="stat"><span>Deck Pressure</span><span id="press">—</span></div>
+          </div>
+
+          <div class="card">
+            <h3>Thermal / Radiation</h3>
+            <div class="stat"><span>Loop Delta-T</span><span id="deltat">—</span></div>
+            <div class="stat"><span>Reactor Shielding</span><span id="shielding">—</span></div>
+            <div class="stat"><span>Ambient Rad</span><span id="rad">—</span></div>
+            <div class="stat"><span>EM Noise</span><span id="em">—</span></div>
+            <div class="spark">
+              <canvas class="sparkline" id="sparkEnv"></canvas>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Navigation / Defense -->
+    <section class="panel" id="nav">
+      <div class="panelHead">
+        <div>
+          <p class="title">Navigation & Defensive Systems</p>
+          <div class="subtitle">Deflector • Shields • Impulse • RCS</div>
+        </div>
+        <div class="subtitle" id="threat">THREAT: NONE</div>
+      </div>
+
+      <div class="panelBody">
+        <div class="miniGrid">
+          <div class="card">
+            <h3>Deflector / Shields</h3>
+            <div class="stat"><span>Main Deflector</span><span id="deflector">—</span></div>
+            <div class="stat"><span>Shield Grid</span><span id="shields">—</span></div>
+            <div class="stat"><span>Harmonics</span><span id="harm">—</span></div>
+            <div class="stat"><span>Regeneration</span><span id="regen">—</span></div>
+            <div class="spark">
+              <canvas class="sparkline" id="sparkShield"></canvas>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>Impulse / Attitude</h3>
+            <div class="stat"><span>Impulse Output</span><span id="impulse">—</span></div>
+            <div class="stat"><span>RCS Fuel</span><span id="rcs">—</span></div>
+            <div class="stat"><span>Gyro Lock</span><span id="gyro">—</span></div>
+            <div class="stat"><span>Course Drift</span><span id="driftNav">—</span></div>
+            <div class="spark">
+              <canvas class="sparkline" id="sparkNav"></canvas>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Log -->
+    <section class="panel" id="log">
+      <div class="panelHead">
+        <div>
+          <p class="title">Operations Console</p>
+          <div class="subtitle">Event stream • Maintenance queue • Automatic remediation</div>
+        </div>
+        <div class="subtitle" id="consoleMode">CONSOLE: ENG-OPS-02</div>
+      </div>
+
+      <div class="panelBody">
+        <div class="logWrap">
+          <div class="term">
+            <div class="termHead">
+              <span>ENGINEERING EVENT STREAM</span>
+              <span id="streamRate">10.0 Hz</span>
+            </div>
+            <div class="termBody" id="termBody"></div>
+          </div>
+
+          <div class="alerts">
+            <h3>Active Advisories</h3>
+            <div id="alertsList"></div>
+            <div style="height:6px"></div>
+            <div class="stat"><span>Auto-Repair Drones</span><span id="drones">—</span></div>
+            <div class="stat"><span>Work Queue</span><span id="queue">—</span></div>
+            <div class="stat"><span>Uptime</span><span id="uptime">—</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="alarmOverlay" id="alarmOverlay"></div>
+  <div class="screenFx"></div>
+  <div class="vignette"></div>
+  <div class="noise"></div>
+  <div class="hint">Keys: <b>P</b> pause • <b>A</b> toggle alert • <b>F</b> fullscreen</div>
+
+  <script>
+    (() => {
+      // ===== Utilities =====
+      const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+      const lerp = (a,b,t) => a + (b-a)*t;
+      const rand = (a=0,b=1) => a + Math.random()*(b-a);
+      const pick = (arr) => arr[(Math.random()*arr.length)|0];
+      const fmt = (n, d=2) => n.toFixed(d);
+      const fmtPct = (n, d=2) => `${n.toFixed(d)}%`;
+      const now = () => performance.now();
+
+      // ===== DOM refs =====
+      const el = (id) => document.getElementById(id);
+
+      const bg = el("bg");
+      const wrap = el("wrap");
+      const alarmOverlay = el("alarmOverlay");
+
+      // Time
+      const shipTimeEl = el("shipTime");
+      const stardateEl = el("stardate");
+      const healthDot = el("healthDot");
+      const overallStatus = el("overallStatus");
+
+      // Warp
+      const warpFactorEl = el("warpFactor");
+      const warpDescEl = el("warpDesc");
+      const warpModeEl = el("warpMode");
+      const arcBg = el("arcBg");
+      const arcFg = el("arcFg");
+      const needle = el("needle");
+      const ticks = el("ticks");
+      const coherenceEl = el("coherence");
+      const nacelleTempEl = el("nacelleTemp");
+      const plasmaFlowEl = el("plasmaFlow");
+      const dampersEl = el("dampers");
+      const dragEl = el("drag");
+      const interlocksEl = el("interlocks");
+      const epsBackEl = el("epsBack");
+      const couplingEl = el("coupling");
+      const shearEl = el("shear");
+      const stressEl = el("stress");
+
+      // Power
+      const powerBody = el("powerBody");
+      const epsNoteEl = el("epsNote");
+
+      // Reactor
+      const coreStateEl = el("coreState");
+      const coreTempEl = el("coreTemp");
+      const plasmaPressureEl = el("plasmaPressure");
+      const containmentEl = el("containment");
+      const dilithiumEl = el("dilithium");
+      const injectorsEl = el("injectors");
+      const driftEl = el("drift");
+
+      const matterFill = el("matterFill");
+      const antiFill = el("antiFill");
+      const matterPctEl = el("matterPct");
+      const antiPctEl = el("antiPct");
+      const burnEl = el("burn");
+      const mixEl = el("mix");
+      const bottleEl = el("bottle");
+      const bottleBar = el("bottleBar");
+
+      // Env
+      const envStateEl = el("envState");
+      const o2El = el("o2");
+      const n2El = el("n2");
+      const co2El = el("co2");
+      const humEl = el("hum");
+      const pressEl = el("press");
+      const deltatEl = el("deltat");
+      const shieldingEl = el("shielding");
+      const radEl = el("rad");
+      const emEl = el("em");
+
+      // Nav/Defense
+      const threatEl = el("threat");
+      const deflectorEl = el("deflector");
+      const shieldsEl = el("shields");
+      const harmEl = el("harm");
+      const regenEl = el("regen");
+      const impulseEl = el("impulse");
+      const rcsEl = el("rcs");
+      const gyroEl = el("gyro");
+      const driftNavEl = el("driftNav");
+
+      // Log/alerts
+      const termBody = el("termBody");
+      const streamRateEl = el("streamRate");
+      const alertsList = el("alertsList");
+      const dronesEl = el("drones");
+      const queueEl = el("queue");
+      const uptimeEl = el("uptime");
+
+      // Sparklines
+      const sparkEnv = el("sparkEnv");
+      const sparkShield = el("sparkShield");
+      const sparkNav = el("sparkNav");
+
+      // ===== Starfield background =====
+      const bgCtx = bg.getContext("2d", { alpha: true });
+      let stars = [];
+      function resizeBg(){
+        const dpr = Math.min(2, window.devicePixelRatio || 1);
+        bg.width = Math.floor(window.innerWidth * dpr);
+        bg.height = Math.floor(window.innerHeight * dpr);
+        bg.style.width = window.innerWidth + "px";
+        bg.style.height = window.innerHeight + "px";
+        stars = [];
+        const count = Math.floor((window.innerWidth * window.innerHeight) / 13000);
+        for(let i=0;i<count;i++){
+          stars.push({
+            x: Math.random()*bg.width,
+            y: Math.random()*bg.height,
+            z: rand(0.2, 1.0),
+            r: rand(0.6, 1.9),
+            tw: rand(0, Math.PI*2)
+          });
+        }
+      }
+      function drawBg(t){
+        const w = bg.width, h = bg.height;
+        bgCtx.clearRect(0,0,w,h);
+        // faint nebula
+        const g = bgCtx.createRadialGradient(w*0.35,h*0.2,0, w*0.35,h*0.2, Math.max(w,h)*0.8);
+        g.addColorStop(0, "rgba(47,208,255,0.05)");
+        g.addColorStop(0.45, "rgba(176,140,255,0.02)");
+        g.addColorStop(1, "rgba(0,0,0,0)");
+        bgCtx.fillStyle = g;
+        bgCtx.fillRect(0,0,w,h);
+
+        // stars
+        for(const s of stars){
+          const tw = 0.55 + 0.45*Math.sin(t*0.0015 + s.tw);
+          const a = (0.12 + 0.55*s.z) * tw;
+          bgCtx.fillStyle = `rgba(200,235,255,${a})`;
+          bgCtx.beginPath();
+          bgCtx.arc(s.x, s.y, s.r*s.z, 0, Math.PI*2);
+          bgCtx.fill();
+          // slow drift
+          s.x += (0.04 + 0.18*s.z);
+          if(s.x > w + 10) s.x = -10;
+        }
+
+        // subtle “warp streaks” when warp high
+        const wf = telemetry.warp;
+        if(wf > 4.5){
+          const streaks = Math.floor(lerp(0, 45, clamp((wf-4.5)/4.5, 0, 1)));
+          bgCtx.strokeStyle = "rgba(47,208,255,0.08)";
+          bgCtx.lineWidth = 1;
+          for(let i=0;i<streaks;i++){
+            const y = Math.random()*h;
+            const len = rand(30, 120) * (wf/8);
+            const x = rand(0, w);
+            bgCtx.beginPath();
+            bgCtx.moveTo(x, y);
+            bgCtx.lineTo(x - len, y + rand(-4,4));
+            bgCtx.stroke();
+          }
+        }
+        requestAnimationFrame(drawBg);
+      }
+
+      // ===== Warp gauge drawing =====
+      function polarToXY(cx, cy, r, ang){
+        return { x: cx + r*Math.cos(ang), y: cy + r*Math.sin(ang) };
+      }
+      function arcPath(cx, cy, r, a0, a1){
+        const p0 = polarToXY(cx, cy, r, a0);
+        const p1 = polarToXY(cx, cy, r, a1);
+        const large = (a1-a0) % (Math.PI*2) > Math.PI ? 1 : 0;
+        return `M ${p0.x.toFixed(2)} ${p0.y.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${p1.x.toFixed(2)} ${p1.y.toFixed(2)}`;
+      }
+      function buildGauge(){
+        // in the local gauge group coordinates centered at (170,180)
+        const cx = 0, cy = 0, r = 140;
+        const start = (-120) * Math.PI/180;
+        const end   = (120) * Math.PI/180;
+
+        arcBg.setAttribute("d", arcPath(cx, cy, r, start, end));
+
+        // ticks 0..9
+        ticks.innerHTML = "";
+        for(let i=0;i<=9;i++){
+          const t = i/9;
+          const ang = lerp(start, end, t);
+          const inner = polarToXY(cx,cy,r-18,ang);
+          const outer = polarToXY(cx,cy,r-2,ang);
+          const w = i%3===0 ? 2.2 : 1.2;
+          const op = i%3===0 ? 0.55 : 0.25;
+
+          const ln = document.createElementNS("http://www.w3.org/2000/svg","line");
+          ln.setAttribute("x1", inner.x); ln.setAttribute("y1", inner.y);
+          ln.setAttribute("x2", outer.x); ln.setAttribute("y2", outer.y);
+          ln.setAttribute("stroke", `rgba(127,233,255,${op})`);
+          ln.setAttribute("stroke-width", w);
+          ticks.appendChild(ln);
+
+          if(i%3===0){
+            const tx = document.createElementNS("http://www.w3.org/2000/svg","text");
+            const lab = polarToXY(cx,cy,r-34,ang);
+            tx.setAttribute("x", lab.x);
+            tx.setAttribute("y", lab.y + 4);
+            tx.setAttribute("text-anchor","middle");
+            tx.setAttribute("fill","rgba(134,182,212,0.9)");
+            tx.setAttribute("font-size","10");
+            tx.setAttribute("font-family","ui-monospace, monospace");
+            tx.textContent = i.toString();
+            ticks.appendChild(tx);
+          }
+        }
+      }
+
+      // ===== Sparklines =====
+      function makeSpark(canvas){
+        const ctx = canvas.getContext("2d");
+        const buf = new Float32Array(64);
+        let idx = 0;
+
+        function resize(){
+          const dpr = Math.min(2, window.devicePixelRatio || 1);
+          canvas.width = Math.floor(canvas.clientWidth * dpr);
+          canvas.height = Math.floor(canvas.clientHeight * dpr);
+        }
+        function push(v){
+          buf[idx] = v;
+          idx = (idx + 1) % buf.length;
+        }
+        function draw(){
+          const w = canvas.width, h = canvas.height;
+          ctx.clearRect(0,0,w,h);
+
+          // grid
+          ctx.strokeStyle = "rgba(136,224,255,0.10)";
+          ctx.lineWidth = 1;
+          for(let i=1;i<4;i++){
+            const y = (h*i)/4;
+            ctx.beginPath();
+            ctx.moveTo(0,y);
+            ctx.lineTo(w,y);
+            ctx.stroke();
+          }
+
+          // line
+          ctx.strokeStyle = "rgba(47,208,255,0.85)";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          for(let i=0;i<buf.length;i++){
+            const j = (idx + i) % buf.length;
+            const x = (i/(buf.length-1)) * w;
+            const v = buf[j];
+            const y = h - (clamp(v,0,1) * (h*0.85) + h*0.08);
+            if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+          }
+          ctx.stroke();
+
+          // glow-ish
+          ctx.strokeStyle = "rgba(109,255,204,0.22)";
+          ctx.lineWidth = 5;
+          ctx.globalCompositeOperation = "screen";
+          ctx.stroke();
+          ctx.globalCompositeOperation = "source-over";
+        }
+
+        resize();
+        return { resize, push, draw };
+      }
+
+      const sparkEnvObj = makeSpark(sparkEnv);
+      const sparkShieldObj = makeSpark(sparkShield);
+      const sparkNavObj = makeSpark(sparkNav);
+
+      // ===== Telemetry model =====
+      const telemetry = {
+        warp: 0.0,
+        warpTarget: 0.0,
+        mode: "IDLE",
+
+        eps: [
+          { name:"Warp Field Coils", v: 0.0 },
+          { name:"Impulse Drive", v: 0.0 },
+          { name:"Shields", v: 0.0 },
+          { name:"Main Deflector", v: 0.0 },
+          { name:"Life Support", v: 0.0 },
+          { name:"Structural Integrity", v: 0.0 },
+          { name:"Sensors", v: 0.0 },
+          { name:"Transporters", v: 0.0 }
+        ],
+        busA: 0.0,
+        busB: 0.0,
+
+        coreTemp: 0.0,            // MK
+        plasmaPressure: 0.0,      // kPa (fictional)
+        containment: 0.0,         // %
+        dilithium: 0.0,           // phase variance
+        injectors: 0.0,           // %
+        drift: 0.0,               // ppm
+
+        matter: 0.0,              // %
+        antimatter: 0.0,          // %
+        burn: 0.0,                // kg/s fictional
+        mix: 1.000,               // ratio
+        bottle: 0.0,              // %
+
+        o2: 0.0,
+        n2: 0.0,
+        co2: 0.0,
+        hum: 0.0,
+        press: 0.0,
+        deltat: 0.0,
+        shielding: 0.0,
+        rad: 0.0,
+        em: 0.0,
+
+        deflector: 0.0,
+        shields: 0.0,
+        harm: 0.0,
+        regen: 0.0,
+        impulse: 0.0,
+        rcs: 0.0,
+        gyro: 0.0,
+        driftNav: 0.0,
+
+        advisoryLevel: "OK",      // OK / WARN / ALARM
+        alarm: false
+      };
+
+      // Initialize baseline
+      function initTelemetry(){
+        telemetry.warp = 0.02;
+        telemetry.warpTarget = 5.2;
+        telemetry.mode = "CRUISE";
+
+        // start with plausible ship values
+        telemetry.coreTemp = 340.0;        // MK
+        telemetry.plasmaPressure = 820.0;  // kPa (fictional)
+        telemetry.containment = 99.92;
+        telemetry.dilithium = 0.018;       // phase variance
+        telemetry.injectors = 99.70;
+        telemetry.drift = 1.6;
+
+        telemetry.matter = 78.4;
+        telemetry.antimatter = 62.9;
+        telemetry.burn = 0.82;
+        telemetry.mix = 1.001;
+        telemetry.bottle = 97.6;
+
+        telemetry.o2 = 20.9;
+        telemetry.n2 = 78.0;
+        telemetry.co2 = 0.042;
+        telemetry.hum = 44.0;
+        telemetry.press = 101.2;
+        telemetry.deltat = 3.8;
+        telemetry.shielding = 99.6;
+        telemetry.rad = 0.18;
+        telemetry.em = 0.22;
+
+        telemetry.deflector = 96.0;
+        telemetry.shields = 89.0;
+        telemetry.harm = 0.92;
+        telemetry.regen = 1.8;
+
+        telemetry.impulse = 18.0;
+        telemetry.rcs = 71.0;
+        telemetry.gyro = 99.2;
+        telemetry.driftNav = 0.006;
+
+        // Power defaults depend on warp
+        updateEpsFromWarp(true);
+      }
+
+      function updateEpsFromWarp(init=false){
+        const wf = telemetry.warp;
+        // Warp field coils scale heavily with warp
+        const warpLoad = clamp((wf/9.0), 0, 1);
+        const base = 22 + warpLoad*54; // 22..76
+        const shieldBase = 10 + (telemetry.shields/100)*14;
+        const defBase = 8 + (telemetry.deflector/100)*10;
+        const impulseBase = 12 + (telemetry.impulse/100)*22;
+        const lifeBase = 9.5;
+        const sifBase = 7.0 + warpLoad*4.0;
+        const sensorsBase = 4.5 + rand(-0.6,0.6);
+        const transBase = 3.0 + rand(-0.6,0.9);
+
+        const targets = [
+          base + rand(-1.2,1.2),
+          impulseBase + rand(-1.2,1.2),
+          shieldBase + rand(-1.0,1.0),
+          defBase + rand(-0.9,0.9),
+          lifeBase + rand(-0.4,0.4),
+          sifBase + rand(-0.6,0.6),
+          sensorsBase,
+          transBase
+        ].map(v => clamp(v, 0.8, 92));
+
+        // Smooth / slightly randomize
+        telemetry.eps.forEach((s,i)=>{
+          if(init) s.v = targets[i];
+          else s.v = lerp(s.v, targets[i], 0.22);
+        });
+
+        // Bus usage as sum-ish with overhead
+        const sum = telemetry.eps.reduce((a,s)=>a+s.v,0);
+        telemetry.busA = clamp(0.55*sum/2.7, 18, 98);
+        telemetry.busB = clamp(0.50*sum/2.9 + rand(-2.0,2.0), 16, 98);
+      }
+
+      // ===== UI: Power list build =====
+      function buildPowerRows(){
+        powerBody.innerHTML = "";
+        telemetry.eps.forEach((s, idx)=>{
+          const row = document.createElement("div");
+          row.className = "barRow";
+
+          const name = document.createElement("div");
+          name.className = "name";
+          name.textContent = s.name;
+
+          const bar = document.createElement("div");
+          bar.className = "bar";
+
+          const fill = document.createElement("div");
+          fill.className = "fill";
+          fill.id = `epsFill_${idx}`;
+          bar.appendChild(fill);
+
+          const pct = document.createElement("div");
+          pct.className = "pct";
+          pct.id = `epsPct_${idx}`;
+          pct.textContent = "—";
+
+          row.appendChild(name);
+          row.appendChild(bar);
+          row.appendChild(pct);
+          powerBody.appendChild(row);
+        });
+
+        // footer line: small hint
+        const foot = document.createElement("div");
+        foot.style.marginTop = "10px";
+        foot.style.fontFamily = "var(--mono)";
+        foot.style.fontSize = "11px";
+        foot.style.color = "#86b6d4";
+        foot.style.opacity = ".95";
+        foot.textContent = "LOAD BALANCER: ADAPTIVE • EPS RELAYS: AUTO-BYPASS • LATENCY: 2.3 ms";
+        powerBody.appendChild(foot);
+      }
+
+      // ===== Terminal log =====
+      const LOG_MAX = 14;
+      const logLines = [];
+      const verb = ["CALIBRATING","ALIGNING","NORMALIZING","VERIFYING","SYNCHRONIZING","ISOLATING","ROUTING","BLEEDING","RESEATING","REPHASING","BALANCING","RECONCILING"];
+      const nouns = ["EPS RELAY","PLASMA MANIFOLD","FIELD COIL","SIF NODE","INERTIAL GRID","DEFLECTOR ARRAY","THERMAL LOOP","INJECTOR ASSEMBLY","MAGNETIC BOTTLE","SENSOR PALLET","RCS THRUSTER","POWER COUPLER"];
+      const tails = ["OK","OK","OK","OK","MARGINAL","OK","OK","OK","NOMINAL","OK","OK","DEGRADED"];
+
+      function addLog(line, kind="dim"){
+        logLines.unshift({ line, kind, ts: shipTimeEl.textContent });
+        if(logLines.length > LOG_MAX) logLines.pop();
+        renderLog();
+      }
+
+      function renderLog(){
+        termBody.innerHTML = "";
+        for(const l of logLines){
+          const div = document.createElement("div");
+          div.className = `line ${l.kind}`;
+          div.textContent = `[${l.ts}] ${l.line}`;
+          termBody.appendChild(div);
+        }
+        const prompt = document.createElement("div");
+        prompt.className = "line";
+        prompt.innerHTML = `ENG> <span style="color:#9fead1">monitor --systems --auto</span><span class="cursor"></span>`;
+        termBody.appendChild(prompt);
+      }
+
+      // ===== Advisories =====
+      let advisories = [
+        { level:"ok", msg:"EPS load balancer stable", eta:"continuous" },
+        { level:"ok", msg:"Containment field within tolerance", eta:"continuous" },
+        { level:"ok", msg:"Deflector alignment nominal", eta:"+00:12" }
+      ];
+
+      function renderAdvisories(){
+        alertsList.innerHTML = "";
+        for(const a of advisories.slice(0,4)){
+          const item = document.createElement("div");
+          item.className = "alertItem";
+          const left = document.createElement("div");
+          left.className = "left";
+
+          const badge = document.createElement("div");
+          badge.className = `badge ${a.level}`;
+          badge.textContent = a.level.toUpperCase();
+
+          const msg = document.createElement("div");
+          msg.className = "msg";
+          msg.textContent = a.msg;
+
+          left.appendChild(badge);
+          left.appendChild(msg);
+
+          const eta = document.createElement("div");
+          eta.className = "eta";
+          eta.textContent = a.eta;
+
+          item.appendChild(left);
+          item.appendChild(eta);
+          alertsList.appendChild(item);
+        }
+      }
+
+      // ===== State transitions (occasional events) =====
+      let paused = false;
+      let forceAlert = false;
+
+      function maybeEvent(){
+        // Small chance per tick to emit log or advisory
+        const r = Math.random();
+        if(r < 0.35){
+          // standard line
+          const v = pick(verb);
+          const n = pick(nouns);
+          const t = pick(tails);
+          const kind = (t === "DEGRADED") ? "warn" : (t === "MARGINAL") ? "warn" : "dim";
+          const code = Math.floor(rand(100, 999));
+          addLog(`${v} ${n} • CODE ${code} • STATUS ${t}`, kind);
+        } else if(r < 0.43){
+          // engineering note
+          const notes = [
+            "AUTOMATED MICRO-FRACTURE SEALANT DISPENSED • HULL STRESS LOW",
+            "PLASMA PURGE COMPLETED • BACKPRESSURE NORMALIZED",
+            "FIELD HARMONICS REPHASED • COHERENCE IMPROVED",
+            "THERMAL LOOP BYPASS ENGAGED • DELTA-T STABLE",
+            "SIF DISTRIBUTION UPDATED • STRUCTURAL LOAD EVEN"
+          ];
+          addLog(pick(notes), "dim");
+        } else if(r < 0.48){
+          // add or update advisory
+          const advPool = [
+            { level:"ok", msg:"Diagnostics complete: no action required", eta:"+00:30" },
+            { level:"ok", msg:"Calibrating inertial dampers", eta:"+00:15" },
+            { level:"warn", msg:"Minor plasma injector jitter detected", eta:"+00:08" },
+            { level:"warn", msg:"EPS junction heat approaching threshold", eta:"+00:25" },
+            { level:"ok", msg:"Field coil resonance within spec", eta:"continuous" }
+          ];
+          const a = pick(advPool);
+          advisories.unshift(a);
+          advisories = advisories.slice(0,6);
+          renderAdvisories();
+        }
+
+        // Very rare alarm
+        const pAlarm = forceAlert ? 1.0 : 0.03;
+        if(Math.random() < pAlarm){
+          triggerAlarm();
+          forceAlert = false;
+        }
+      }
+
+      function triggerAlarm(){
+        telemetry.alarm = true;
+        telemetry.advisoryLevel = "ALARM";
+        alarmOverlay.classList.add("on");
+        healthDot.className = "dot alarm";
+        overallStatus.textContent = "ENGINEERING ALERT • CONTAINMENT VARIANCE";
+        addLog("!!! CONTAINMENT FIELD VARIANCE DETECTED • INITIATING COMPENSATION LOOP", "bad");
+
+        // temporarily degrade some values
+        telemetry.containment = clamp(telemetry.containment - rand(0.6, 1.6), 94, 99.9);
+        telemetry.bottle = clamp(telemetry.bottle - rand(1.0, 2.5), 90, 99.9);
+
+        // auto-clear after some seconds
+        const clearIn = rand(6000, 11000);
+        setTimeout(() => {
+          telemetry.alarm = false;
+          telemetry.advisoryLevel = "WARN";
+          alarmOverlay.classList.remove("on");
+          healthDot.className = "dot warn";
+          overallStatus.textContent = "SYSTEMS DEGRADED • AUTO-COMPENSATING";
+          addLog("COMPENSATION LOOP ACTIVE • FIELD STABILIZING", "warn");
+          // then return to OK
+          setTimeout(() => {
+            telemetry.advisoryLevel = "OK";
+            healthDot.className = "dot";
+            overallStatus.textContent = "ALL SYSTEMS NOMINAL";
+            addLog("CONTAINMENT RESTORED • DIAGNOSTICS GREEN", "dim");
+          }, 7000);
+        }, clearIn);
+      }
+
+      // ===== Main update loop =====
+      const startWall = Date.now();
+      let lastTick = now();
+      let accum = 0;
+
+      function tick(dt){
+        // Warp target changes occasionally
+        if(Math.random() < 0.004){
+          const targets = [0.15, 2.2, 3.4, 5.2, 6.1, 7.2, 8.1];
+          telemetry.warpTarget = pick(targets) + rand(-0.12, 0.12);
+          telemetry.mode = telemetry.warpTarget < 0.5 ? "IDLE" : telemetry.warpTarget < 3.5 ? "TRANSIT" : telemetry.warpTarget < 7.0 ? "CRUISE" : "HIGH WARP";
+          warpModeEl.textContent = `MODE: ${telemetry.mode}`;
+          addLog(`PROPULSION PROFILE UPDATED • TARGET WARP ${fmt(telemetry.warpTarget,2)} • ${telemetry.mode}`, "dim");
+        }
+
+        // Warp follows target smoothly
+        const warpRate = telemetry.alarm ? 0.06 : 0.035;
+        telemetry.warp = lerp(telemetry.warp, telemetry.warpTarget, warpRate);
+        telemetry.warp += rand(-0.012, 0.012);
+        telemetry.warp = clamp(telemetry.warp, 0, 9.2);
+
+        // Core dynamics (fictional, looks plausible)
+        const wf = telemetry.warp;
+        const load = clamp(wf/9, 0, 1);
+
+        telemetry.coreTemp = lerp(telemetry.coreTemp, 335 + 38*load, 0.08) + rand(-0.45,0.45);
+        telemetry.plasmaPressure = lerp(telemetry.plasmaPressure, 780 + 210*load, 0.08) + rand(-4.0,4.0);
+
+        // Containment tends to stay high but can wiggle
+        const contTarget = telemetry.alarm ? 98.3 : 99.80 - 0.12*load;
+        telemetry.containment = lerp(telemetry.containment, contTarget, telemetry.alarm ? 0.06 : 0.045) + rand(-0.03,0.03);
+        telemetry.containment = clamp(telemetry.containment, 96.8, 99.99);
+
+        telemetry.dilithium = lerp(telemetry.dilithium, 0.018 + 0.010*load, 0.06) + rand(-0.0007,0.0007);
+        telemetry.injectors = lerp(telemetry.injectors, 99.6 - 0.12*load, 0.06) + rand(-0.03,0.03);
+        telemetry.drift = lerp(telemetry.drift, 1.4 + 1.8*load, 0.05) + rand(-0.08,0.08);
+
+        // Fuel changes slowly
+        telemetry.burn = lerp(telemetry.burn, 0.20 + 1.28*load, 0.05) + rand(-0.02,0.02);
+        telemetry.matter = clamp(telemetry.matter - telemetry.burn*dt*0.000012, 0, 100);
+        telemetry.antimatter = clamp(telemetry.antimatter - telemetry.burn*dt*0.000010, 0, 100);
+        telemetry.mix = lerp(telemetry.mix, 1.000 + rand(-0.004,0.004), 0.05);
+
+        telemetry.bottle = lerp(telemetry.bottle, 97.2 - (telemetry.alarm? 1.8 : 0.3)*load, 0.05) + rand(-0.06,0.06);
+        telemetry.bottle = clamp(telemetry.bottle, 90, 99.95);
+
+        // Env
+        telemetry.o2 = lerp(telemetry.o2, 20.9 + rand(-0.1,0.1), 0.06);
+        telemetry.n2 = lerp(telemetry.n2, 78.0 + rand(-0.1,0.1), 0.06);
+        telemetry.co2 = lerp(telemetry.co2, 0.040 + rand(-0.006,0.007), 0.06);
+        telemetry.hum = lerp(telemetry.hum, 43.5 + rand(-1.2,1.2), 0.08);
+        telemetry.press = lerp(telemetry.press, 101.3 + rand(-0.4,0.4), 0.08);
+
+        telemetry.deltat = lerp(telemetry.deltat, 3.2 + 1.8*load + rand(-0.4,0.4), 0.08);
+        telemetry.shielding = lerp(telemetry.shielding, 99.5 + rand(-0.08,0.08), 0.06);
+        telemetry.rad = lerp(telemetry.rad, 0.16 + 0.08*load + rand(-0.03,0.03), 0.08);
+        telemetry.em = lerp(telemetry.em, 0.18 + 0.22*load + rand(-0.05,0.05), 0.08);
+
+        // Nav / defense
+        telemetry.deflector = lerp(telemetry.deflector, 94 + 6*load + rand(-1.2,1.2), 0.08);
+        telemetry.shields = lerp(telemetry.shields, 86 + 10*(telemetry.advisoryLevel!=="OK"?0.3:0.1) + rand(-1.1,1.1), 0.06);
+        telemetry.harm = lerp(telemetry.harm, 0.88 + 0.14*load + rand(-0.02,0.02), 0.06);
+        telemetry.regen = lerp(telemetry.regen, 1.3 + 1.4*load + rand(-0.2,0.2), 0.10);
+
+        telemetry.impulse = lerp(telemetry.impulse, clamp(18 + 55*(telemetry.warpTarget<0.6?0.2:0.35) + rand(-4,4), 0, 100), 0.05);
+        telemetry.rcs = lerp(telemetry.rcs, 72 + rand(-1.8,1.8), 0.06);
+        telemetry.gyro = lerp(telemetry.gyro, 99.1 + rand(-0.25,0.25), 0.06);
+        telemetry.driftNav = lerp(telemetry.driftNav, 0.004 + 0.010*load + rand(-0.0015,0.0015), 0.10);
+
+        updateEpsFromWarp(false);
+
+        // Sparklines
+        sparkEnvObj.push(clamp(telemetry.rad/0.5, 0, 1));
+        sparkShieldObj.push(clamp(telemetry.shields/100, 0, 1));
+        sparkNavObj.push(clamp(telemetry.driftNav/0.02, 0, 1));
+      }
+
+      // ===== Render loop =====
+      function setText(elm, txt){ elm.textContent = txt; }
+
+      function warpDescriptor(w){
+        if(w < 0.4) return "IMPULSE HOLD";
+        if(w < 2.5) return "LOW WARP";
+        if(w < 5.5) return "CRUISE";
+        if(w < 7.5) return "FAST CRUISE";
+        return "MAX SAFE";
+      }
+
+      function setStatusLevel(level){
+        if(telemetry.alarm) return; // alarm owns it
+        if(level === "OK"){
+          healthDot.className = "dot";
+          overallStatus.textContent = "ALL SYSTEMS NOMINAL";
+        }else{
+          healthDot.className = "dot warn";
+          overallStatus.textContent = "SYSTEMS DEGRADED • MONITOR";
+        }
+      }
+
+      function render(){
+        // Ship time and stardate
+        const d = new Date();
+        const hh = String(d.getHours()).padStart(2,"0");
+        const mm = String(d.getMinutes()).padStart(2,"0");
+        const ss = String(d.getSeconds()).padStart(2,"0");
+        shipTimeEl.textContent = `${hh}:${mm}:${ss}`;
+
+        // Stardate: fictional (continuous)
+        const days = (Date.now()/86400000);
+        const sd = 46000 + (days % 10000) * 0.1;
+        stardateEl.textContent = sd.toFixed(1);
+
+        // Warp
+        setText(warpFactorEl, fmt(telemetry.warp, 2));
+        setText(warpDescEl, warpDescriptor(telemetry.warp));
+
+        // arc/needle mapping: warp 0..9 to angle -120..120
+        const t = clamp(telemetry.warp/9.0, 0, 1);
+        const start = -120, end = 120;
+        const deg = lerp(start, end, t);
+        needle.setAttribute("transform", `rotate(${deg})`);
+
+        // Foreground arc path: use same center at 0,0
+        const a0 = start * Math.PI/180;
+        const a1 = deg * Math.PI/180;
+        arcFg.setAttribute("d", arcPath(0,0,140, a0, a1));
+
+        // coherence & warp-related metrics
+        const coh = clamp(99.95 - (telemetry.alarm?0.7:0.1) - (telemetry.warp>7.8? rand(0.0,0.12):rand(0.0,0.06)), 97.0, 99.99);
+        coherenceEl.textContent = fmtPct(coh,2);
+        coherenceEl.className = coh > 99.6 ? "ok" : coh > 98.8 ? "warn" : "bad";
+
+        nacelleTempEl.textContent = `${fmt(lerp(420, 860, t) + rand(-8,8),1)} K`;
+        plasmaFlowEl.textContent = `${fmt(lerp(12, 58, t) + rand(-0.6,0.6),1)} kg/s`;
+        dragEl.textContent = `${fmt(lerp(0.02, 0.46, t*t) + rand(-0.01,0.01),2)} SU`;
+        epsBackEl.textContent = `${fmt(lerp(1.2, 4.8, t) + rand(-0.2,0.2),2)} MPa`;
+        couplingEl.textContent = `${fmt(lerp(0.88, 0.97, 1-t) + rand(-0.01,0.01),3)} λ`;
+        shearEl.textContent = `${fmt(lerp(0.01, 0.22, t) + rand(-0.01,0.01),2)} SG`;
+
+        if(telemetry.advisoryLevel === "OK"){
+          dampersEl.textContent = "SYNC";
+          dampersEl.className = "ok";
+          interlocksEl.textContent = "GREEN";
+          interlocksEl.className = "ok";
+          stressEl.textContent = telemetry.warp > 7.6 ? "MOD" : "LOW";
+          stressEl.className = telemetry.warp > 7.6 ? "warn" : "ok";
+        }else{
+          dampersEl.textContent = "COMP";
+          dampersEl.className = "warn";
+          interlocksEl.textContent = "AMBER";
+          interlocksEl.className = "warn";
+          stressEl.textContent = "MOD";
+          stressEl.className = "warn";
+        }
+
+        // Power distribution
+        telemetry.eps.forEach((s, idx)=>{
+          const fill = document.getElementById(`epsFill_${idx}`);
+          const pct = document.getElementById(`epsPct_${idx}`);
+          const v = s.v;
+
+          pct.textContent = `${v.toFixed(1)}%`;
+          fill.style.width = `${clamp(v,0,100)}%`;
+
+          // categorize color
+          fill.classList.remove("warn","bad");
+          if(v > 82) fill.classList.add("bad");
+          else if(v > 70) fill.classList.add("warn");
+        });
+        epsNoteEl.textContent = `BUS A: ${telemetry.busA.toFixed(0)}% • BUS B: ${telemetry.busB.toFixed(0)}%`;
+
+        // Core / fuel
+        coreTempEl.textContent = `${fmt(telemetry.coreTemp,1)} MK`;
+        plasmaPressureEl.textContent = `${fmt(telemetry.plasmaPressure,0)} kPa`;
+        containmentEl.textContent = `${fmtPct(telemetry.containment,2)}`;
+        containmentEl.style.color = telemetry.containment > 99.5 ? "var(--mint)" : telemetry.containment > 98.8 ? "var(--amber)" : "var(--red)";
+        dilithiumEl.textContent = `${fmt(telemetry.dilithium,4)} φ`;
+        injectorsEl.textContent = `${fmtPct(telemetry.injectors,2)}`;
+        driftEl.textContent = `${fmt(telemetry.drift,2)} ppm`;
+
+        // Core state label
+        if(telemetry.alarm){
+          coreStateEl.textContent = "CORE: COMPENSATING";
+          coreStateEl.style.color = "var(--red)";
+        }else if(telemetry.advisoryLevel !== "OK"){
+          coreStateEl.textContent = "CORE: MONITOR";
+          coreStateEl.style.color = "var(--amber)";
+        }else{
+          coreStateEl.textContent = "CORE: STABLE";
+          coreStateEl.style.color = "#86b6d4";
+        }
+
+        matterFill.style.height = `${clamp(telemetry.matter,0,100)}%`;
+        antiFill.style.height = `${clamp(telemetry.antimatter,0,100)}%`;
+        matterPctEl.textContent = `${fmt(telemetry.matter,1)}%`;
+        antiPctEl.textContent = `${fmt(telemetry.antimatter,1)}%`;
+        burnEl.textContent = `${fmt(telemetry.burn,2)} kg/s`;
+        mixEl.textContent = `${fmt(telemetry.mix,4)} : 1`;
+
+        bottleEl.textContent = `${fmtPct(telemetry.bottle,2)} INTEGRITY`;
+        bottleBar.style.width = `${telemetry.bottle}%`;
+        bottleBar.classList.remove("warn","bad");
+        if(telemetry.bottle < 94) bottleBar.classList.add("bad");
+        else if(telemetry.bottle < 96) bottleBar.classList.add("warn");
+
+        // Env
+        o2El.textContent = `${fmt(telemetry.o2,1)}%`;
+        n2El.textContent = `${fmt(telemetry.n2,1)}%`;
+        co2El.textContent = `${fmt(telemetry.co2,3)}%`;
+        humEl.textContent = `${fmt(telemetry.hum,0)}%`;
+        pressEl.textContent = `${fmt(telemetry.press,1)} kPa`;
+        deltatEl.textContent = `${fmt(telemetry.deltat,1)}°C`;
+        shieldingEl.textContent = `${fmtPct(telemetry.shielding,1)}`;
+        radEl.textContent = `${fmt(telemetry.rad,2)} mSv/h`;
+        emEl.textContent = `${fmt(telemetry.em,2)} AU`;
+
+        // Env state
+        if(telemetry.rad > 0.34 || telemetry.co2 > 0.070){
+          envStateEl.textContent = "HAB: AMBER";
+          envStateEl.style.color = "var(--amber)";
+          setStatusLevel("WARN");
+        } else {
+          envStateEl.textContent = "HAB: GREEN";
+          envStateEl.style.color = "var(--mint)";
+        }
+
+        // Defense/nav
+        deflectorEl.textContent = `${fmtPct(telemetry.deflector,1)}`;
+        shieldsEl.textContent = `${fmtPct(telemetry.shields,1)}`;
+        harmEl.textContent = `${fmt(telemetry.harm,2)} kHz`;
+        regenEl.textContent = `${fmt(telemetry.regen,1)}%/s`;
+
+        impulseEl.textContent = `${fmtPct(telemetry.impulse,1)}`;
+        rcsEl.textContent = `${fmtPct(telemetry.rcs,1)}`;
+        gyroEl.textContent = `${fmtPct(telemetry.gyro,1)}`;
+        driftNavEl.textContent = `${fmt(telemetry.driftNav,3)}°/min`;
+
+        // Threat label (fake, occasional)
+        if(Math.random() < 0.004){
+          const st = pick(["NONE","NONE","NONE","NONE","LOW","NONE"]);
+          threatEl.textContent = `THREAT: ${st}`;
+          threatEl.style.color = st === "LOW" ? "var(--amber)" : "#86b6d4";
+          if(st === "LOW") addLog("TACTICAL HANDSHAKE: ANOMALOUS EM RETURN • PASSIVE SCAN", "warn");
+        }
+
+        // Sparklines draw
+        sparkEnvObj.draw();
+        sparkShieldObj.draw();
+        sparkNavObj.draw();
+
+        // Meta: stream rate
+        streamRateEl.textContent = telemetry.alarm ? "12.5 Hz" : (telemetry.advisoryLevel==="OK" ? "10.0 Hz" : "11.2 Hz");
+
+        // Small counters
+        dronesEl.textContent = `${Math.floor(lerp(6, 18, clamp(telemetry.busA/100,0,1)))} ACTIVE`;
+        queueEl.textContent = `${Math.floor(lerp(2, 19, clamp(telemetry.warp/9,0,1))) + (telemetry.advisoryLevel==="OK"?0:3)} TASKS`;
+        const up = Date.now() - startWall;
+        const uh = Math.floor(up/3600000);
+        const um = Math.floor((up%3600000)/60000);
+        uptimeEl.textContent = `${String(uh).padStart(2,"0")}:${String(um).padStart(2,"0")} HOURS`;
+      }
+
+      // ===== Scheduling loops =====
+      function frame(){
+        if(!paused){
+          const t = now();
+          const dt = Math.min(80, t - lastTick);
+          lastTick = t;
+          accum += dt;
+
+          // simulate at ~10Hz for physics/logical state
+          while(accum >= 100){
+            tick(100);
+            accum -= 100;
+            // occasional events
+            if(Math.random() < 0.34) maybeEvent();
+          }
+          render();
+        }
+        requestAnimationFrame(frame);
+      }
+
+      // ===== Key bindings =====
+      function toggleFullscreen(){
+        if(!document.fullscreenElement){
+          document.documentElement.requestFullscreen?.();
+        } else {
+          document.exitFullscreen?.();
+        }
+      }
+      window.addEventListener("keydown", (e) => {
+        const k = e.key.toLowerCase();
+        if(k === "p") paused = !paused;
+        if(k === "a") { forceAlert = true; addLog("MANUAL ALERT INJECTION • DIAGNOSTIC TEST", "warn"); }
+        if(k === "f") toggleFullscreen();
+      });
+
+      // ===== Resize handling =====
+      function onResize(){
+        resizeBg();
+        sparkEnvObj.resize();
+        sparkShieldObj.resize();
+        sparkNavObj.resize();
+        buildGauge();
+      }
+      window.addEventListener("resize", onResize);
+
+      // ===== Boot =====
+      initTelemetry();
+      buildPowerRows();
+      buildGauge();
+      renderAdvisories();
+
+      // seed log
+      addLog("ENGINEERING NODE ONLINE • EPS TOPOLOGY DISCOVERED • ALL RELAYS GREEN", "dim");
+      addLog("WARP CORE: MAGNETIC BOTTLE CALIBRATION COMPLETE", "dim");
+      addLog("INERTIAL DAMPERS: SYNCHRONIZED • SIF: NOMINAL", "dim");
+      addLog(`PROPULSION: TARGET WARP ${fmt(telemetry.warpTarget,2)} • MODE ${telemetry.mode}`, "dim");
+
+      onResize();
+      requestAnimationFrame(drawBg);
+      requestAnimationFrame(frame);
+
+      // Set ship ID aesthetic
+      const ship = ["NX-74205","NCC-1701","NCC-74656","NCC-1864","NCC-80102","NCC-32591","NX-01"];
+      el("shipId").textContent = `${pick(ship)} • UTOPIA PLANITIA INTEGRATION NODE`;
+    })();
+  </script>
+</body>
+</html>
+

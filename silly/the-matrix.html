@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Matrix Display</title>
+  <style>
+    :root{
+      --bg: #030607;
+      --fade: 0.09;          /* higher = shorter trails, but faster-looking */
+      --scanline: 0.06;
+      --vignette: 0.42;
+      --noiseOpacity: 0.08;  /* CSS noise overlay (cheap) */
+    }
+
+    html, body { height:100%; margin:0; background:var(--bg); overflow:hidden; }
+    #c { position:fixed; inset:0; width:100vw; height:100vh; display:block;
+         background: radial-gradient(1200px 800px at 50% 40%, #071012 0%, var(--bg) 55%, #010203 100%); }
+
+    .overlay { position:fixed; inset:0; pointer-events:none; }
+
+    #scanlines{
+      background: repeating-linear-gradient(
+        to bottom,
+        rgba(255,255,255,0.00) 0px,
+        rgba(255,255,255,0.00) 2px,
+        rgba(255,255,255,var(--scanline)) 3px,
+        rgba(255,255,255,0.00) 4px
+      );
+      mix-blend-mode: screen;
+      filter: contrast(120%);
+    }
+
+    /* Cheap animated noise via CSS gradients (no per-frame canvas work) */
+    #noise{
+      opacity: var(--noiseOpacity);
+      mix-blend-mode: overlay;
+      background:
+        repeating-radial-gradient(circle at 20% 30%, rgba(255,255,255,0.10) 0 1px, rgba(0,0,0,0) 1px 4px),
+        repeating-radial-gradient(circle at 80% 60%, rgba(255,255,255,0.08) 0 1px, rgba(0,0,0,0) 1px 5px),
+        repeating-linear-gradient(90deg, rgba(255,255,255,0.05) 0 1px, rgba(0,0,0,0) 1px 7px);
+      animation: noiseMove 1.2s steps(2,end) infinite;
+    }
+    @keyframes noiseMove {
+      0% { transform: translate3d(0,0,0); }
+      100% { transform: translate3d(-14px, 9px, 0); }
+    }
+
+    #vignette{
+      background: radial-gradient(120% 95% at 50% 45%,
+        rgba(0,0,0,0.00) 0%,
+        rgba(0,0,0,var(--vignette)) 65%,
+        rgba(0,0,0,0.85) 100%
+      );
+      mix-blend-mode: multiply;
+    }
+
+    #hint{
+      position: fixed; right: 18px; bottom: 18px;
+      color: rgba(200,255,230,0.65);
+      font: 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      user-select:none; pointer-events:none;
+      text-shadow: 0 0 10px rgba(60,255,143,0.15);
+      opacity: 0;
+      transition: opacity 200ms ease;
+    }
+    #hint.on{ opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div id="scanlines" class="overlay"></div>
+  <div id="noise" class="overlay"></div>
+  <div id="vignette" class="overlay"></div>
+  <div id="hint"></div>
+
+  <script>
+    /**
+     * Fast Matrix:
+     * - Draw only 1-2 glyphs per column per frame (trail comes from fade)
+     * - No per-frame canvas noise
+     * - Fixed shadow settings (no per-glyph shadow changes)
+     * - Optional FPS cap
+     *
+     * Keys: F fullscreen, H help, R reseed, G toggle glow
+     */
+
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d', { alpha: false });
+    const hint = document.getElementById('hint');
+
+    const CONFIG = {
+      // Performance levers
+      fpsCap: 60,          // 0 = uncapped; 60 or 30 can lower CPU
+      maxDPR: 2.0,         // cap devicePixelRatio
+      fontSize: 18,        // base glyph size (px)
+      colSpacing: 1.0,     // 1.0 = dense, 1.3 = airy
+      fade: null,          // null = use CSS var --fade; or set number like 0.10
+
+      // Look
+      glow: true,
+      glowBlur: 10,        // lower = faster
+      green: 'rgba(60,255,143,0.85)',
+      greenDim: 'rgba(60,255,143,0.50)',
+      head: 'rgba(220,255,240,0.95)',
+      speedMin: 70,        // px/sec
+      speedMax: 260,       // px/sec
+      headBrightChance: 0.55,
+
+      // Density
+      drawTailGlyphChance: 0.55,  // draw one extra glyph behind the head
+      tailOffsetMin: 1,
+      tailOffsetMax: 6,
+
+      // Occasional glitch
+      glitchChance: 0.002,
+      glitchSpan: 10
+    };
+
+    const KATAKANA = Array.from({length: 96}, (_,i)=>String.fromCharCode(0x30A0+i));
+    const ASCII = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@#$%&*+=-:;<>/\\[]{}()".split("");
+    const GLYPHS = [...KATAKANA, ...ASCII];
+
+    function pick(arr){ return arr[(Math.random()*arr.length)|0]; }
+    function rand(min,max){ return Math.random()*(max-min)+min; }
+    function randi(min,max){ return (Math.random()*(max-min+1)+min)|0; }
+
+    let W=0, H=0, DPR=1, cols=[], last=0, acc=0, step=0;
+    let glowOn = CONFIG.glow;
+
+    function resize(){
+      DPR = Math.max(1, Math.min(CONFIG.maxDPR, window.devicePixelRatio || 1));
+      W = Math.floor(innerWidth);
+      H = Math.floor(innerHeight);
+
+      canvas.width  = Math.floor(W * DPR);
+      canvas.height = Math.floor(H * DPR);
+      canvas.style.width = W + "px";
+      canvas.style.height = H + "px";
+
+      ctx.setTransform(DPR,0,0,DPR,0,0);
+
+      seed(true);
+      // clear
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0,0,W,H);
+    }
+
+    function seed(keepY){
+      const fs = CONFIG.fontSize;
+      const colW = Math.max(10, Math.floor(fs * CONFIG.colSpacing));
+      const count = Math.ceil(W / colW);
+
+      const old = cols;
+      cols = new Array(count).fill(0).map((_,i)=>{
+        const prev = old[i];
+        return {
+          x: i * colW,
+          y: keepY && prev ? prev.y : rand(-H, 0),
+          v: rand(CONFIG.speedMin, CONFIG.speedMax),
+          bright: Math.random() < CONFIG.headBrightChance,
+          glyph: pick(GLYPHS),
+          nextGlyphAt: performance.now() + rand(40, 140) // ms
+        };
+      });
+
+      // fixed text settings
+      ctx.font = `${CONFIG.fontSize}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace`;
+      ctx.textBaseline = "top";
+    }
+
+    function setGlow(on){
+      glowOn = on;
+      if (glowOn){
+        ctx.shadowBlur = CONFIG.glowBlur;
+        ctx.shadowColor = 'rgba(60,255,143,0.45)';
+      } else {
+        ctx.shadowBlur = 0;
+      }
+    }
+
+    function fadeFrame(){
+      const cssFade = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--fade')) || 0.09;
+      const f = (CONFIG.fade == null) ? cssFade : CONFIG.fade;
+      ctx.fillStyle = `rgba(0,0,0,${f})`;
+      ctx.fillRect(0,0,W,H);
+    }
+
+    function render(t){
+      const dt = Math.max(0.001, (t - last) / 1000);
+      last = t;
+
+      fadeFrame();
+
+      // Rare glitch: boost brightness in a span of columns for a moment
+      const doGlitch = Math.random() < CONFIG.glitchChance;
+      const gStart = doGlitch ? randi(0, Math.max(0, cols.length - CONFIG.glitchSpan)) : -1;
+
+      for (let i=0;i<cols.length;i++){
+        const c = cols[i];
+
+        // advance
+        c.y += c.v * dt;
+
+        // recycle
+        if (c.y > H + CONFIG.fontSize * 2) {
+          c.y = rand(-H * 0.6, 0);
+          c.v = rand(CONFIG.speedMin, CONFIG.speedMax);
+          c.bright = Math.random() < CONFIG.headBrightChance;
+          c.glyph = pick(GLYPHS);
+          c.nextGlyphAt = t + rand(40, 140);
+        }
+
+        // update glyph occasionally (cheaper than random per draw)
+        if (t >= c.nextGlyphAt){
+          c.glyph = pick(GLYPHS);
+          c.nextGlyphAt = t + rand(40, 140);
+        }
+
+        const inGlitch = doGlitch && i >= gStart && i < gStart + CONFIG.glitchSpan;
+
+        // head
+        ctx.fillStyle = (c.bright || inGlitch) ? CONFIG.head : CONFIG.green;
+        ctx.fillText(c.glyph, c.x, c.y);
+
+        // one extra “tail” glyph sometimes (adds density without full trail loop)
+        if (Math.random() < CONFIG.drawTailGlyphChance){
+          const off = randi(CONFIG.tailOffsetMin, CONFIG.tailOffsetMax);
+          const y2 = c.y - off * CONFIG.fontSize;
+          if (y2 > -CONFIG.fontSize){
+            ctx.fillStyle = inGlitch ? CONFIG.green : CONFIG.greenDim;
+            const ch2 = inGlitch ? (Math.random() < 0.5 ? "0" : "1") : pick(GLYPHS);
+            ctx.fillText(ch2, c.x, y2);
+          }
+        }
+      }
+    }
+
+    function loop(t){
+      if (!last) last = t;
+
+      if (CONFIG.fpsCap > 0){
+        if (!step) step = 1000 / CONFIG.fpsCap;
+        acc += (t - (last || t));
+        // We still want dt from real timestamps; so just gate rendering:
+        if (acc >= step){
+          acc = 0;
+          render(t);
+        }
+      } else {
+        render(t);
+      }
+      requestAnimationFrame(loop);
+    }
+
+    function toggleFullscreen(){
+      if (!document.fullscreenElement) document.documentElement.requestFullscreen?.().catch(()=>{});
+      else document.exitFullscreen?.().catch(()=>{});
+    }
+
+    function toggleHint(){
+      hint.classList.toggle('on');
+      hint.textContent = hint.classList.contains('on')
+        ? "Keys: F fullscreen • R reseed • G glow • H help"
+        : "";
+    }
+
+    function reseed(){
+      seed(false);
+      ctx.fillStyle = "rgba(60,255,143,0.04)";
+      ctx.fillRect(0,0,W,H);
+    }
+
+    window.addEventListener('resize', resize, { passive:true });
+    window.addEventListener('keydown', (e)=>{
+      const k = e.key.toLowerCase();
+      if (k === 'f') toggleFullscreen();
+      if (k === 'h') toggleHint();
+      if (k === 'r') reseed();
+      if (k === 'g') setGlow(!glowOn);
+    });
+
+    resize();
+    setGlow(glowOn);
+    toggleHint(); setTimeout(()=>toggleHint(), 1600);
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
+

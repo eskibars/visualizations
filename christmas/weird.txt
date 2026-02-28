@@ -1,0 +1,968 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Christmas Landscape</title>
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: #04060f;
+      overflow: hidden;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    /* Subtle “display” polish: a gentle vignette + glassy top highlight */
+    .overlay {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background:
+        radial-gradient(1200px 700px at 50% 25%, rgba(255,255,255,0.06), transparent 55%),
+        radial-gradient(1200px 800px at 50% 65%, transparent 35%, rgba(0,0,0,0.55) 85%),
+        linear-gradient(to bottom, rgba(255,255,255,0.04), transparent 30%);
+      mix-blend-mode: screen;
+    }
+    .corner {
+      position: fixed;
+      left: 18px;
+      bottom: 16px;
+      color: rgba(255,255,255,0.55);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      user-select: none;
+      pointer-events: none;
+      text-shadow: 0 2px 18px rgba(0,0,0,0.65);
+    }
+    .corner b { color: rgba(255,255,255,0.82); font-weight: 600; }
+    @media (prefers-reduced-motion: reduce) {
+      .corner::after { content: " · Reduced motion"; }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="overlay"></div>
+  <div class="corner"><b>Happy Holidays</b> · Winter Night</div>
+
+  <script>
+    (() => {
+      const canvas = document.getElementById('c');
+      const ctx = canvas.getContext('2d', { alpha: false });
+
+      // ---------- Utilities ----------
+      const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+      const lerp  = (a, b, t) => a + (b - a) * t;
+      const rand  = (a, b) => a + Math.random() * (b - a);
+      const rint  = (a, b) => Math.floor(rand(a, b + 1));
+      const easeInOut = t => (t < 0.5) ? 2*t*t : 1 - Math.pow(-2*t + 2, 2)/2;
+
+      const DPR = () => Math.max(1, Math.min(2.5, window.devicePixelRatio || 1)); // cap for TVs
+
+      let W = 0, H = 0, dpr = DPR();
+      function resize() {
+        dpr = DPR();
+        W = Math.floor(window.innerWidth);
+        H = Math.floor(window.innerHeight);
+        canvas.width  = Math.floor(W * dpr);
+        canvas.height = Math.floor(H * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      }
+      window.addEventListener('resize', resize, { passive: true });
+      resize();
+
+      const reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+      // ---------- Scene Params ----------
+      const scene = {
+        wind: 0,
+        windTarget: 0,
+        time: 0,
+        snowIntensity: reducedMotion ? 0.55 : 1.0,
+        santaChancePerMinute: reducedMotion ? 0.35 : 0.65, // average appearances
+        groundY: () => Math.floor(H * 0.78),
+        moon: { x: 0.78, y: 0.22, r: 52 },
+      };
+
+      // ---------- Stars ----------
+      let stars = [];
+      function genStars() {
+        const count = Math.floor((W*H) / 26000);
+        stars = Array.from({ length: count }, () => ({
+          x: Math.random(),
+          y: Math.random() * 0.62,
+          r: rand(0.6, 1.8),
+          tw: rand(0.6, 1.8),
+          ph: rand(0, Math.PI*2),
+          a: rand(0.18, 0.9),
+        }));
+      }
+      genStars();
+      window.addEventListener('resize', genStars, { passive: true });
+
+      // ---------- Snow ----------
+      class Snowflake {
+        constructor(layer=1) {
+          this.layer = layer;             // 0: far, 1: mid, 2: near
+          this.reset(true);
+          this.y = rand(-H, H);
+        }
+        reset(initial=false) {
+          const base = [0.45, 0.85, 1.2][this.layer];
+          this.x = Math.random() * W;
+          this.y = initial ? Math.random()*H : -rand(10, 120);
+          this.r = rand(0.6, 2.6) * base;
+          this.vy = rand(18, 68) * base;
+          this.vx = rand(-8, 8) * base;
+          this.drift = rand(0.6, 2.0) * base;
+          this.phase = rand(0, Math.PI*2);
+          this.alpha = rand(0.18, 0.85);
+          this.spark = rand(0, 1) < 0.08; // occasional "sparkly" flakes
+        }
+        step(dt) {
+          const t = scene.time;
+          const sway = Math.sin(t * 0.9 + this.phase) * this.drift;
+          const wx = scene.wind * (0.35 + this.layer*0.25);
+          this.x += (this.vx + sway + wx) * dt;
+          this.y += (this.vy * (0.75 + 0.25*scene.snowIntensity)) * dt;
+
+          // wrap
+          if (this.y > H + 20) this.reset(false);
+          if (this.x < -40) this.x += W + 80;
+          if (this.x > W + 40) this.x -= W + 80;
+        }
+        draw(ctx) {
+          const a = this.alpha * (0.55 + 0.45*scene.snowIntensity);
+          ctx.globalAlpha = a;
+
+          // soft glow for near layer
+          if (this.layer === 2) {
+            ctx.beginPath();
+            ctx.fillStyle = 'rgba(255,255,255,0.55)';
+            ctx.arc(this.x, this.y, this.r*1.6, 0, Math.PI*2);
+            ctx.fill();
+          }
+
+          // main flake
+          ctx.beginPath();
+          ctx.fillStyle = 'rgba(255,255,255,0.92)';
+          ctx.arc(this.x, this.y, this.r, 0, Math.PI*2);
+          ctx.fill();
+
+          // occasional sparkle
+          if (this.spark && !reducedMotion) {
+            const s = 0.7 + 0.3*Math.sin(scene.time*3.2 + this.phase*2.3);
+            ctx.globalAlpha = a * 0.35 * s;
+            ctx.beginPath();
+            ctx.fillStyle = 'rgba(220,245,255,1)';
+            ctx.arc(this.x + this.r*1.2, this.y - this.r*1.0, this.r*0.65, 0, Math.PI*2);
+            ctx.fill();
+          }
+
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      const flakes = [];
+      function seedSnow() {
+        flakes.length = 0;
+        const base = Math.floor((W*H) / 6000);
+        const count = Math.floor(base * (reducedMotion ? 0.6 : 1.0));
+        const far  = Math.floor(count * 0.36);
+        const mid  = Math.floor(count * 0.42);
+        const near = count - far - mid;
+        for (let i=0;i<far;i++) flakes.push(new Snowflake(0));
+        for (let i=0;i<mid;i++) flakes.push(new Snowflake(1));
+        for (let i=0;i<near;i++) flakes.push(new Snowflake(2));
+      }
+      seedSnow();
+      window.addEventListener('resize', seedSnow, { passive: true });
+
+      // ---------- Santa & Sleigh ----------
+      class SantaRun {
+        constructor() {
+          this.active = true;
+          this.dir = Math.random() < 0.5 ? 1 : -1;
+          this.yN = rand(0.18, 0.33);
+          this.duration = rand(10, 16); // seconds
+          this.t0 = scene.time;
+          this.cloudSkim = rand(0,1) < 0.45;
+        }
+        draw(ctx) {
+          const t = (scene.time - this.t0) / this.duration;
+          if (t >= 1) { this.active = false; return; }
+
+          const e = easeInOut(t);
+          const x = this.dir === 1 ? lerp(-0.18*W, 1.18*W, e) : lerp(1.18*W, -0.18*W, e);
+          const yBase = this.yN * H;
+          const bob = Math.sin((scene.time - this.t0) * 3.1) * 4;
+          const y = yBase + bob;
+
+          // trailing glow
+          ctx.save();
+          ctx.globalAlpha = 0.55;
+          ctx.shadowBlur = 18;
+          ctx.shadowColor = 'rgba(255,230,160,0.7)';
+
+          // reindeer chain
+          const n = 5;
+          const spacing = 24;
+          for (let i=0;i<n;i++) {
+            const rx = x - this.dir*(68 + i*spacing);
+            const ry = y + (i%2===0 ? -6 : 4) + Math.sin(scene.time*8 + i)*2;
+            drawReindeer(ctx, rx, ry, this.dir);
+          }
+
+          // harness line
+          ctx.shadowBlur = 0;
+          ctx.globalAlpha = 0.45;
+          ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+          ctx.lineWidth = 1.4;
+          ctx.beginPath();
+          ctx.moveTo(x - this.dir*68, y - 3);
+          ctx.lineTo(x - this.dir*10, y + 6);
+          ctx.stroke();
+
+          // sleigh
+          ctx.globalAlpha = 0.95;
+          drawSleigh(ctx, x, y, this.dir);
+
+          // subtle “cloud skim” mist
+          if (this.cloudSkim && !reducedMotion) {
+            ctx.globalAlpha = 0.22;
+            ctx.fillStyle = 'rgba(255,255,255,0.12)';
+            for (let i=0;i<3;i++) {
+              const p = (scene.time - this.t0) * 0.18 + i*0.8;
+              const cx = x + this.dir*(18 + i*22) + Math.sin(p*3)*8;
+              const cy = y + 14 + i*6;
+              ctx.beginPath();
+              ctx.ellipse(cx, cy, 34, 12, 0.25, 0, Math.PI*2);
+              ctx.fill();
+            }
+          }
+
+          ctx.restore();
+        }
+      }
+
+      function drawReindeer(ctx, x, y, dir) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.scale(dir, 1);
+
+        // body
+        ctx.fillStyle = 'rgba(90,60,40,0.95)';
+        roundRect(ctx, -10, -6, 20, 12, 6);
+        ctx.fill();
+
+        // head
+        ctx.fillStyle = 'rgba(105,70,50,0.95)';
+        roundRect(ctx, 8, -7, 12, 10, 5);
+        ctx.fill();
+
+        // legs (tiny)
+        ctx.strokeStyle = 'rgba(70,45,30,0.95)';
+        ctx.lineWidth = 2;
+        const kick = Math.sin(scene.time*10 + x*0.01) * 2.5;
+        ctx.beginPath();
+        ctx.moveTo(-6, 5); ctx.lineTo(-8, 10 + kick);
+        ctx.moveTo(-1, 5); ctx.lineTo(-2, 10 - kick);
+        ctx.moveTo(4, 5);  ctx.lineTo(3, 10 + kick*0.7);
+        ctx.stroke();
+
+        // antlers (suggestion)
+        ctx.strokeStyle = 'rgba(190,170,120,0.8)';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(14, -7); ctx.lineTo(12, -12);
+        ctx.moveTo(12, -12); ctx.lineTo(10, -14);
+        ctx.moveTo(12, -12); ctx.lineTo(14, -14);
+        ctx.stroke();
+
+        // nose glow on lead reindeer feel
+        ctx.globalAlpha = 0.85;
+        ctx.fillStyle = 'rgba(255,70,70,0.95)';
+        ctx.beginPath();
+        ctx.arc(20, -2, 2.2, 0, Math.PI*2);
+        ctx.fill();
+
+        ctx.restore();
+      }
+
+      function drawSleigh(ctx, x, y, dir) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.scale(dir, 1);
+
+        // base runners
+        ctx.strokeStyle = 'rgba(255,215,120,0.9)';
+        ctx.lineWidth = 3.2;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(-14, 10); ctx.quadraticCurveTo(-2, 14, 16, 11);
+        ctx.quadraticCurveTo(26, 10, 32, 2);
+        ctx.stroke();
+
+        // sleigh body
+        ctx.fillStyle = 'rgba(180,30,40,0.95)';
+        ctx.beginPath();
+        ctx.moveTo(-18, 6);
+        ctx.quadraticCurveTo(-22, -2, -12, -8);
+        ctx.lineTo(12, -8);
+        ctx.quadraticCurveTo(26, -8, 24, 6);
+        ctx.closePath();
+        ctx.fill();
+
+        // seat / gift sack
+        ctx.fillStyle = 'rgba(90,20,25,0.85)';
+        roundRect(ctx, -8, -16, 16, 10, 4); ctx.fill();
+
+        ctx.fillStyle = 'rgba(160,110,70,0.9)';
+        ctx.beginPath();
+        ctx.ellipse(6, -20, 10, 7, -0.25, 0, Math.PI*2);
+        ctx.fill();
+
+        // little gifts
+        ctx.globalAlpha = 0.95;
+        ctx.fillStyle = 'rgba(60,140,220,0.95)';
+        roundRect(ctx, -16, -14, 8, 7, 2); ctx.fill();
+        ctx.fillStyle = 'rgba(90,200,120,0.95)';
+        roundRect(ctx, -22, -10, 7, 6, 2); ctx.fill();
+
+        // trim highlight
+        ctx.globalAlpha = 0.75;
+        ctx.strokeStyle = 'rgba(255,235,210,0.65)';
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.moveTo(-12, -7);
+        ctx.quadraticCurveTo(0, -12, 18, -8);
+        ctx.stroke();
+
+        ctx.restore();
+      }
+
+      function roundRect(ctx, x, y, w, h, r) {
+        const rr = Math.min(r, w/2, h/2);
+        ctx.beginPath();
+        ctx.moveTo(x+rr, y);
+        ctx.arcTo(x+w, y, x+w, y+h, rr);
+        ctx.arcTo(x+w, y+h, x, y+h, rr);
+        ctx.arcTo(x, y+h, x, y, rr);
+        ctx.arcTo(x, y, x+w, y, rr);
+        ctx.closePath();
+      }
+
+      let santa = null;
+      let santaTimer = 0;
+      function maybeSpawnSanta(dt) {
+        if (reducedMotion) return;
+        santaTimer += dt;
+
+        // check roughly every 2 seconds
+        if (santaTimer < 2) return;
+        santaTimer = 0;
+
+        if (!santa || !santa.active) {
+          const pPerSec = (scene.santaChancePerMinute / 60);
+          // over a 2-second window
+          if (Math.random() < pPerSec * 2) {
+            santa = new SantaRun();
+          }
+        }
+      }
+
+      // ---------- Foreground "Kids" + Snowman + Snowballs ----------
+      const kidA = { xN: 0.26, yN: 0.80, phase: rand(0, 9), hue: 200 };
+      const kidB = { xN: 0.34, yN: 0.81, phase: rand(0, 9), hue: 330 };
+      const snowballs = [];
+
+      function spawnSnowball(fromKid, toX, toY) {
+        const x0 = fromKid.xN * W;
+        const y0 = fromKid.yN * H;
+        const x1 = toX, y1 = toY;
+        const t0 = scene.time;
+        const flight = rand(0.75, 1.15);
+        snowballs.push({ x0, y0, x1, y1, t0, flight });
+      }
+
+      let throwTimer = 0;
+      function stepKids(dt) {
+        if (reducedMotion) return;
+
+        throwTimer -= dt;
+        if (throwTimer <= 0) {
+          throwTimer = rand(0.9, 1.8);
+          const from = Math.random() < 0.5 ? kidA : kidB;
+          const to = (from === kidA) ? kidB : kidA;
+
+          // aim slightly above the other kid to feel playful
+          const tx = to.xN * W + rand(-18, 18);
+          const ty = to.yN * H - rand(28, 48);
+          spawnSnowball(from, tx, ty);
+        }
+      }
+
+      function drawSnowball(ctx, b) {
+        const t = (scene.time - b.t0) / b.flight;
+        if (t >= 1) return false;
+
+        const e = easeInOut(t);
+        const x = lerp(b.x0, b.x1, e);
+        // little arc
+        const arc = Math.sin(Math.PI * t) * 95;
+        const y = lerp(b.y0, b.y1, e) - arc;
+
+        // motion blur-ish
+        ctx.save();
+        ctx.globalAlpha = 0.9;
+        ctx.fillStyle = 'rgba(255,255,255,0.96)';
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = 'rgba(210,235,255,0.7)';
+        ctx.beginPath();
+        ctx.arc(x, y, 5.2, 0, Math.PI*2);
+        ctx.fill();
+        ctx.restore();
+
+        // tiny spark on impact moment (visual “poof”)
+        if (t > 0.94) {
+          ctx.save();
+          ctx.globalAlpha = (1 - t) * 7;
+          ctx.fillStyle = 'rgba(255,255,255,0.7)';
+          for (let i=0;i<6;i++) {
+            const a = i * (Math.PI/3);
+            ctx.beginPath();
+            ctx.arc(x + Math.cos(a)*10, y + Math.sin(a)*8, 2.2, 0, Math.PI*2);
+            ctx.fill();
+          }
+          ctx.restore();
+        }
+
+        return true;
+      }
+
+      function drawKid(ctx, kid, facing=1) {
+        const x = kid.xN * W;
+        const y = kid.yN * H;
+        const bounce = Math.sin(scene.time*3 + kid.phase) * 2.5;
+        const arm = Math.sin(scene.time*6 + kid.phase) * 0.45;
+
+        ctx.save();
+        ctx.translate(x, y + bounce);
+        ctx.scale(facing, 1);
+
+        // shadow on snow
+        ctx.globalAlpha = 0.28;
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.beginPath();
+        ctx.ellipse(0, 26, 22, 8, 0, 0, Math.PI*2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+
+        // legs
+        ctx.strokeStyle = 'rgba(40,50,70,0.9)';
+        ctx.lineWidth = 5;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(-6, 18); ctx.lineTo(-8, 28);
+        ctx.moveTo(6, 18);  ctx.lineTo(8, 28);
+        ctx.stroke();
+
+        // coat
+        ctx.fillStyle = `hsla(${kid.hue}, 65%, 55%, 0.95)`;
+        roundRect(ctx, -14, -2, 28, 26, 10); ctx.fill();
+
+        // scarf
+        ctx.fillStyle = 'rgba(255,235,220,0.9)';
+        roundRect(ctx, -12, -6, 24, 8, 4); ctx.fill();
+        ctx.fillStyle = 'rgba(255,120,90,0.7)';
+        roundRect(ctx, -6, -2, 12, 4, 2); ctx.fill();
+
+        // head
+        ctx.fillStyle = 'rgba(255,230,215,0.96)';
+        ctx.beginPath();
+        ctx.arc(0, -14, 10, 0, Math.PI*2);
+        ctx.fill();
+
+        // hat
+        ctx.fillStyle = `hsla(${kid.hue}, 65%, 42%, 0.95)`;
+        ctx.beginPath();
+        ctx.moveTo(-12, -14);
+        ctx.quadraticCurveTo(-2, -30, 12, -16);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        ctx.beginPath();
+        ctx.arc(10, -18, 4, 0, Math.PI*2);
+        ctx.fill();
+
+        // eyes (tiny)
+        ctx.fillStyle = 'rgba(30,30,40,0.85)';
+        ctx.beginPath();
+        ctx.arc(-3, -16, 1.2, 0, Math.PI*2);
+        ctx.arc(3, -16, 1.2, 0, Math.PI*2);
+        ctx.fill();
+
+        // arms
+        ctx.strokeStyle = 'rgba(40,50,70,0.9)';
+        ctx.lineWidth = 4.5;
+        ctx.beginPath();
+        ctx.moveTo(-12, 4); ctx.lineTo(-18, 10 + arm*10);
+        ctx.moveTo(12, 4);  ctx.lineTo(18, 10 - arm*10);
+        ctx.stroke();
+
+        // mitten holding snow (occasionally)
+        if (!reducedMotion) {
+          const hold = (Math.sin(scene.time*3 + kid.phase) + 1) * 0.5;
+          ctx.globalAlpha = 0.35 + 0.45*hold;
+          ctx.fillStyle = 'rgba(255,255,255,0.95)';
+          ctx.beginPath();
+          ctx.arc(18, 10 - arm*10, 3.2, 0, Math.PI*2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+
+        ctx.restore();
+      }
+
+      function drawSnowman(ctx) {
+        const x = 0.58 * W;
+        const y = scene.groundY() + 8;
+
+        ctx.save();
+        // shadow
+        ctx.globalAlpha = 0.20;
+        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+        ctx.beginPath();
+        ctx.ellipse(x, y + 40, 44, 12, 0, 0, Math.PI*2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+
+        // body
+        ctx.fillStyle = 'rgba(255,255,255,0.93)';
+        ctx.shadowBlur = 18;
+        ctx.shadowColor = 'rgba(210,235,255,0.35)';
+        ctx.beginPath(); ctx.arc(x, y + 26, 30, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(x, y - 2, 22, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(x, y - 26, 16, 0, Math.PI*2); ctx.fill();
+
+        // buttons
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = 'rgba(40,40,50,0.75)';
+        for (let i=0;i<3;i++) {
+          ctx.beginPath();
+          ctx.arc(x, y - 2 + i*13, 2.2, 0, Math.PI*2);
+          ctx.fill();
+        }
+
+        // carrot nose
+        ctx.fillStyle = 'rgba(255,140,70,0.95)';
+        ctx.beginPath();
+        ctx.moveTo(x+2, y - 27);
+        ctx.lineTo(x+18, y - 24);
+        ctx.lineTo(x+2, y - 21);
+        ctx.closePath();
+        ctx.fill();
+
+        // eyes
+        ctx.fillStyle = 'rgba(30,30,40,0.75)';
+        ctx.beginPath();
+        ctx.arc(x-5, y - 30, 1.7, 0, Math.PI*2);
+        ctx.arc(x+6, y - 30, 1.7, 0, Math.PI*2);
+        ctx.fill();
+
+        // arms (sticks)
+        ctx.strokeStyle = 'rgba(120,85,60,0.9)';
+        ctx.lineWidth = 3;
+        ctx.lineCap = 'round';
+        const wave = reducedMotion ? 0 : Math.sin(scene.time*1.4) * 6;
+        ctx.beginPath();
+        ctx.moveTo(x-18, y - 2); ctx.lineTo(x-52, y - 12 + wave);
+        ctx.moveTo(x+18, y - 2); ctx.lineTo(x+56, y - 6 - wave);
+        ctx.stroke();
+
+        // scarf
+        ctx.fillStyle = 'rgba(210,70,70,0.9)';
+        roundRect(ctx, x-18, y - 18, 36, 9, 4); ctx.fill();
+        ctx.fillStyle = 'rgba(220,90,90,0.85)';
+        roundRect(ctx, x+4, y - 10, 10, 20, 4); ctx.fill();
+
+        // top hat
+        ctx.fillStyle = 'rgba(25,25,35,0.92)';
+        roundRect(ctx, x-14, y - 55, 28, 20, 6); ctx.fill();
+        ctx.fillStyle = 'rgba(35,35,45,0.95)';
+        roundRect(ctx, x-20, y - 38, 40, 7, 6); ctx.fill();
+        ctx.fillStyle = 'rgba(210,70,70,0.8)';
+        roundRect(ctx, x-14, y - 41, 28, 4, 2); ctx.fill();
+
+        ctx.restore();
+      }
+
+      // ---------- Landscape: hills + trees ----------
+      const treeLayers = [
+        { count: 26, yN: 0.70, scale: 0.55, alpha: 0.28, jitter: 0.08 },
+        { count: 20, yN: 0.74, scale: 0.78, alpha: 0.42, jitter: 0.10 },
+        { count: 14, yN: 0.80, scale: 1.05, alpha: 0.62, jitter: 0.12 },
+      ];
+      let trees = [];
+      function genTrees() {
+        trees = [];
+        for (let li=0; li<treeLayers.length; li++) {
+          const L = treeLayers[li];
+          for (let i=0;i<L.count;i++) {
+            trees.push({
+              layer: li,
+              xN: (i + Math.random()*0.6) / L.count,
+              yN: L.yN + rand(-L.jitter, L.jitter),
+              s: L.scale * rand(0.75, 1.2),
+              w: rand(0.85, 1.15),
+            });
+          }
+        }
+        trees.sort((a,b)=>a.yN-b.yN);
+      }
+      genTrees();
+      window.addEventListener('resize', genTrees, { passive: true });
+
+      function drawTree(ctx, x, y, s, alpha) {
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.translate(x, y);
+        ctx.scale(s, s);
+
+        // trunk
+        ctx.fillStyle = 'rgba(55,42,32,0.85)';
+        roundRect(ctx, -4, 18, 8, 14, 3); ctx.fill();
+
+        // boughs (3 tiers)
+        const colors = [
+          'rgba(12,36,26,0.95)',
+          'rgba(16,48,34,0.92)',
+          'rgba(18,58,42,0.90)',
+        ];
+        for (let i=0;i<3;i++) {
+          const w = 56 - i*10;
+          const h = 30 - i*2;
+          const yy = 12 - i*10;
+          ctx.fillStyle = colors[i];
+          ctx.beginPath();
+          ctx.moveTo(0, yy - h*0.55);
+          ctx.lineTo(w*0.55, yy + h*0.5);
+          ctx.lineTo(-w*0.55, yy + h*0.5);
+          ctx.closePath();
+          ctx.fill();
+
+          // snow frosting
+          ctx.globalAlpha *= 0.85;
+          ctx.fillStyle = 'rgba(255,255,255,0.22)';
+          ctx.beginPath();
+          ctx.moveTo(0, yy - h*0.55);
+          ctx.lineTo(w*0.40, yy + h*0.10);
+          ctx.lineTo(-w*0.40, yy + h*0.10);
+          ctx.closePath();
+          ctx.fill();
+          ctx.globalAlpha /= 0.85;
+        }
+
+        ctx.restore();
+      }
+
+      function drawHills(ctx) {
+        // Distant hills
+        ctx.save();
+        const y0 = H*0.62;
+        ctx.fillStyle = 'rgba(10,18,36,1)';
+        ctx.beginPath();
+        ctx.moveTo(0, H);
+        ctx.lineTo(0, y0);
+        for (let x=0; x<=W; x+=W/6) {
+          const n = Math.sin((x/W)*Math.PI*2 + scene.time*0.05) * 12;
+          ctx.quadraticCurveTo(
+            x + W/12, y0 + rand(-10, 10) + n,
+            x + W/6,  y0 + rand(-8, 8)  - n*0.2
+          );
+        }
+        ctx.lineTo(W, H);
+        ctx.closePath();
+        ctx.fill();
+
+        // Mid hill with mist edge
+        const y1 = H*0.70;
+        const grad = ctx.createLinearGradient(0, y1-80, 0, H);
+        grad.addColorStop(0, 'rgba(12,26,46,1)');
+        grad.addColorStop(1, 'rgba(6,10,18,1)');
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.moveTo(0, H);
+        ctx.lineTo(0, y1);
+        for (let x=0; x<=W; x+=W/7) {
+          const n = Math.sin((x/W)*Math.PI*2.2 - scene.time*0.06) * 18;
+          ctx.quadraticCurveTo(
+            x + W/14, y1 + rand(-14, 14) + n,
+            x + W/7,  y1 + rand(-10, 10) - n*0.15
+          );
+        }
+        ctx.lineTo(W, H);
+        ctx.closePath();
+        ctx.fill();
+
+        // Mist band
+        if (!reducedMotion) {
+          ctx.globalAlpha = 0.22;
+          ctx.fillStyle = 'rgba(255,255,255,0.08)';
+          const my = y1 + 20;
+          for (let i=0;i<6;i++) {
+            const p = scene.time*0.06 + i*0.9;
+            const mx = (i/6)*W + Math.sin(p*2)*50;
+            ctx.beginPath();
+            ctx.ellipse(mx, my + Math.sin(p*3)*10, 220, 42, 0.1, 0, Math.PI*2);
+            ctx.fill();
+          }
+          ctx.globalAlpha = 1;
+        }
+
+        ctx.restore();
+      }
+
+      function drawGround(ctx) {
+        const gy = scene.groundY();
+        ctx.save();
+
+        // snow ground gradient
+        const g = ctx.createLinearGradient(0, gy-80, 0, H);
+        g.addColorStop(0, 'rgba(210,230,255,0.40)');
+        g.addColorStop(0.55, 'rgba(160,195,230,0.35)');
+        g.addColorStop(1, 'rgba(65,90,120,0.55)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.moveTo(0, gy);
+        ctx.quadraticCurveTo(W*0.25, gy-30, W*0.5, gy);
+        ctx.quadraticCurveTo(W*0.75, gy+32, W, gy+10);
+        ctx.lineTo(W, H);
+        ctx.lineTo(0, H);
+        ctx.closePath();
+        ctx.fill();
+
+        // soft “drifts”
+        ctx.globalAlpha = 0.16;
+        ctx.fillStyle = 'rgba(255,255,255,0.38)';
+        for (let i=0;i<7;i++) {
+          const x = (i/7)*W + rand(-50, 50);
+          const y = gy + rand(10, 90);
+          ctx.beginPath();
+          ctx.ellipse(x, y, rand(140, 280), rand(24, 52), rand(-0.1, 0.1), 0, Math.PI*2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+
+        // subtle foreground sparkle
+        if (!reducedMotion) {
+          ctx.globalAlpha = 0.20;
+          ctx.fillStyle = 'rgba(255,255,255,0.30)';
+          for (let i=0;i<60;i++) {
+            const x = Math.random()*W;
+            const y = lerp(gy+10, H, Math.random());
+            const r = rand(0.6, 1.8);
+            ctx.beginPath();
+            ctx.arc(x, y, r, 0, Math.PI*2);
+            ctx.fill();
+          }
+          ctx.globalAlpha = 1;
+        }
+
+        ctx.restore();
+      }
+
+      function drawSky(ctx) {
+        ctx.save();
+
+        // base gradient
+        const g = ctx.createLinearGradient(0, 0, 0, H);
+        g.addColorStop(0, 'rgba(4, 8, 20, 1)');
+        g.addColorStop(0.35, 'rgba(7, 16, 36, 1)');
+        g.addColorStop(0.78, 'rgba(8, 18, 34, 1)');
+        g.addColorStop(1, 'rgba(6, 10, 18, 1)');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+
+        // aurora-ish ribbon
+        if (!reducedMotion) {
+          ctx.globalAlpha = 0.22;
+          ctx.save();
+          ctx.translate(0, H*0.08);
+          const ag = ctx.createLinearGradient(0, 0, W, 0);
+          ag.addColorStop(0, 'rgba(120,255,210,0.0)');
+          ag.addColorStop(0.25, 'rgba(120,255,210,0.20)');
+          ag.addColorStop(0.55, 'rgba(120,170,255,0.18)');
+          ag.addColorStop(0.85, 'rgba(190,120,255,0.12)');
+          ag.addColorStop(1, 'rgba(190,120,255,0.0)');
+          ctx.fillStyle = ag;
+
+          ctx.beginPath();
+          const amp = 26;
+          const freq = 2.2;
+          ctx.moveTo(0, 70);
+          for (let x=0; x<=W; x+=18) {
+            const t = scene.time*0.06;
+            const y = 70 + Math.sin((x/W)*Math.PI*2*freq + t) * amp
+                          + Math.sin((x/W)*Math.PI*2*(freq*0.6) - t*1.2) * (amp*0.55);
+            ctx.lineTo(x, y);
+          }
+          ctx.lineTo(W, 70+120);
+          ctx.lineTo(0, 70+120);
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+          ctx.globalAlpha = 1;
+        }
+
+        // stars
+        ctx.save();
+        for (const s of stars) {
+          const tw = 0.6 + 0.4*Math.sin(scene.time*s.tw + s.ph);
+          ctx.globalAlpha = s.a * tw;
+          ctx.fillStyle = 'rgba(255,255,255,1)';
+          ctx.beginPath();
+          ctx.arc(s.x*W, s.y*H, s.r, 0, Math.PI*2);
+          ctx.fill();
+        }
+        ctx.restore();
+        ctx.globalAlpha = 1;
+
+        // moon
+        const mx = scene.moon.x * W;
+        const my = scene.moon.y * H;
+
+        // moon glow
+        ctx.globalAlpha = 0.50;
+        const mg = ctx.createRadialGradient(mx, my, 1, mx, my, scene.moon.r*3.2);
+        mg.addColorStop(0, 'rgba(255,255,240,0.38)');
+        mg.addColorStop(0.35, 'rgba(210,230,255,0.14)');
+        mg.addColorStop(1, 'rgba(210,230,255,0)');
+        ctx.fillStyle = mg;
+        ctx.beginPath();
+        ctx.arc(mx, my, scene.moon.r*3.2, 0, Math.PI*2);
+        ctx.fill();
+
+        // moon disc + subtle crater shading
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = 'rgba(255,250,240,0.96)';
+        ctx.beginPath();
+        ctx.arc(mx, my, scene.moon.r, 0, Math.PI*2);
+        ctx.fill();
+
+        ctx.globalAlpha = 0.12;
+        ctx.fillStyle = 'rgba(70,90,120,1)';
+        for (let i=0;i<10;i++) {
+          const a = Math.random()*Math.PI*2;
+          const rr = rand(0.1, 0.9) * scene.moon.r*0.75;
+          const cx = mx + Math.cos(a)*rr;
+          const cy = my + Math.sin(a)*rr*0.8;
+          ctx.beginPath();
+          ctx.arc(cx, cy, rand(2.5, 7.5), 0, Math.PI*2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+
+        ctx.restore();
+      }
+
+      // ---------- Wind & Atmosphere ----------
+      let windTimer = 0;
+      function stepWind(dt) {
+        windTimer -= dt;
+        if (windTimer <= 0) {
+          windTimer = rand(2.8, 5.5);
+          scene.windTarget = rand(-18, 22) * (reducedMotion ? 0.35 : 1.0);
+        }
+        scene.wind = lerp(scene.wind, scene.windTarget, 1 - Math.exp(-dt*0.6));
+      }
+
+      // ---------- Main loop ----------
+      let last = performance.now();
+      function frame(now) {
+        const dtRaw = (now - last) / 1000;
+        const dt = clamp(dtRaw, 0, 0.05);
+        last = now;
+
+        scene.time += dt;
+
+        // background
+        drawSky(ctx);
+
+        // wind + ambient
+        stepWind(dt);
+
+        // hills + tree silhouettes
+        drawHills(ctx);
+
+        // trees
+        const parallax = [0.10, 0.22, 0.38];
+        for (const tr of trees) {
+          const px = scene.wind * parallax[tr.layer] * (tr.layer+1) * 0.6;
+          const x = tr.xN*W + px;
+          const y = tr.yN*H;
+          const a = [0.28, 0.42, 0.62][tr.layer];
+          drawTree(ctx, x, y, tr.s*tr.w, a);
+        }
+
+        // Santa
+        maybeSpawnSanta(dt);
+        if (santa && santa.active) santa.draw(ctx);
+
+        // ground
+        drawGround(ctx);
+
+        // snowman + kids
+        drawSnowman(ctx);
+        if (!reducedMotion) stepKids(dt);
+        drawKid(ctx, kidA, 1);
+        drawKid(ctx, kidB, -1);
+
+        // snowballs
+        for (let i=snowballs.length-1;i>=0;i--) {
+          if (!drawSnowball(ctx, snowballs[i])) snowballs.splice(i, 1);
+        }
+
+        // snow
+        for (const f of flakes) f.step(dt);
+        // draw far-to-near for depth
+        for (const layer of [0,1,2]) {
+          for (const f of flakes) if (f.layer === layer) f.draw(ctx);
+        }
+
+        // gentle fog at bottom
+        if (!reducedMotion) {
+          ctx.save();
+          ctx.globalAlpha = 0.18;
+          const gy = scene.groundY();
+          const fog = ctx.createLinearGradient(0, gy-40, 0, H);
+          fog.addColorStop(0, 'rgba(255,255,255,0)');
+          fog.addColorStop(0.55, 'rgba(255,255,255,0.08)');
+          fog.addColorStop(1, 'rgba(255,255,255,0.16)');
+          ctx.fillStyle = fog;
+          ctx.fillRect(0, gy-40, W, H-(gy-40));
+          ctx.restore();
+        }
+
+        requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+
+      // ---------- Optional: tiny keyboard controls (useful on a dev machine) ----------
+      // S = toggle more/less snow; W = gust; H = hide corner label
+      document.addEventListener('keydown', (e) => {
+        const k = (e.key || '').toLowerCase();
+        if (k === 's') scene.snowIntensity = scene.snowIntensity > 0.8 ? 0.55 : 1.0;
+        if (k === 'w') scene.windTarget = rand(-28, 30);
+        if (k === 'h') {
+          const el = document.querySelector('.corner');
+          el.style.display = (el.style.display === 'none') ? '' : 'none';
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
+

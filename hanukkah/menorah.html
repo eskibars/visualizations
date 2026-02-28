@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Hanukkah Menorah</title>
+  <style>
+    :root { --bg1:#050817; --bg2:#0a1333; }
+    html, body { height: 100%; }
+    body{
+      margin:0; overflow:hidden;
+      background:
+        radial-gradient(1200px 800px at 20% 20%, rgba(140,175,255,.14), transparent 55%),
+        radial-gradient(900px 700px at 80% 30%, rgba(255,215,120,.10), transparent 60%),
+        radial-gradient(700px 700px at 60% 90%, rgba(120,220,255,.08), transparent 60%),
+        linear-gradient(160deg, var(--bg1), var(--bg2));
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      display:flex; align-items:center; justify-content:center;
+    }
+
+    .stars{
+      position:fixed; inset:-20%;
+      background-image:
+        radial-gradient(2px 2px at 10% 20%, rgba(255,255,255,.65), transparent 55%),
+        radial-gradient(1px 1px at 30% 40%, rgba(255,255,255,.55), transparent 55%),
+        radial-gradient(1px 1px at 70% 25%, rgba(255,255,255,.55), transparent 55%),
+        radial-gradient(2px 2px at 85% 60%, rgba(255,255,255,.55), transparent 55%),
+        radial-gradient(1px 1px at 45% 75%, rgba(255,255,255,.45), transparent 55%),
+        radial-gradient(1px 1px at 15% 70%, rgba(255,255,255,.40), transparent 55%),
+        radial-gradient(2px 2px at 55% 15%, rgba(255,255,255,.50), transparent 55%);
+      background-size: 520px 520px;
+      filter: blur(.2px);
+      opacity:.55;
+      animation: drift 28s linear infinite;
+      pointer-events:none;
+    }
+    @keyframes drift{
+      from{ transform: translate3d(0,0,0); }
+      to{ transform: translate3d(-6%, 4%, 0); }
+    }
+
+    .wrap{
+      width: min(92vw, 1200px);
+      aspect-ratio: 1200 / 720;
+      position:relative;
+      filter: drop-shadow(0 18px 22px rgba(0,0,0,.55));
+    }
+    svg{ width:100%; height:100%; display:block; }
+
+    /* Flames */
+    .flame{ opacity:0; filter: drop-shadow(0 0 18px rgba(255,190,80,.55)); }
+    .lit .flame{ opacity:1; }
+
+    /* Anchor flicker to the bottom-center of the flame shape */
+    .flicker{
+      transform-box: fill-box;
+      transform-origin: 50% 100%;
+      animation: flicker 1.65s infinite ease-in-out;
+      will-change: transform, filter;
+    }
+    @keyframes flicker{
+      0%   { transform: rotate(-1.5deg) scaleX(1.02) scaleY(0.98); filter: blur(.15px); }
+      18%  { transform: rotate(0.8deg)  scaleX(0.99) scaleY(1.03); }
+      33%  { transform: rotate(-0.6deg) scaleX(1.01) scaleY(1.01); }
+      52%  { transform: rotate(1.4deg)  scaleX(0.98) scaleY(1.05); filter: blur(.35px); }
+      72%  { transform: rotate(-0.7deg) scaleX(1.02) scaleY(1.02); }
+      100% { transform: rotate(-1.5deg) scaleX(1.02) scaleY(0.98); filter: blur(.15px); }
+    }
+
+    .label{
+      position:fixed;
+      bottom: clamp(16px, 3vh, 40px);
+      left:50%;
+      transform: translateX(-50%);
+      text-align:center;
+      opacity:0;
+      transition: opacity .6s ease;
+      letter-spacing: .06em;
+      font-weight: 600;
+      text-transform: uppercase;
+      color: rgba(255,255,255,.78);
+      user-select:none;
+      z-index:10;
+    }
+    .label strong{
+      display:block;
+      font-size: clamp(18px, 2.2vw, 28px);
+      letter-spacing: .10em;
+      color: rgba(255,245,220,.92);
+      text-shadow: 0 0 18px rgba(255,200,80,.18);
+    }
+    .label span{
+      display:block;
+      margin-top: 8px;
+      font-size: clamp(12px, 1.2vw, 14px);
+      opacity:.9;
+    }
+
+    .help{
+      position:fixed;
+      top: 18px;
+      right: 18px;
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: rgba(10,15,35,.45);
+      border: 1px solid rgba(255,255,255,.12);
+      backdrop-filter: blur(10px);
+      font-size: 12px;
+      line-height: 1.35;
+      color: rgba(255,255,255,.75);
+      opacity: 0;
+      transition: opacity .6s ease;
+      max-width: 320px;
+      z-index: 11;
+      user-select:none;
+    }
+    .help code{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 11px;
+      color: rgba(255,245,220,.90);
+    }
+  </style>
+</head>
+<body>
+  <div class="stars"></div>
+
+  <div class="wrap" aria-label="Hanukkah menorah display">
+    <svg viewBox="0 0 1200 720" role="img" aria-label="Menorah with seated candles and anchored flames">
+      <defs>
+        <linearGradient id="gold" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0"   stop-color="#5c3808"/>
+          <stop offset="0.18" stop-color="#d6a23f"/>
+          <stop offset="0.45" stop-color="#f7d98b"/>
+          <stop offset="0.70" stop-color="#d6a23f"/>
+          <stop offset="1"   stop-color="#4b2d06"/>
+        </linearGradient>
+
+        <linearGradient id="gold2" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#ffe7a9"/>
+          <stop offset="1" stop-color="#a66a14"/>
+        </linearGradient>
+
+        <linearGradient id="wax" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0" stop-color="rgba(255,255,255,.72)"/>
+          <stop offset="0.25" stop-color="rgba(255,255,255,.94)"/>
+          <stop offset="0.55" stop-color="rgba(240,240,240,.92)"/>
+          <stop offset="0.78" stop-color="rgba(255,255,255,.86)"/>
+          <stop offset="1" stop-color="rgba(230,230,230,.74)"/>
+        </linearGradient>
+
+        <radialGradient id="flameCore" cx="50%" cy="70%" r="75%">
+          <stop offset="0" stop-color="rgba(255,245,225,.98)"/>
+          <stop offset="0.22" stop-color="rgba(255,235,210,.85)"/>
+          <stop offset="0.55" stop-color="rgba(255,180,70,.85)"/>
+          <stop offset="0.78" stop-color="rgba(255,120,10,.60)"/>
+          <stop offset="1" stop-color="rgba(255,80,0,.0)"/>
+        </radialGradient>
+
+        <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
+          <feGaussianBlur stdDeviation="2.2" result="b"/>
+          <feMerge>
+            <feMergeNode in="b"/>
+            <feMergeNode in="SourceGraphic"/>
+          </feMerge>
+        </filter>
+
+        <!-- Seats -->
+        <g id="seatRegular">
+          <ellipse cx="0" cy="6" rx="30" ry="10" fill="url(#gold)" opacity="0.98"/>
+          <ellipse cx="0" cy="6.5" rx="18" ry="6.3" fill="rgba(18,12,6,.55)"/>
+          <path d="M-22,6 C-10,0 10,0 22,6" fill="none" stroke="rgba(255,255,255,.35)" stroke-width="2"
+                stroke-linecap="round" opacity="0.55"/>
+        </g>
+        <g id="seatShamash">
+          <ellipse cx="0" cy="6" rx="32" ry="11" fill="url(#gold)" opacity="0.98"/>
+          <ellipse cx="0" cy="6.6" rx="19" ry="6.8" fill="rgba(18,12,6,.55)"/>
+          <path d="M-24,6 C-10,0 10,0 24,6" fill="none" stroke="rgba(255,255,255,.35)" stroke-width="2"
+                stroke-linecap="round" opacity="0.55"/>
+        </g>
+      </defs>
+
+      <!-- Menorah base -->
+      <g filter="url(#soft)">
+        <path d="M290 645
+                 C300 610, 360 590, 420 590
+                 L780 590
+                 C840 590, 900 610, 910 645
+                 C920 690, 860 710, 805 710
+                 L395 710
+                 C340 710, 280 690, 290 645 Z"
+              fill="url(#gold2)" opacity="0.98"/>
+        <path d="M360 590
+                 C375 535, 450 510, 520 510
+                 L680 510
+                 C750 510, 825 535, 840 590
+                 C850 630, 810 650, 770 650
+                 L430 650
+                 C390 650, 350 630, 360 590 Z"
+              fill="url(#gold)" opacity="0.98"/>
+
+        <path d="M560 510
+                 C560 430, 570 360, 600 310
+                 C630 360, 640 430, 640 510
+                 Z"
+              fill="url(#gold)" opacity="0.98"/>
+
+        <path d="M600 330
+                 C540 350, 500 390, 470 430
+                 C450 458, 430 468, 400 470
+                 C420 430, 450 380, 510 340
+                 C540 320, 570 308, 600 305
+                 Z"
+              fill="url(#gold)" opacity="0.98"/>
+        <path d="M600 330
+                 C660 350, 700 390, 730 430
+                 C750 458, 770 468, 800 470
+                 C780 430, 750 380, 690 340
+                 C660 320, 630 308, 600 305
+                 Z"
+              fill="url(#gold)" opacity="0.98"/>
+
+        <path d="M470 430
+                 C445 470, 405 505, 350 530
+                 C320 544, 300 565, 285 590
+                 C330 575, 385 555, 430 530
+                 C475 505, 500 475, 520 445
+                 Z"
+              fill="url(#gold)" opacity="0.98"/>
+        <path d="M730 430
+                 C755 470, 795 505, 850 530
+                 C880 544, 900 565, 915 590
+                 C870 575, 815 555, 770 530
+                 C725 505, 700 475, 680 445
+                 Z"
+              fill="url(#gold)" opacity="0.98"/>
+
+        <path d="M345 610 L855 610" stroke="rgba(255,255,255,.25)" stroke-width="3"
+              stroke-linecap="round" opacity=".35"/>
+      </g>
+
+      <!-- Candles (DIRECT DOM, not <use>, so CSS + JS work reliably) -->
+      <g id="candleGroups">
+        <!-- Helper: each candle group is positioned at cup CENTER X and cup TOP Y -->
+        <!-- Regular candle drawing -->
+        <!-- 1 -->
+        <g class="cgroup" data-index="1" transform="translate(155,460)">
+          <rect x="-35" y="0" width="70" height="32" rx="10" fill="url(#gold2)" opacity="0.98"/>
+          <use href="#seatRegular"/>
+          <rect x="-12" y="-155" width="24" height="180" rx="10" fill="url(#wax)"/>
+          <path d="M-7,-148 C-10,-110 -10,-60 -7,-20" fill="none" stroke="rgba(255,255,255,.22)" stroke-width="3" stroke-linecap="round" opacity="0.7"/>
+          <rect x="-1" y="-171" width="2" height="16" rx="1" fill="rgba(40,26,14,.95)"/>
+          <g class="flame" transform="translate(0,-257)">
+            <g class="flicker">
+              <ellipse cx="0" cy="40" rx="24" ry="36" fill="rgba(255,180,70,.20)"/>
+              <path d="M0,0 C11,11 18,23 18,38 C18,58 9,76 0,86 C-9,76 -18,58 -18,38 C-18,23 -11,11 0,0 Z" fill="url(#flameCore)"/>
+              <path d="M0,14 C7,21 10,28 10,38 C10,52 5,64 0,71 C-5,64 -10,52 -10,38 C-10,28 -7,21 0,14 Z" fill="rgba(255,245,225,.85)"/>
+            </g>
+          </g>
+        </g>
+
+        <!-- 2 -->
+        <g class="cgroup" data-index="2" transform="translate(285,460)">
+          <rect x="-35" y="0" width="70" height="32" rx="10" fill="url(#gold2)" opacity="0.98"/>
+          <use href="#seatRegular"/>
+          <rect x="-12" y="-155" width="24" height="180" rx="10" fill="url(#wax)"/>
+          <path d="M-7,-148 C-10,-110 -10,-60 -7,-20" fill="none" stroke="rgba(255,255,255,.22)" stroke-width="3" stroke-linecap="round" opacity="0.7"/>
+          <rect x="-1" y="-171" width="2" height="16" rx="1" fill="rgba(40,26,14,.95)"/>
+          <g class="flame" transform="translate(0,-257)">
+            <g class="flicker">
+              <ellipse cx="0" cy="40" rx="24" ry="36" fill="rgba(255,180,70,.20)"/>
+              <path d="M0,0 C11,11 18,23 18,38 C18,58 9,76 0,86 C-9,76 -18,58 -18,38 C-18,23 -11,11 0,0 Z" fill="url(#flameCore)"/>
+              <path d="M0,14 C7,21 10,28 10,38 C10,52 5,64 0,71 C-5,64 -10,52 -10,38 C-10,28 -7,21 0,14 Z" fill="rgba(255,245,225,.85)"/>
+            </g>
+          </g>
+        </g>
+
+        <!-- 3 -->
+        <g class="cgroup" data-index="3" transform="translate(415,460)">
+          <rect x="-35" y="0" width="70" height="32" rx="10" fill="url(#gold2)" opacity="0.98"/>
+          <use href="#seatRegular"/>
+          <rect x="-12" y="-155" width="24" height="180" rx="10" fill="url(#wax)"/>
+          <path d="M-7,-148 C-10,-110 -10,-60 -7,-20" fill="none" stroke="rgba(255,255,255,.22)" stroke-width="3" stroke-linecap="round" opacity="0.7"/>
+          <rect x="-1" y="-171" width="2" height="16" rx="1" fill="rgba(40,26,14,.95)"/>
+          <g class="flame" transform="translate(0,-257)">
+            <g class="flicker">
+              <ellipse cx="0" cy="40" rx="24" ry="36" fill="rgba(255,180,70,.20)"/>
+              <path d="M0,0 C11,11 18,23 18,38 C18,58 9,76 0,86 C-9,76 -18,58 -18,38 C-18,23 -11,11 0,0 Z" fill="url(#flameCore)"/>
+              <path d="M0,14 C7,21 10,28 10,38 C10,52 5,64 0,71 C-5,64 -10,52 -10,38 C-10,28 -7,21 0,14 Z" fill="rgba(255,245,225,.85)"/>
+            </g>
+          </g>
+        </g>
+
+        <!-- 4 -->
+        <g class="cgroup" data-index="4" transform="translate(545,460)">
+          <rect x="-35" y="0" width="70" height="32" rx="10" fill="url(#gold2)" opacity="0.98"/>
+          <use href="#seatRegular"/>
+          <rect x="-12" y="-155" width="24" height="180" rx="10" fill="url(#wax)"/>
+          <path d="M-7,-148 C-10,-110 -10,-60 -7,-20" fill="none" stroke="rgba(255,255,255,.22)" stroke-width="3" stroke-linecap="round" opacity="0.7"/>
+          <rect x="-1" y="-171" width="2" height="16" rx="1" fill="rgba(40,26,14,.95)"/>
+          <g class="flame" transform="translate(0,-257)">
+            <g class="flicker">
+              <ellipse cx="0" cy="40" rx="24" ry="36" fill="rgba(255,180,70,.20)"/>
+              <path d="M0,0 C11,11 18,23 18,38 C18,58 9,76 0,86 C-9,76 -18,58 -18,38 C-18,23 -11,11 0,0 Z" fill="url(#flameCore)"/>
+              <path d="M0,14 C7,21 10,28 10,38 C10,52 5,64 0,71 C-5,64 -10,52 -10,38 C-10,28 -7,21 0,14 Z" fill="rgba(255,245,225,.85)"/>
+            </g>
+          </g>
+        </g>
+
+        <!-- Shamash (0) -->
+        <g class="cgroup" data-index="0" data-shamash="1" transform="translate(600,425)">
+          <rect x="-35" y="0" width="70" height="32" rx="10" fill="url(#gold2)" opacity="0.98"/>
+          <use href="#seatShamash"/>
+          <rect x="-12" y="-190" width="24" height="225" rx="10" fill="url(#wax)"/>
+          <path d="M-7,-182 C-10,-132 -10,-60 -7,-16" fill="none" stroke="rgba(255,255,255,.22)" stroke-width="3" stroke-linecap="round" opacity="0.7"/>
+          <rect x="-1" y="-210" width="2" height="18" rx="1" fill="rgba(40,26,14,.95)"/>
+          <g class="flame" transform="translate(0,-296)">
+            <g class="flicker">
+              <ellipse cx="0" cy="42" rx="26" ry="40" fill="rgba(255,180,70,.20)"/>
+              <path d="M0,0 C12,12 20,25 20,41 C20,62 10,82 0,94 C-10,82 -20,62 -20,41 C-20,25 -12,12 0,0 Z" fill="url(#flameCore)"/>
+              <path d="M0,15 C8,23 11,31 11,42 C11,57 6,70 0,78 C-6,70 -11,57 -11,42 C-11,31 -8,23 0,15 Z" fill="rgba(255,245,225,.85)"/>
+            </g>
+          </g>
+        </g>
+
+        <!-- 5 -->
+        <g class="cgroup" data-index="5" transform="translate(655,460)">
+          <rect x="-35" y="0" width="70" height="32" rx="10" fill="url(#gold2)" opacity="0.98"/>
+          <use href="#seatRegular"/>
+          <rect x="-12" y="-155" width="24" height="180" rx="10" fill="url(#wax)"/>
+          <path d="M-7,-148 C-10,-110 -10,-60 -7,-20" fill="none" stroke="rgba(255,255,255,.22)" stroke-width="3" stroke-linecap="round" opacity="0.7"/>
+          <rect x="-1" y="-171" width="2" height="16" rx="1" fill="rgba(40,26,14,.95)"/>
+          <g class="flame" transform="translate(0,-257)">
+            <g class="flicker">
+              <ellipse cx="0" cy="40" rx="24" ry="36" fill="rgba(255,180,70,.20)"/>
+              <path d="M0,0 C11,11 18,23 18,38 C18,58 9,76 0,86 C-9,76 -18,58 -18,38 C-18,23 -11,11 0,0 Z" fill="url(#flameCore)"/>
+              <path d="M0,14 C7,21 10,28 10,38 C10,52 5,64 0,71 C-5,64 -10,52 -10,38 C-10,28 -7,21 0,14 Z" fill="rgba(255,245,225,.85)"/>
+            </g>
+          </g>
+        </g>
+
+        <!-- 6 -->
+        <g class="cgroup" data-index="6" transform="translate(785,460)">
+          <rect x="-35" y="0" width="70" height="32" rx="10" fill="url(#gold2)" opacity="0.98"/>
+          <use href="#seatRegular"/>
+          <rect x="-12" y="-155" width="24" height="180" rx="10" fill="url(#wax)"/>
+          <path d="M-7,-148 C-10,-110 -10,-60 -7,-20" fill="none" stroke="rgba(255,255,255,.22)" stroke-width="3" stroke-linecap="round" opacity="0.7"/>
+          <rect x="-1" y="-171" width="2" height="16" rx="1" fill="rgba(40,26,14,.95)"/>
+          <g class="flame" transform="translate(0,-257)">
+            <g class="flicker">
+              <ellipse cx="0" cy="40" rx="24" ry="36" fill="rgba(255,180,70,.20)"/>
+              <path d="M0,0 C11,11 18,23 18,38 C18,58 9,76 0,86 C-9,76 -18,58 -18,38 C-18,23 -11,11 0,0 Z" fill="url(#flameCore)"/>
+              <path d="M0,14 C7,21 10,28 10,38 C10,52 5,64 0,71 C-5,64 -10,52 -10,38 C-10,28 -7,21 0,14 Z" fill="rgba(255,245,225,.85)"/>
+            </g>
+          </g>
+        </g>
+
+        <!-- 7 -->
+        <g class="cgroup" data-index="7" transform="translate(915,460)">
+          <rect x="-35" y="0" width="70" height="32" rx="10" fill="url(#gold2)" opacity="0.98"/>
+          <use href="#seatRegular"/>
+          <rect x="-12" y="-155" width="24" height="180" rx="10" fill="url(#wax)"/>
+          <path d="M-7,-148 C-10,-110 -10,-60 -7,-20" fill="none" stroke="rgba(255,255,255,.22)" stroke-width="3" stroke-linecap="round" opacity="0.7"/>
+          <rect x="-1" y="-171" width="2" height="16" rx="1" fill="rgba(40,26,14,.95)"/>
+          <g class="flame" transform="translate(0,-257)">
+            <g class="flicker">
+              <ellipse cx="0" cy="40" rx="24" ry="36" fill="rgba(255,180,70,.20)"/>
+              <path d="M0,0 C11,11 18,23 18,38 C18,58 9,76 0,86 C-9,76 -18,58 -18,38 C-18,23 -11,11 0,0 Z" fill="url(#flameCore)"/>
+              <path d="M0,14 C7,21 10,28 10,38 C10,52 5,64 0,71 C-5,64 -10,52 -10,38 C-10,28 -7,21 0,14 Z" fill="rgba(255,245,225,.85)"/>
+            </g>
+          </g>
+        </g>
+
+        <!-- 8 -->
+        <g class="cgroup" data-index="8" transform="translate(1045,460)">
+          <rect x="-35" y="0" width="70" height="32" rx="10" fill="url(#gold2)" opacity="0.98"/>
+          <use href="#seatRegular"/>
+          <rect x="-12" y="-155" width="24" height="180" rx="10" fill="url(#wax)"/>
+          <path d="M-7,-148 C-10,-110 -10,-60 -7,-20" fill="none" stroke="rgba(255,255,255,.22)" stroke-width="3" stroke-linecap="round" opacity="0.7"/>
+          <rect x="-1" y="-171" width="2" height="16" rx="1" fill="rgba(40,26,14,.95)"/>
+          <g class="flame" transform="translate(0,-257)">
+            <g class="flicker">
+              <ellipse cx="0" cy="40" rx="24" ry="36" fill="rgba(255,180,70,.20)"/>
+              <path d="M0,0 C11,11 18,23 18,38 C18,58 9,76 0,86 C-9,76 -18,58 -18,38 C-18,23 -11,11 0,0 Z" fill="url(#flameCore)"/>
+              <path d="M0,14 C7,21 10,28 10,38 C10,52 5,64 0,71 C-5,64 -10,52 -10,38 C-10,28 -7,21 0,14 Z" fill="rgba(255,245,225,.85)"/>
+            </g>
+          </g>
+        </g>
+      </g>
+    </svg>
+  </div>
+
+  <div class="label" id="label">
+    <strong>Happy Hanukkah</strong>
+    <span>Night <span id="nightNum">8</span> • <span id="candleCount">9</span> flames</span>
+  </div>
+
+  <div class="help" id="help">
+    <div><b>Controls (via URL)</b></div>
+    <div><code>?night=1..8</code> — light that many candles (+ shamash)</div>
+    <div><code>?cycle=1</code> — slowly cycle nights</div>
+    <div><code>?label=1</code> — show “Happy Hanukkah”</div>
+    <div><code>?help=1</code> — show this overlay</div>
+  </div>
+
+  <script>
+    (function(){
+      const params = new URLSearchParams(location.search);
+      const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
+
+      let night = Number(params.get("night") ?? 8);
+      if (!Number.isFinite(night)) night = 8;
+      night = clamp(Math.round(night), 1, 8);
+
+      const cycle = params.get("cycle") === "1";
+      const showLabel = params.get("label") === "1";
+      const showHelp  = params.get("help") === "1";
+
+      const groups = Array.from(document.querySelectorAll(".cgroup"));
+
+      function applyNight(n){
+        groups.forEach(g => g.classList.remove("lit"));
+
+        // shamash always lit
+        const shamash = groups.find(g => g.dataset.shamash === "1" || g.dataset.index === "0");
+        if (shamash) shamash.classList.add("lit");
+
+        // light n candles from RIGHT to LEFT
+        for (let i = 8; i >= 8 - n + 1; i--){
+          const g = groups.find(x => Number(x.dataset.index) === i);
+          if (g) g.classList.add("lit");
+        }
+
+        document.getElementById("nightNum").textContent = String(n);
+        document.getElementById("candleCount").textContent = String(n + 1);
+      }
+
+      // Make flames feel unique (timing only; still anchored)
+      document.querySelectorAll(".flicker").forEach((el) => {
+        el.style.animationDelay = (-Math.random() * 1.2).toFixed(2) + "s";
+        el.style.animationDuration = (1.35 + Math.random() * 0.7).toFixed(2) + "s";
+      });
+
+      applyNight(night);
+
+      const label = document.getElementById("label");
+      const help  = document.getElementById("help");
+      if (showLabel) label.style.opacity = "1";
+      if (showHelp)  help.style.opacity  = "1";
+
+      if (cycle){
+        let current = night;
+        setInterval(() => {
+          current = current % 8 + 1;
+          applyNight(current);
+          if (showLabel) label.style.opacity = "1";
+        }, 8000);
+      }
+
+      // Best-effort keep-awake
+      try{
+        async function requestWakeLock(){
+          if (!("wakeLock" in navigator)) return;
+          await navigator.wakeLock.request("screen");
+          document.addEventListener("visibilitychange", () => {
+            if (document.visibilityState === "visible") requestWakeLock().catch(()=>{});
+          });
+        }
+        requestWakeLock().catch(()=>{});
+      }catch(e){}
+    })();
+  </script>
+</body>
+</html>
+
