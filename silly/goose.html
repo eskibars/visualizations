@@ -404,6 +404,7 @@
       // Audio state
       let audioEnabled = false;
       let audioCtx = null;
+      let silentMode = false;
 
       // --- Helpers ---
       const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
@@ -540,6 +541,7 @@
       }, { passive:true });
 
       window.addEventListener("click", (e) => {
+        if (silentMode) return;
         const t = performance.now();
         if (t - lastClickHonk < CFG.clickHonkCooldown) return;
         lastClickHonk = t;
@@ -558,7 +560,9 @@
         honk(window.innerWidth*0.5, window.innerHeight*0.5);
       });
 
-      silentBtn.addEventListener("click", () => {
+      silentBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        silentMode = true;
         audioEnabled = false;
         audioCtx = null;
         setOverlayVisible(false);
@@ -622,12 +626,10 @@
 
         // Catch detection
         const caught = d < CFG.catchRadius;
-        if (caught){
+        if (caught && !silentMode){
           const t = performance.now();
           if (t - lastCatchHonk > CFG.catchCooldown){
             lastCatchHonk = t;
-            // Try to honk at target position
-            // (May be silent if audio wasn't enabled.)
             honk(target.x, target.y);
           }
         }
