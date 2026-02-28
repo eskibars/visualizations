@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Ocean Sunset</title>
+  <style>
+    html,body{ margin:0; height:100%; overflow:hidden; background:#0a0510; }
+    canvas{ display:block; width:100vw; height:100vh; }
+    .vignette{
+      pointer-events:none; position:fixed; inset:0;
+      background: radial-gradient(120% 100% at 50% 45%,
+        rgba(0,0,0,0) 30%, rgba(0,0,0,0.45) 80%, rgba(0,0,0,0.7) 100%);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+<script>
+(() => {
+  // -------------------- Config --------------------
+  const CFG = {
+    dprCap: 2,
+    horizonY: 0.52,
+    sunX: 0.50,
+    sunY: 0.48,
+    sunRadius: 38,
+    cloudCount: 8,
+    boatSpawnChance: 0.012,
+    birdSpawnChance: 0.007,
+    maxBoats: 4,
+    maxBirds: 3,
+    waveLayerCount: 4,
+    starCount: 80,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1;
+
+  // -------------------- Utilities --------------------
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  // -------------------- Entity pools --------------------
+  let stars = [], clouds = [], waveLayers = [], boats = [], birdFlocks = [];
+  let noiseTile, noisePattern;
+
+  // -------------------- Init --------------------
+  function resize() {
+    DPR = Math.min(CFG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    initEntities();
+    buildNoise();
+  }
+  window.addEventListener('resize', resize, { passive: true });
+
+  function initEntities() {
+    // Stars
+    stars = Array.from({ length: CFG.starCount }, () => ({
+      x: Math.random(),
+      y: Math.random() * 0.38,
+      r: rand(0.5, 1.6),
+      twinkleSpeed: rand(0.5, 2.0),
+      phase: rand(0, Math.PI * 2),
+      baseAlpha: rand(0.15, 0.65),
+    }));
+
+    // Clouds
+    clouds = Array.from({ length: CFG.cloudCount }, () => makeCloud(rand(-0.2, 1.2) * W));
+
+    // Wave layers
+    waveLayers = [];
+    for (let i = 0; i < CFG.waveLayerCount; i++) {
+      const depth = i / (CFG.waveLayerCount - 1);
+      waveLayers.push({
+        depth,
+        yOffset: lerp(0, H * 0.42, depth),
+        amplitude: lerp(2, 10, depth),
+        frequency: lerp(0.008, 0.018, depth),
+        speed: lerp(0.3, 0.8, depth),
+        phase: rand(0, Math.PI * 2),
+        amp2: lerp(1, 5, depth),
+        freq2: lerp(0.015, 0.035, depth),
+        speed2: lerp(0.15, 0.5, depth),
+        phase2: rand(0, Math.PI * 2),
+      });
+    }
+  }
+
+  function makeCloud(startX) {
+    const speed = rand(4, 18);
+    return {
+      x: startX,
+      y: rand(0.06, 0.40) * H,
+      width: rand(110, 280),
+      height: rand(22, 55),
+      speed,
+      alpha: lerp(0.08, 0.22, speed / 18),
+      hue: rand(15, 45),
+      sat: rand(30, 60),
+      lit: rand(72, 90),
+      puffs: (rand(3, 6) | 0),
+      puffOffsets: Array.from({ length: 6 }, () => ({
+        dx: rand(-0.4, 0.4),
+        dy: rand(-0.35, 0.35),
+        sx: rand(0.6, 1.2),
+        sy: rand(0.6, 1.1),
+      })),
+    };
+  }
+
+  function makeBoat(dir) {
+    const depth = rand(0.15, 0.85);
+    return {
+      x: dir === 1 ? -60 : W + 60,
+      direction: dir,
+      depth,
+      speed: lerp(10, 28, depth),
+      size: lerp(0.35, 1.0, depth),
+      waveLayerIdx: Math.min(CFG.waveLayerCount - 1, Math.floor(depth * CFG.waveLayerCount)),
+    };
+  }
+
+  function makeFlock(dir) {
+    const count = (rand(3, 7) | 0);
+    return {
+      x: dir === 1 ? -40 : W + 40,
+      y: rand(0.06, 0.32) * H,
+      speed: rand(30, 55),
+      direction: dir,
+      birds: Array.from({ length: count }, () => ({
+        dx: rand(-22, 22),
+        dy: rand(-12, 12),
+        flapPhase: rand(0, Math.PI * 2),
+        flapSpeed: rand(4, 7),
+        wingSpan: rand(5, 11),
+      })),
+    };
+  }
+
+  // -------------------- Noise / Grain --------------------
+  function buildNoise() {
+    noiseTile = document.createElement('canvas');
+    const s = 180;
+    noiseTile.width = s;
+    noiseTile.height = s;
+    const nctx = noiseTile.getContext('2d');
+    const img = nctx.createImageData(s, s);
+    const d = img.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const v = (Math.random() * 255) | 0;
+      d[i] = v; d[i+1] = v; d[i+2] = v;
+      d[i+3] = (Math.random() * 30) | 0;
+    }
+    nctx.putImageData(img, 0, 0);
+    noisePattern = ctx.createPattern(noiseTile, 'repeat');
+  }
+
+  // -------------------- Wave function --------------------
+  function waveY(layer, x, time) {
+    const horizY = H * CFG.horizonY;
+    const baseY = horizY + layer.yOffset;
+    const y1 = Math.sin(x * layer.frequency + time * layer.speed + layer.phase) * layer.amplitude;
+    const y2 = Math.sin(x * layer.freq2 + time * layer.speed2 + layer.phase2) * layer.amp2;
+    return baseY + y1 + y2;
+  }
+
+  // -------------------- Draw: Sky --------------------
+  function drawSky() {
+    const g = ctx.createLinearGradient(0, 0, 0, H * CFG.horizonY + 20);
+    g.addColorStop(0,    'rgb(15, 10, 45)');
+    g.addColorStop(0.25, 'rgb(50, 20, 72)');
+    g.addColorStop(0.50, 'rgb(145, 42, 52)');
+    g.addColorStop(0.75, 'rgb(220, 120, 42)');
+    g.addColorStop(0.92, 'rgb(250, 170, 65)');
+    g.addColorStop(1,    'rgb(255, 195, 90)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H * CFG.horizonY + 20);
+  }
+
+  // -------------------- Draw: Stars --------------------
+  function drawStars(time) {
+    ctx.save();
+    for (const s of stars) {
+      const a = s.baseAlpha * (0.55 + 0.45 * Math.sin(time * s.twinkleSpeed + s.phase));
+      if (a < 0.04) continue;
+      ctx.globalAlpha = a;
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(s.x * W, s.y * H, s.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // -------------------- Draw: Sun --------------------
+  function drawSun(time) {
+    const sx = W * CFG.sunX;
+    const sy = H * CFG.sunY;
+    ctx.save();
+
+    // Wide ambient glow
+    const g1 = ctx.createRadialGradient(sx, sy, 0, sx, sy, 220);
+    g1.addColorStop(0, 'rgba(255, 190, 90, 0.30)');
+    g1.addColorStop(0.4, 'rgba(255, 140, 60, 0.10)');
+    g1.addColorStop(1, 'rgba(255, 100, 40, 0)');
+    ctx.fillStyle = g1;
+    ctx.fillRect(sx - 240, sy - 240, 480, 480);
+
+    // Sun disc
+    const g2 = ctx.createRadialGradient(sx, sy, 0, sx, sy, CFG.sunRadius);
+    g2.addColorStop(0, 'rgba(255, 250, 220, 0.96)');
+    g2.addColorStop(0.6, 'rgba(255, 220, 140, 0.80)');
+    g2.addColorStop(1, 'rgba(255, 180, 80, 0)');
+    ctx.fillStyle = g2;
+    ctx.beginPath();
+    ctx.arc(sx, sy, CFG.sunRadius * 1.4, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  // -------------------- Draw: Crepuscular rays --------------------
+  function drawRays(time) {
+    const sx = W * CFG.sunX;
+    const sy = H * CFG.sunY;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+
+    const rayCount = 14;
+    for (let i = 0; i < rayCount; i++) {
+      const angle = -Math.PI * 0.85 + (i / (rayCount - 1)) * Math.PI * 0.7;
+      const wobble = Math.sin(time * 0.15 + i * 1.3) * 0.03;
+      const a = angle + wobble;
+      const len = Math.max(W, H) * 0.85;
+      const width = 0.045 + Math.sin(time * 0.2 + i * 2.1) * 0.015;
+      const brightness = 0.06 + Math.sin(time * 0.12 + i * 0.9) * 0.03;
+
+      const grad = ctx.createLinearGradient(sx, sy, sx + Math.cos(a) * len, sy + Math.sin(a) * len);
+      grad.addColorStop(0, `rgba(255, 220, 160, ${brightness})`);
+      grad.addColorStop(0.25, `rgba(255, 200, 140, ${brightness * 0.4})`);
+      grad.addColorStop(1, 'rgba(255, 180, 120, 0)');
+
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(sx + Math.cos(a - width) * len, sy + Math.sin(a - width) * len);
+      ctx.lineTo(sx + Math.cos(a + width) * len, sy + Math.sin(a + width) * len);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // -------------------- Draw: Clouds --------------------
+  function updateClouds(dt) {
+    for (const c of clouds) {
+      c.x += c.speed * dt;
+      if (c.x - c.width > W + 20) {
+        Object.assign(c, makeCloud(-c.width - rand(10, 80)));
+      }
+    }
+  }
+
+  function drawClouds(time) {
+    ctx.save();
+    ctx.filter = 'blur(6px)';
+    for (const c of clouds) {
+      for (let p = 0; p < c.puffs; p++) {
+        const po = c.puffOffsets[p];
+        const px = c.x + po.dx * c.width;
+        const py = c.y + po.dy * c.height;
+        const rw = c.width * 0.5 * po.sx;
+        const rh = c.height * 0.5 * po.sy;
+        const grad = ctx.createRadialGradient(px, py, 0, px, py, rw);
+        grad.addColorStop(0, `hsla(${c.hue}, ${c.sat}%, ${c.lit}%, ${c.alpha})`);
+        grad.addColorStop(0.6, `hsla(${c.hue}, ${c.sat}%, ${c.lit}%, ${c.alpha * 0.4})`);
+        grad.addColorStop(1, `hsla(${c.hue}, ${c.sat}%, ${c.lit}%, 0)`);
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.ellipse(px, py, rw, rh, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  // -------------------- Draw: Sun reflection on water --------------------
+  function drawSunReflection(time) {
+    const sx = W * CFG.sunX;
+    const horizY = H * CFG.horizonY;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+
+    for (let y = horizY; y < H; y += 3) {
+      const t = (y - horizY) / (H - horizY);
+      const baseWidth = lerp(6, 55, t);
+      const shimmer = 0.7 + 0.3 * Math.sin(time * 2.5 + y * 0.06);
+      const width = baseWidth * shimmer;
+      const alpha = lerp(0.22, 0.02, t) * (0.6 + 0.4 * Math.sin(time * 3.2 + y * 0.09));
+      const jitterX = Math.sin(time * 1.8 + y * 0.12) * lerp(2, 18, t);
+
+      ctx.fillStyle = `rgba(255, 200, 120, ${Math.max(0, alpha)})`;
+      ctx.fillRect(sx - width / 2 + jitterX, y, width, 2.5);
+    }
+    ctx.restore();
+  }
+
+  // -------------------- Draw: Ocean wave layers --------------------
+  function drawWaveLayer(layer, time, idx) {
+    const horizY = H * CFG.horizonY;
+    const step = 3;
+    const t = layer.depth;
+
+    // Vertical gradient per wave layer: warm at top (horizon), deeper at bottom
+    const topY = horizY + layer.yOffset - layer.amplitude - layer.amp2;
+    const grad = ctx.createLinearGradient(0, topY, 0, H);
+    // Far layers reflect sunset warmth, near layers are deep ocean
+    const rTop = Math.round(lerp(160, 25, t));
+    const gTop = Math.round(lerp(95, 50, t));
+    const bTop = Math.round(lerp(60, 75, t));
+    const rBot = Math.round(lerp(80, 8, t));
+    const gBot = Math.round(lerp(50, 30, t));
+    const bBot = Math.round(lerp(40, 60, t));
+    grad.addColorStop(0, `rgb(${rTop}, ${gTop}, ${bTop})`);
+    grad.addColorStop(1, `rgb(${rBot}, ${gBot}, ${bBot})`);
+
+    ctx.save();
+    ctx.globalAlpha = lerp(0.70, 1.0, t);
+    ctx.fillStyle = grad;
+
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    for (let x = 0; x <= W; x += step) {
+      ctx.lineTo(x, waveY(layer, x, time));
+    }
+    ctx.lineTo(W, H);
+    ctx.closePath();
+    ctx.fill();
+
+    // Foam at crests (only on nearer layers)
+    if (t > 0.3) {
+      ctx.globalAlpha = lerp(0.05, 0.22, t);
+      ctx.fillStyle = '#fff';
+      let prevY = waveY(layer, 0, time);
+      let prevDy = 0;
+      for (let x = step; x <= W; x += step) {
+        const curY = waveY(layer, x, time);
+        const dy = curY - prevY;
+        if (prevDy < 0 && dy >= 0) {
+          // Local minimum (crest)
+          const foamW = rand(4, 12) * lerp(0.5, 1, t);
+          const foamH = rand(1, 3);
+          ctx.beginPath();
+          ctx.ellipse(x - step * 0.5, prevY - 1, foamW, foamH, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        prevDy = dy;
+        prevY = curY;
+      }
+    }
+
+    ctx.restore();
+  }
+
+  // -------------------- Draw: Boats --------------------
+  function maybeSpawnBoat(dt) {
+    if (boats.length >= CFG.maxBoats) return;
+    if (Math.random() < CFG.boatSpawnChance * dt) {
+      const dir = Math.random() < 0.5 ? 1 : -1;
+      boats.push(makeBoat(dir));
+    }
+  }
+
+  function updateBoats(dt) {
+    for (let i = boats.length - 1; i >= 0; i--) {
+      const b = boats[i];
+      b.x += b.direction * b.speed * dt;
+      if ((b.direction === 1 && b.x > W + 80) || (b.direction === -1 && b.x < -80)) {
+        boats.splice(i, 1);
+      }
+    }
+  }
+
+  function drawBoat(boat, time) {
+    const layer = waveLayers[boat.waveLayerIdx];
+    const y = waveY(layer, boat.x, time);
+    const slope = (waveY(layer, boat.x + 3, time) - waveY(layer, boat.x - 3, time)) / 6;
+    const tilt = Math.atan(slope);
+    const s = boat.size;
+
+    ctx.save();
+    ctx.translate(boat.x, y);
+    ctx.rotate(tilt);
+    ctx.scale(s, s);
+
+    // Hull
+    ctx.fillStyle = 'rgba(18, 14, 10, 0.85)';
+    ctx.beginPath();
+    ctx.moveTo(-22, 0);
+    ctx.quadraticCurveTo(-16, 9, 0, 9);
+    ctx.quadraticCurveTo(16, 9, 24, 2);
+    ctx.lineTo(22, 0);
+    ctx.closePath();
+    ctx.fill();
+
+    // Mast
+    ctx.strokeStyle = 'rgba(18, 14, 10, 0.9)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(2, 0);
+    ctx.lineTo(2, -32);
+    ctx.stroke();
+
+    // Sail
+    ctx.fillStyle = 'rgba(35, 28, 22, 0.70)';
+    ctx.beginPath();
+    ctx.moveTo(2, -30);
+    ctx.quadraticCurveTo(20 * boat.direction, -17, 2, -4);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  // -------------------- Draw: Birds --------------------
+  function maybeSpawnBirds(dt) {
+    if (birdFlocks.length >= CFG.maxBirds) return;
+    if (Math.random() < CFG.birdSpawnChance * dt) {
+      const dir = Math.random() < 0.5 ? 1 : -1;
+      birdFlocks.push(makeFlock(dir));
+    }
+  }
+
+  function updateBirds(dt) {
+    for (let i = birdFlocks.length - 1; i >= 0; i--) {
+      const f = birdFlocks[i];
+      f.x += f.direction * f.speed * dt;
+      if ((f.direction === 1 && f.x > W + 60) || (f.direction === -1 && f.x < -60)) {
+        birdFlocks.splice(i, 1);
+      }
+    }
+  }
+
+  function drawFlock(flock, time) {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(15, 10, 10, 0.60)';
+    ctx.lineWidth = 1.4;
+    ctx.lineCap = 'round';
+    for (const bird of flock.birds) {
+      const bx = flock.x + bird.dx;
+      const by = flock.y + bird.dy;
+      const wingAngle = Math.sin(time * bird.flapSpeed + bird.flapPhase) * 0.55;
+      const ws = bird.wingSpan;
+      ctx.beginPath();
+      ctx.moveTo(bx - ws, by - Math.sin(wingAngle) * ws * 0.45);
+      ctx.lineTo(bx, by);
+      ctx.lineTo(bx + ws, by - Math.sin(wingAngle) * ws * 0.45);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // -------------------- Draw: Grain --------------------
+  function drawGrain(time) {
+    if (!noisePattern) return;
+    ctx.save();
+    ctx.globalCompositeOperation = 'overlay';
+    ctx.globalAlpha = 0.05;
+    ctx.translate(Math.sin(time * 0.7) * 40, Math.cos(time * 0.5) * 40);
+    ctx.fillStyle = noisePattern;
+    ctx.fillRect(-60, -60, W + 120, H + 120);
+    ctx.restore();
+  }
+
+  // -------------------- Main loop --------------------
+  let last = performance.now();
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    // 1. Sky
+    drawSky();
+
+    // Fill below horizon with dark ocean base (gradient from warm to deep)
+    const oceanBase = ctx.createLinearGradient(0, H * CFG.horizonY, 0, H);
+    oceanBase.addColorStop(0, 'rgb(100, 55, 35)');
+    oceanBase.addColorStop(0.3, 'rgb(25, 40, 60)');
+    oceanBase.addColorStop(1, 'rgb(5, 18, 38)');
+    ctx.fillStyle = oceanBase;
+    ctx.fillRect(0, H * CFG.horizonY, W, H * (1 - CFG.horizonY));
+
+    // 2. Stars
+    drawStars(time);
+
+    // 3. Sun
+    drawSun(time);
+
+    // 4. Rays
+    drawRays(time);
+
+    // 5. Clouds
+    updateClouds(dt);
+    drawClouds(time);
+
+    // 6. Sun reflection
+    drawSunReflection(time);
+
+    // 7. Ocean waves (back to front)
+    for (let i = 0; i < waveLayers.length; i++) {
+      drawWaveLayer(waveLayers[i], time, i);
+    }
+
+    // 8. Boats
+    maybeSpawnBoat(dt);
+    updateBoats(dt);
+    boats.sort((a, b) => a.depth - b.depth);
+    for (const boat of boats) drawBoat(boat, time);
+
+    // 9. Birds
+    maybeSpawnBirds(dt);
+    updateBirds(dt);
+    for (const flock of birdFlocks) drawFlock(flock, time);
+
+    // 10. Grain
+    drawGrain(time);
+
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
