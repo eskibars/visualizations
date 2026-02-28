@@ -313,42 +313,73 @@
   initSim();
 
   function seedBase() {
-    // Seed the bottom row with a shaped heat source (centered, log-width)
-    const y = sim.h - 1;
-    const cx = sim.w * 0.5;
-    const spread = sim.w * 0.22;
-    for (let x = 0; x < sim.w; x++) {
-      const dx = (x - cx) / spread;
-      const shape = Math.exp(-dx*dx);
-      const jitter = 0.85 + Math.random() * 0.35;
-      const v = Math.floor(255 * shape * jitter * sim.intensity);
-      sim.buf[y * sim.w + x] = v;
+    const {w, h, buf} = sim;
+    const cx = w * 0.5;
+    const spread = w * 0.28;
+
+    // Seed bottom two rows for a thicker heat bed
+    for (let row = 0; row < 3; row++) {
+      const y = h - 1 - row;
+      for (let x = 0; x < w; x++) {
+        const dx = (x - cx) / spread;
+        const shape = Math.exp(-dx * dx);
+        const jitter = 0.82 + Math.random() * 0.38;
+        const v = Math.floor(255 * shape * jitter * sim.intensity);
+        buf[y * w + x] = Math.max(buf[y * w + x], v);
+      }
+    }
+
+    // Hot spots over the log positions to create separate flame tongues
+    const hotspots = [
+      { cx: w * 0.36, spread: w * 0.08, strength: 0.9 },
+      { cx: w * 0.50, spread: w * 0.10, strength: 1.0 },
+      { cx: w * 0.64, spread: w * 0.08, strength: 0.9 },
+    ];
+    for (const hs of hotspots) {
+      for (let row = 0; row < 5; row++) {
+        const y = h - 1 - row;
+        for (let x = 0; x < w; x++) {
+          const dx = (x - hs.cx) / hs.spread;
+          const shape = Math.exp(-dx * dx);
+          const jitter = 0.80 + Math.random() * 0.40;
+          const v = Math.floor(255 * shape * jitter * hs.strength * sim.intensity);
+          buf[y * w + x] = Math.max(buf[y * w + x], v);
+        }
+      }
     }
   }
 
   function stepFire() {
+    const {w, h, buf} = sim;
     seedBase();
-    // Propagate upward with random decay + lateral drift
-    // Iterate from y=1 upward so it uses the row below as the source
-    for (let y = 1; y < sim.h; y++) {
-      const row = y * sim.w;
-      const below = (y + 1 < sim.h) ? (y + 1) * sim.w : row;
 
-      for (let x = 0; x < sim.w; x++) {
-        const src = below + x;
-        const rnd = (Math.random() * 4) | 0; // 0..3
-        const decay = rnd;                   // stronger decay near top naturally
-        const val = sim.buf[src];
-        let out = val - decay;
-        if (out < 0) out = 0;
+    // Propagate upward using neighbor averaging for smooth, organic flames
+    // Work from top to bottom so we read from unmodified rows below
+    for (let y = 0; y < h - 3; y++) {
+      for (let x = 0; x < w; x++) {
+        // Sample a kernel from the row(s) below and average
+        const y1 = y + 1, y2 = Math.min(y + 2, h - 1);
+        const xl = Math.max(0, x - 1), xr = Math.min(w - 1, x + 1);
 
-        // drift left/right
-        const shift = (rnd - 1); // -1..2
-        let dx = x + shift;
-        if (dx < 0) dx += sim.w;
-        if (dx >= sim.w) dx -= sim.w;
+        // Weighted average: heavier on directly below, lighter on diagonals
+        const sum =
+          buf[y1 * w + xl] +
+          buf[y1 * w + x] * 2 +
+          buf[y1 * w + xr] +
+          buf[y2 * w + x];
+        const avg = sum / 5;
 
-        sim.buf[row + dx] = out;
+        // Random decay — slightly more near the top for natural tapering
+        const heightRatio = 1 - y / h;
+        const decay = (Math.random() * 2.8) + (heightRatio * 0.6);
+
+        // Small random lateral drift
+        const drift = ((Math.random() * 3) | 0) - 1; // -1, 0, or 1
+        let dx = x + drift;
+        if (dx < 0) dx = 0;
+        if (dx >= w) dx = w - 1;
+
+        buf[y * w + dx] = Math.max(0, Math.floor(avg - decay));
       }
     }
   }
@@ -671,9 +702,10 @@
     }
     renderFireToImage();
 
-    // Draw fire: base (smooth upscale)
+    // Draw fire: layered passes for smooth, organic flames
     ctx.save();
     ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
 
     // Slightly squash to feel like it originates at logs
     const fireX = w*0.12;
@@ -681,21 +713,31 @@
     const fireW = w*0.76;
     const fireH = h*0.86;
 
-    // Glow pass
+    // Wide ambient glow (diffuse light on walls)
     ctx.globalCompositeOperation = 'screen';
+    ctx.globalAlpha = 0.35;
+    ctx.filter = 'blur(28px)';
+    ctx.drawImage(sim.img, fireX - 20, fireY - 10, fireW + 40, fireH + 10);
+
+    // Medium glow (flame halo)
     ctx.globalAlpha = 0.50;
-    ctx.filter = 'blur(14px)';
+    ctx.filter = 'blur(12px)';
     ctx.drawImage(sim.img, fireX, fireY, fireW, fireH);
 
-    // Main flame pass
-    ctx.filter = 'blur(0px)';
-    ctx.globalAlpha = 0.96;
+    // Core flame — soft enough to hide pixels, sharp enough for detail
+    ctx.globalAlpha = 0.92;
     ctx.globalCompositeOperation = 'lighter';
+    ctx.filter = 'blur(4px)';
     ctx.drawImage(sim.img, fireX, fireY, fireW, fireH);
+
+    // Bright inner core for hottest areas
+    ctx.globalAlpha = 0.30;
+    ctx.filter = 'blur(2px)';
+    ctx.drawImage(sim.img, fireX + fireW*0.1, fireY + fireH*0.1, fireW*0.8, fireH*0.8);
 
     // Tone it down a hair for realism
     ctx.globalCompositeOperation = 'source-over';
-    ctx.globalAlpha = 0.12;
+    ctx.globalAlpha = 0.10;
     ctx.fillStyle = 'rgba(0,0,0,1)';
     ctx.fillRect(0,0,w,h);
     ctx.restore();
