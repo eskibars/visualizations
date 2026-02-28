@@ -7,44 +7,46 @@ import urllib.parse
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
-def safe_subdir_from_url_path(url_path: str) -> str | None:
-    """
-    Returns a sanitized single directory name, or None for "no directory".
-    Accepts:
-      - "/" -> None
-      - "/christmas/" or "/christmas" -> "christmas"
-    Rejects anything with path traversal or multiple segments.
-    """
-    path = urllib.parse.urlparse(url_path).path
-    # Decode %xx and normalize
-    path = urllib.parse.unquote(path)
-
-    # Must be either "/" or "/name" or "/name/"
-    if path == "/":
-        return None
-
-    # Strip leading/trailing slashes, then ensure it's a single segment
-    seg = path.strip("/")
+def _is_safe_segment(seg: str) -> bool:
+    """Check if a single path segment is safe (no traversal tricks)."""
     if not seg:
-        return None
-
-    # Reject multiple segments like "/a/b/"
-    if "/" in seg:
-        return "__INVALID__"
-
-    # Basic traversal / weird path checks
+        return False
     if seg in (".", ".."):
-        return "__INVALID__"
-    if "\\" in seg:
-        return "__INVALID__"
+        return False
+    if "\\" in seg or "\x00" in seg:
+        return False
     if seg.startswith(("/", "~")):
-        return "__INVALID__"
+        return False
+    return True
 
-    # Extra hardening: disallow NUL and path separators
-    if "\x00" in seg:
-        return "__INVALID__"
 
-    return seg
+def parse_url(url_path: str) -> tuple[list[str], dict[str, str]]:
+    """
+    Parse a URL path into sanitized segments and query parameters.
+    Returns (segments, query_dict).
+    segments is a list of safe path parts, e.g. "/silly/forest" -> ["silly", "forest"]
+    Returns (["__INVALID__"], {}) if any segment fails validation.
+    """
+    parsed = urllib.parse.urlparse(url_path)
+    path = urllib.parse.unquote(parsed.path)
+    query = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+
+    # Also accept bare "?list" (no value) which parse_qsl misses
+    if "list" not in query and "?list" in url_path:
+        query["list"] = ""
+
+    if path == "/":
+        return [], query
+
+    raw_segments = [s for s in path.strip("/").split("/") if s]
+    if not raw_segments:
+        return [], query
+
+    for seg in raw_segments:
+        if not _is_safe_segment(seg):
+            return ["__INVALID__"], query
+
+    return raw_segments, query
 
 
 def list_html_files(base_dir: Path, only_dir: str | None) -> list[Path]:
@@ -73,36 +75,145 @@ def list_html_files(base_dir: Path, only_dir: str | None) -> list[Path]:
     return files
 
 
+def try_serve_exact(base_dir: Path, segments: list[str]) -> Path | None:
+    """
+    Try to resolve segments as an exact HTML file path.
+    E.g. ["silly", "forest"] -> base_dir/silly/forest.html
+    Returns the resolved Path if it exists and is safe, or None.
+    """
+    if len(segments) < 2:
+        return None
+
+    # Build relative path, auto-append .html
+    rel = "/".join(segments)
+    if not rel.endswith(".html"):
+        rel += ".html"
+
+    candidate = base_dir / rel
+
+    # Resolve and ensure it stays within base_dir
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved_base = base_dir.resolve(strict=True)
+        resolved.relative_to(resolved_base)
+    except Exception:
+        return None
+
+    if resolved.is_file() and resolved.suffix == ".html":
+        return resolved
+
+    return None
+
+
 class RandomHTMLHandler(BaseHTTPRequestHandler):
-    server_version = "RandomHTML/0.1"
+    server_version = "RandomHTML/0.2"
 
     def do_GET(self):
         base_dir: Path = self.server.base_dir  # type: ignore[attr-defined]
-        only_dir = safe_subdir_from_url_path(self.path)
+        segments, query = parse_url(self.path)
 
-        if only_dir == "__INVALID__":
-            self.send_error(400, "Invalid directory path")
+        if segments == ["__INVALID__"]:
+            self.send_error(400, "Invalid path")
             return
 
+        # --- Mode 1: ?list --- show a clickable directory listing
+        if "list" in query:
+            only_dir = segments[0] if len(segments) == 1 else None
+            self._serve_listing(base_dir, only_dir)
+            return
+
+        # --- Mode 2: exact file path (2+ segments, e.g. /silly/forest) ---
+        if len(segments) >= 2:
+            exact = try_serve_exact(base_dir, segments)
+            if exact:
+                self._serve_file(exact)
+            else:
+                self.send_error(404, "File not found")
+            return
+
+        # --- Mode 3: random (root or single directory segment) ---
+        only_dir = segments[0] if len(segments) == 1 else None
         candidates = list_html_files(base_dir, only_dir)
 
         if not candidates:
             self.send_response(404)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
-            msg = f"No HTML files found"
+            msg = "No HTML files found"
             if only_dir:
                 msg += f" in directory {html.escape(only_dir)}"
             self.wfile.write(f"<h1>{msg}</h1>".encode("utf-8"))
             return
 
         chosen = random.choice(candidates)
+        self._serve_file(chosen)
+
+    def _serve_file(self, path: Path):
         try:
-            data = chosen.read_bytes()
+            data = path.read_bytes()
         except OSError:
             self.send_error(500, "Failed to read file")
             return
 
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_listing(self, base_dir: Path, only_dir: str | None):
+        files = list_html_files(base_dir, only_dir)
+        resolved_base = base_dir.resolve(strict=True)
+
+        # Group files by directory
+        groups: dict[str, list[tuple[str, str]]] = {}
+        for f in sorted(files):
+            try:
+                rel = f.relative_to(resolved_base)
+            except ValueError:
+                continue
+            parts = rel.parts
+            if len(parts) < 2:
+                continue
+            directory = parts[0]
+            name = rel.with_suffix("").as_posix()  # e.g. "silly/forest"
+            display = parts[-1].removesuffix(".html")
+            groups.setdefault(directory, []).append((name, display))
+
+        # Build HTML
+        title = f"Visualizations — {html.escape(only_dir)}" if only_dir else "Visualizations"
+        lines = [
+            "<!doctype html>",
+            '<html lang="en"><head><meta charset="utf-8"/>',
+            f"<title>{title}</title>",
+            "<style>",
+            "  body { font-family: system-ui, sans-serif; background: #0a0a12; color: #e0e0e8;",
+            "         max-width: 720px; margin: 40px auto; padding: 0 20px; }",
+            "  h1 { font-size: 22px; font-weight: 700; margin-bottom: 8px; }",
+            "  h2 { font-size: 16px; font-weight: 600; color: #8090b0; margin: 28px 0 8px; }",
+            "  ul { list-style: none; padding: 0; }",
+            "  li { margin: 4px 0; }",
+            "  a { color: #7ab8ff; text-decoration: none; padding: 6px 10px; display: inline-block;",
+            "      border-radius: 8px; transition: background .15s; }",
+            "  a:hover { background: rgba(122,184,255,.12); }",
+            "  .hint { font-size: 13px; color: #667; margin-top: 4px; }",
+            "</style>",
+            "</head><body>",
+            f"<h1>{title}</h1>",
+            '<p class="hint">Click a name to view it directly, or visit a directory path for a random pick.</p>',
+        ]
+
+        for directory in sorted(groups):
+            lines.append(f"<h2>{html.escape(directory)}/</h2><ul>")
+            for name, display in sorted(groups[directory], key=lambda x: x[1]):
+                safe_name = html.escape(name)
+                safe_display = html.escape(display)
+                lines.append(f'  <li><a href="/{safe_name}">{safe_display}</a></li>')
+            lines.append("</ul>")
+
+        lines.append("</body></html>")
+
+        data = "\n".join(lines).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
@@ -129,8 +240,11 @@ def main():
     httpd.base_dir = base_dir  # attach for handler access
 
     print(f"Serving random HTML from: {base_dir}")
-    print(f"Open: http://{args.host}:{args.port}/  (any dir)")
-    print(f"Or:   http://{args.host}:{args.port}/christmas/  (only that dir)")
+    print(f"  Random from all:    http://{args.host}:{args.port}/")
+    print(f"  Random from dir:    http://{args.host}:{args.port}/christmas")
+    print(f"  Exact file:         http://{args.host}:{args.port}/silly/forest")
+    print(f"  List all:           http://{args.host}:{args.port}/?list")
+    print(f"  List dir:           http://{args.host}:{args.port}/silly?list")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
