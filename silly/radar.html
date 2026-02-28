@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Radar</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+    html,body{ margin:0; height:100%; overflow:hidden; background:#020a02; }
+    canvas{ display:block; width:100vw; height:100vh; }
+    .scanlines{
+      pointer-events:none; position:fixed; inset:0;
+      background: repeating-linear-gradient(
+        0deg,
+        rgba(0,0,0,0.06) 0px,
+        rgba(0,0,0,0.06) 1px,
+        transparent 1px,
+        transparent 3px
+      );
+      mix-blend-mode: multiply;
+    }
+    .vignette{
+      pointer-events:none; position:fixed; inset:0;
+      background: radial-gradient(circle at 50% 50%,
+        rgba(0,0,0,0) 20%, rgba(0,0,0,0.4) 65%, rgba(0,0,0,0.8) 100%);
+    }
+    .crt-flicker{
+      pointer-events:none; position:fixed; inset:0;
+      background: rgba(0,20,0,0.03);
+      animation: flicker 0.08s infinite alternate;
+    }
+    @keyframes flicker{
+      0%{ opacity:0.03; }
+      100%{ opacity:0.06; }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="scanlines"></div>
+  <div class="crt-flicker"></div>
+  <div class="vignette"></div>
+<script>
+(() => {
+  // -------------------- Config --------------------
+  const CFG = {
+    dprCap: 2,
+    sweepSpeed: 0.55,         // revolutions per second
+    trailLength: 0.6,         // fraction of circle the glow trail covers
+    rings: 4,                 // concentric range rings
+    gridLines: 8,             // radial grid lines
+    blipSpawnChance: 0.35,    // per second
+    maxBlips: 12,
+    blipFadeTime: 4.5,        // seconds a blip lingers after sweep
+    ghostTrails: true,        // phosphor persistence effect
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  let W = 0, H = 0, DPR = 1, CX = 0, CY = 0, R = 0;
+
+  // -------------------- Utilities --------------------
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function normAngle(a) { return ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2); }
+
+  // -------------------- Phosphor persistence canvas --------------------
+  let persist = null;
+  let persistCtx = null;
+
+  // -------------------- Blips --------------------
+  let blips = [];
+
+  function makeBlip() {
+    const dist = rand(0.12, 0.92);   // fraction of R
+    const angle = rand(0, Math.PI * 2);
+    const speed = rand(0.001, 0.008) * (Math.random() < 0.5 ? 1 : -1);
+    const radialSpeed = rand(-0.02, 0.02);
+    const size = rand(2.5, 5.5);
+    const ttl = rand(8, 30);         // seconds before leaving
+    return {
+      dist, angle, speed, radialSpeed, size, ttl,
+      age: 0,
+      lastSwept: -999,               // time last swept by beam
+      brightness: 0,                 // current brightness (set by sweep)
+      label: Math.random() < 0.3 ? randomCallsign() : null,
+    };
+  }
+
+  function randomCallsign() {
+    const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+    const l1 = letters[(Math.random() * letters.length) | 0];
+    const l2 = letters[(Math.random() * letters.length) | 0];
+    const num = ((Math.random() * 900 + 100) | 0);
+    return l1 + l2 + '-' + num;
+  }
+
+  // -------------------- Resize --------------------
+  function resize() {
+    DPR = Math.min(CFG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    CX = W / 2;
+    CY = H / 2;
+    R = Math.min(W, H) * 0.42;
+
+    // Recreate persistence canvas
+    persist = document.createElement('canvas');
+    persist.width = canvas.width;
+    persist.height = canvas.height;
+    persistCtx = persist.getContext('2d');
+    persistCtx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  window.addEventListener('resize', resize, { passive: true });
+
+  // -------------------- Draw: grid --------------------
+  function drawGrid() {
+    ctx.save();
+
+    // Range rings
+    ctx.strokeStyle = 'rgba(0, 255, 60, 0.12)';
+    ctx.lineWidth = 1;
+    for (let i = 1; i <= CFG.rings; i++) {
+      const rr = (i / CFG.rings) * R;
+      ctx.beginPath();
+      ctx.arc(CX, CY, rr, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // Radial lines
+    ctx.strokeStyle = 'rgba(0, 255, 60, 0.08)';
+    for (let i = 0; i < CFG.gridLines; i++) {
+      const a = (i / CFG.gridLines) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.moveTo(CX, CY);
+      ctx.lineTo(CX + Math.cos(a) * R, CY + Math.sin(a) * R);
+      ctx.stroke();
+    }
+
+    // Outer ring (brighter)
+    ctx.strokeStyle = 'rgba(0, 255, 60, 0.25)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(CX, CY, R, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Center dot
+    ctx.fillStyle = 'rgba(0, 255, 60, 0.5)';
+    ctx.beginPath();
+    ctx.arc(CX, CY, 3, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Cardinal labels
+    ctx.fillStyle = 'rgba(0, 255, 60, 0.30)';
+    ctx.font = '13px "Share Tech Mono", monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const labels = ['N', 'E', 'S', 'W'];
+    const offsets = [
+      [0, -R - 16],
+      [R + 16, 0],
+      [0, R + 16],
+      [-R - 16, 0],
+    ];
+    for (let i = 0; i < 4; i++) {
+      ctx.fillText(labels[i], CX + offsets[i][0], CY + offsets[i][1]);
+    }
+
+    // Range labels
+    ctx.fillStyle = 'rgba(0, 255, 60, 0.18)';
+    ctx.font = '10px "Share Tech Mono", monospace';
+    ctx.textAlign = 'left';
+    for (let i = 1; i <= CFG.rings; i++) {
+      const rr = (i / CFG.rings) * R;
+      ctx.fillText((i * 25) + 'nm', CX + rr - 28, CY - 6);
+    }
+
+    ctx.restore();
+  }
+
+  // -------------------- Draw: sweep beam --------------------
+  function drawSweep(sweepAngle) {
+    ctx.save();
+    ctx.translate(CX, CY);
+
+    // Glowing trail (gradient arc)
+    const trailArc = CFG.trailLength * Math.PI * 2;
+    const startA = sweepAngle - trailArc;
+
+    const grad = ctx.createConicGradient(startA, 0, 0);
+    // Normalize the trail to 0..1 range in the conic gradient
+    const trailFrac = CFG.trailLength;
+    grad.addColorStop(0, 'rgba(0, 255, 60, 0)');
+    grad.addColorStop(trailFrac * 0.5, 'rgba(0, 255, 60, 0.04)');
+    grad.addColorStop(trailFrac * 0.85, 'rgba(0, 255, 60, 0.10)');
+    grad.addColorStop(trailFrac, 'rgba(0, 255, 60, 0.18)');
+    // Rest of the circle is transparent
+    grad.addColorStop(Math.min(1, trailFrac + 0.001), 'rgba(0, 255, 60, 0)');
+    grad.addColorStop(1, 'rgba(0, 255, 60, 0)');
+
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.arc(0, 0, R, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Bright leading edge (the beam line)
+    ctx.strokeStyle = 'rgba(0, 255, 60, 0.55)';
+    ctx.lineWidth = 1.5;
+    ctx.shadowColor = 'rgba(0, 255, 60, 0.6)';
+    ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(Math.cos(sweepAngle) * R, Math.sin(sweepAngle) * R);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    ctx.restore();
+  }
+
+  // -------------------- Draw: blips --------------------
+  function drawBlips(time, sweepAngle) {
+    ctx.save();
+
+    for (const b of blips) {
+      // How recently was this blip swept?
+      const sinceSweep = time - b.lastSwept;
+      // Blips glow bright when just swept, then fade
+      let alpha;
+      if (sinceSweep < 0.1) {
+        alpha = 1.0;
+      } else if (sinceSweep < CFG.blipFadeTime) {
+        alpha = 1.0 - (sinceSweep / CFG.blipFadeTime);
+        alpha = alpha * alpha; // faster falloff
+      } else {
+        alpha = 0;
+      }
+
+      if (alpha < 0.01) continue;
+
+      const px = CX + Math.cos(b.angle) * b.dist * R;
+      const py = CY + Math.sin(b.angle) * b.dist * R;
+
+      // Blip glow
+      ctx.globalAlpha = alpha * 0.35;
+      ctx.fillStyle = '#0f6';
+      ctx.shadowColor = 'rgba(0, 255, 60, 0.8)';
+      ctx.shadowBlur = 12;
+      ctx.beginPath();
+      ctx.arc(px, py, b.size * 2.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      // Blip core
+      ctx.globalAlpha = alpha * 0.9;
+      ctx.fillStyle = '#0f6';
+      ctx.beginPath();
+      ctx.arc(px, py, b.size, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Label
+      if (b.label && alpha > 0.25) {
+        ctx.globalAlpha = alpha * 0.6;
+        ctx.fillStyle = '#0f6';
+        ctx.font = '10px "Share Tech Mono", monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText(b.label, px + b.size + 5, py - 4);
+      }
+    }
+
+    ctx.restore();
+  }
+
+  // -------------------- Draw: HUD --------------------
+  function drawHUD(time, sweepAngle) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(0, 255, 60, 0.35)';
+    ctx.font = '12px "Share Tech Mono", monospace';
+
+    // Top-left info
+    ctx.textAlign = 'left';
+    const bearing = Math.round(normAngle(-sweepAngle + Math.PI / 2) * (180 / Math.PI)) % 360;
+    ctx.fillText('BRG  ' + String(bearing).padStart(3, '0') + '\u00B0', 18, 28);
+    ctx.fillText('RNG  100nm', 18, 44);
+    ctx.fillText('TGT  ' + blips.filter(b => time - b.lastSwept < CFG.blipFadeTime).length, 18, 60);
+
+    // Top-right time
+    ctx.textAlign = 'right';
+    const d = new Date();
+    const ts = String(d.getHours()).padStart(2, '0') + ':' +
+               String(d.getMinutes()).padStart(2, '0') + ':' +
+               String(d.getSeconds()).padStart(2, '0');
+    ctx.fillText('UTC ' + ts, W - 18, 28);
+    ctx.fillText('ACTIVE', W - 18, 44);
+
+    // Bottom status bar
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(0, 255, 60, 0.20)';
+    ctx.fillText('RADAR SURVEILLANCE SYSTEM  //  SECTOR 7-G  //  CLASSIFICATION: UNCLASSIFIED', W / 2, H - 16);
+
+    ctx.restore();
+  }
+
+  // -------------------- Update blips --------------------
+  function updateBlips(dt, time, sweepAngle) {
+    // Spawn
+    if (blips.length < CFG.maxBlips && Math.random() < CFG.blipSpawnChance * dt) {
+      blips.push(makeBlip());
+    }
+
+    for (let i = blips.length - 1; i >= 0; i--) {
+      const b = blips[i];
+      b.age += dt;
+
+      // Move
+      b.angle += b.speed * dt;
+      b.dist += b.radialSpeed * dt;
+
+      // Check if sweep beam just passed over this blip
+      const blipAngle = normAngle(b.angle);
+      const sweep = normAngle(sweepAngle);
+      const diff = normAngle(sweep - blipAngle);
+      // If sweep just passed (within a small arc this frame)
+      if (diff < CFG.sweepSpeed * Math.PI * 2 * dt + 0.05) {
+        b.lastSwept = time;
+      }
+
+      // Remove if expired or out of range
+      if (b.age > b.ttl || b.dist < 0.05 || b.dist > 1.05) {
+        blips.splice(i, 1);
+      }
+    }
+  }
+
+  // -------------------- Phosphor persistence --------------------
+  function updatePersistence() {
+    if (!persistCtx) return;
+    // Darken the persistence buffer slowly (phosphor decay)
+    persistCtx.save();
+    persistCtx.globalCompositeOperation = 'destination-out';
+    persistCtx.fillStyle = 'rgba(0, 0, 0, 0.045)';
+    persistCtx.fillRect(0, 0, W, H);
+    persistCtx.restore();
+
+    // Stamp current bright elements onto persistence
+    persistCtx.save();
+    persistCtx.globalCompositeOperation = 'lighter';
+    persistCtx.globalAlpha = 0.03;
+    persistCtx.drawImage(canvas, 0, 0, W, H);
+    persistCtx.restore();
+  }
+
+  // -------------------- Noise / grain --------------------
+  let noisePattern;
+  function buildNoise() {
+    const tile = document.createElement('canvas');
+    const s = 160;
+    tile.width = s; tile.height = s;
+    const nc = tile.getContext('2d');
+    const img = nc.createImageData(s, s);
+    const d = img.data;
+    for (let i = 0; i < d.length; i += 4) {
+      d[i] = 0; d[i+1] = (Math.random() * 60) | 0; d[i+2] = 0;
+      d[i+3] = (Math.random() * 18) | 0;
+    }
+    nc.putImageData(img, 0, 0);
+    noisePattern = ctx.createPattern(tile, 'repeat');
+  }
+
+  // -------------------- Main loop --------------------
+  let last = performance.now();
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+    const sweepAngle = normAngle(time * CFG.sweepSpeed * Math.PI * 2);
+
+    // Black background
+    ctx.fillStyle = '#010a01';
+    ctx.fillRect(0, 0, W, H);
+
+    // Draw persistence (phosphor afterglow)
+    if (persist) {
+      ctx.save();
+      ctx.globalAlpha = 0.7;
+      ctx.drawImage(persist, 0, 0, W, H);
+      ctx.restore();
+    }
+
+    // Subtle background radar glow
+    ctx.save();
+    const bgGlow = ctx.createRadialGradient(CX, CY, 0, CX, CY, R);
+    bgGlow.addColorStop(0, 'rgba(0, 40, 10, 0.25)');
+    bgGlow.addColorStop(0.7, 'rgba(0, 20, 5, 0.10)');
+    bgGlow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    ctx.fillStyle = bgGlow;
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+
+    // Grid
+    drawGrid();
+
+    // Sweep beam
+    drawSweep(sweepAngle);
+
+    // Update & draw blips
+    updateBlips(dt, time, sweepAngle);
+    drawBlips(time, sweepAngle);
+
+    // HUD
+    drawHUD(time, sweepAngle);
+
+    // Green-tinted noise
+    if (noisePattern) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = 0.15;
+      ctx.translate(Math.sin(time * 3.7) * 60, Math.cos(time * 2.9) * 60);
+      ctx.fillStyle = noisePattern;
+      ctx.fillRect(-80, -80, W + 160, H + 160);
+      ctx.restore();
+    }
+
+    // Update phosphor persistence after all drawing
+    updatePersistence();
+
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  buildNoise();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
