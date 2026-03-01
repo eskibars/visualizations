@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Aurora Borealis</title>
+  <style>
+    html,body{ margin:0; height:100%; overflow:hidden; background:#020408; }
+    canvas{ display:block; width:100vw; height:100vh; }
+    .vignette{
+      pointer-events:none; position:fixed; inset:0;
+      background: radial-gradient(ellipse 130% 100% at 50% 40%,
+        rgba(0,0,0,0) 25%, rgba(0,0,0,0.5) 75%, rgba(0,0,0,0.85) 100%);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+<script>
+(() => {
+  // -------------------- Config --------------------
+  const CFG = {
+    dprCap: 2,
+    horizonY: 0.68,
+    lakeY: 0.70,
+    mountainCount: 7,
+    starCount: 200,
+    auroraRibbons: 5,
+    treeLine: true,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1;
+
+  // -------------------- Utilities --------------------
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  // -------------------- Entity pools --------------------
+  let stars = [], mountains = [], ribbons = [], trees = [];
+
+  // -------------------- Resize & Init --------------------
+  function resize() {
+    DPR = Math.min(CFG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    initEntities();
+    buildNoise();
+  }
+  window.addEventListener('resize', resize, { passive: true });
+
+  function initEntities() {
+    const horizY = H * CFG.horizonY;
+
+    // Stars
+    stars = Array.from({ length: CFG.starCount }, () => ({
+      x: Math.random(),
+      y: Math.random() * 0.65,
+      r: rand(0.4, 1.8),
+      twinkle: rand(0.4, 2.5),
+      phase: rand(0, Math.PI * 2),
+      alpha: rand(0.2, 0.8),
+    }));
+
+    // Mountains — layered silhouettes
+    mountains = [];
+    const layers = 3;
+    for (let L = 0; L < layers; L++) {
+      const depth = L / (layers - 1); // 0=far, 1=near
+      const baseY = horizY - lerp(H * 0.12, H * 0.01, depth);
+      const peakHeight = lerp(H * 0.16, H * 0.08, depth);
+      const points = [];
+      const count = (rand(5, 9) | 0);
+      // Generate mountain ridge profile
+      for (let i = 0; i <= count + 1; i++) {
+        const t = i / (count + 1);
+        const x = t * W;
+        const peak = Math.sin(t * Math.PI) * 0.7 + 0.3; // general envelope
+        const jag = Math.sin(t * 17.3 + L * 5) * 0.3 + Math.sin(t * 7.1 + L * 3) * 0.2;
+        const y = baseY - (peak + jag) * peakHeight * rand(0.7, 1.0);
+        points.push({ x, y });
+      }
+      mountains.push({
+        depth,
+        points,
+        baseY: horizY,
+        r: Math.round(lerp(12, 6, depth)),
+        g: Math.round(lerp(18, 10, depth)),
+        b: Math.round(lerp(30, 18, depth)),
+      });
+    }
+
+    // Aurora ribbons
+    ribbons = [];
+    for (let i = 0; i < CFG.auroraRibbons; i++) {
+      const t = i / (CFG.auroraRibbons - 1);
+      ribbons.push({
+        baseY: lerp(H * 0.08, H * 0.35, t),
+        amplitude: rand(20, 55),
+        frequency: rand(0.002, 0.005),
+        speed: rand(0.15, 0.4) * (Math.random() < 0.5 ? 1 : -1),
+        width: rand(30, 70),
+        hue: rand(100, 170),        // green to blue-green
+        hueShift: rand(-15, 15),
+        saturation: rand(60, 90),
+        brightness: rand(0.30, 0.60),
+        phaseOffset: rand(0, Math.PI * 2),
+        // secondary undulation
+        amp2: rand(8, 25),
+        freq2: rand(0.008, 0.015),
+        speed2: rand(0.08, 0.25),
+      });
+    }
+
+    // Trees along horizon (small silhouettes)
+    trees = [];
+    if (CFG.treeLine) {
+      const treeCount = Math.floor(W / 8);
+      for (let i = 0; i < treeCount; i++) {
+        const x = (i / treeCount) * W + rand(-3, 3);
+        trees.push({
+          x,
+          height: rand(8, 22),
+          width: rand(3, 7),
+        });
+      }
+    }
+  }
+
+  // -------------------- Noise --------------------
+  let noisePattern;
+  function buildNoise() {
+    const tile = document.createElement('canvas');
+    const s = 160;
+    tile.width = s; tile.height = s;
+    const nc = tile.getContext('2d');
+    const img = nc.createImageData(s, s);
+    const d = img.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const v = (Math.random() * 255) | 0;
+      d[i] = v; d[i+1] = v; d[i+2] = v;
+      d[i+3] = (Math.random() * 22) | 0;
+    }
+    nc.putImageData(img, 0, 0);
+    noisePattern = ctx.createPattern(tile, 'repeat');
+  }
+
+  // -------------------- Draw: Sky --------------------
+  function drawSky() {
+    const g = ctx.createLinearGradient(0, 0, 0, H * CFG.horizonY);
+    g.addColorStop(0,    'rgb(2, 4, 12)');
+    g.addColorStop(0.3,  'rgb(4, 8, 22)');
+    g.addColorStop(0.6,  'rgb(8, 14, 32)');
+    g.addColorStop(0.85, 'rgb(12, 20, 38)');
+    g.addColorStop(1,    'rgb(16, 28, 48)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H * CFG.horizonY + 5);
+  }
+
+  // -------------------- Draw: Stars --------------------
+  function drawStars(time) {
+    ctx.save();
+    for (const s of stars) {
+      const a = s.alpha * (0.5 + 0.5 * Math.sin(time * s.twinkle + s.phase));
+      if (a < 0.03) continue;
+      ctx.globalAlpha = a;
+      ctx.fillStyle = '#dde8ff';
+      ctx.beginPath();
+      ctx.arc(s.x * W, s.y * H, s.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // -------------------- Draw: Aurora --------------------
+  function drawAurora(time) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+
+    for (const ribbon of ribbons) {
+      const step = 4;
+      // Breathing intensity
+      const breathe = 0.7 + 0.3 * Math.sin(time * 0.3 + ribbon.phaseOffset);
+      const alpha = ribbon.brightness * breathe;
+
+      for (let pass = 0; pass < 3; pass++) {
+        // Multiple blur passes for soft glow
+        const spread = ribbon.width * (1 + pass * 0.8);
+        const passAlpha = alpha * (pass === 0 ? 0.6 : pass === 1 ? 0.3 : 0.15);
+
+        ctx.globalAlpha = passAlpha;
+
+        ctx.beginPath();
+        const firstY = ribbonY(ribbon, 0, time);
+        ctx.moveTo(0, firstY + spread);
+
+        // Top edge
+        for (let x = 0; x <= W; x += step) {
+          ctx.lineTo(x, ribbonY(ribbon, x, time) - spread * 0.5);
+        }
+        // Bottom edge (reverse)
+        for (let x = W; x >= 0; x -= step) {
+          ctx.lineTo(x, ribbonY(ribbon, x, time) + spread * 0.5);
+        }
+        ctx.closePath();
+
+        // Gradient fill along the ribbon
+        const hue = ribbon.hue + Math.sin(time * 0.15 + ribbon.phaseOffset) * ribbon.hueShift;
+        const gx = ctx.createLinearGradient(0, 0, W, 0);
+        gx.addColorStop(0, `hsla(${hue + 20}, ${ribbon.saturation}%, 55%, 0.2)`);
+        gx.addColorStop(0.3, `hsla(${hue}, ${ribbon.saturation}%, 60%, 0.8)`);
+        gx.addColorStop(0.5, `hsla(${hue - 10}, ${ribbon.saturation + 10}%, 65%, 1)`);
+        gx.addColorStop(0.7, `hsla(${hue + 15}, ${ribbon.saturation}%, 58%, 0.7)`);
+        gx.addColorStop(1, `hsla(${hue - 20}, ${ribbon.saturation - 10}%, 50%, 0.15)`);
+
+        ctx.fillStyle = gx;
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  function ribbonY(ribbon, x, time) {
+    return ribbon.baseY
+      + Math.sin(x * ribbon.frequency + time * ribbon.speed + ribbon.phaseOffset) * ribbon.amplitude
+      + Math.sin(x * ribbon.freq2 + time * ribbon.speed2) * ribbon.amp2;
+  }
+
+  // -------------------- Draw: Mountains --------------------
+  function drawMountains() {
+    const horizY = H * CFG.horizonY;
+
+    for (const m of mountains) {
+      ctx.save();
+      ctx.fillStyle = `rgb(${m.r}, ${m.g}, ${m.b})`;
+
+      ctx.beginPath();
+      ctx.moveTo(0, horizY);
+      for (const p of m.points) {
+        ctx.lineTo(p.x, p.y);
+      }
+      ctx.lineTo(W, horizY);
+      ctx.closePath();
+      ctx.fill();
+
+      // Subtle highlight on far mountains from aurora light
+      if (m.depth < 0.4) {
+        ctx.globalAlpha = 0.06;
+        ctx.globalCompositeOperation = 'screen';
+        const glow = ctx.createLinearGradient(0, m.points[0].y, 0, horizY);
+        glow.addColorStop(0, 'rgba(80, 200, 120, 0.3)');
+        glow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        ctx.fillStyle = glow;
+        ctx.fill();
+      }
+
+      ctx.restore();
+    }
+  }
+
+  // -------------------- Draw: Tree line --------------------
+  function drawTrees() {
+    const horizY = H * CFG.horizonY;
+    ctx.save();
+    ctx.fillStyle = 'rgb(4, 8, 14)';
+
+    for (const t of trees) {
+      // Simple triangle tree silhouette
+      const bx = t.x;
+      const by = horizY;
+      ctx.beginPath();
+      ctx.moveTo(bx, by);
+      ctx.lineTo(bx - t.width, by);
+      ctx.lineTo(bx, by - t.height);
+      ctx.lineTo(bx + t.width, by);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // -------------------- Draw: Lake --------------------
+  function drawLake(time) {
+    const lakeTop = H * CFG.lakeY;
+    const lakeH = H - lakeTop;
+
+    // Lake base — slightly lighter to read as water
+    const lakeGrad = ctx.createLinearGradient(0, lakeTop, 0, H);
+    lakeGrad.addColorStop(0, 'rgb(12, 22, 38)');
+    lakeGrad.addColorStop(0.3, 'rgb(8, 16, 30)');
+    lakeGrad.addColorStop(1, 'rgb(4, 10, 20)');
+    ctx.fillStyle = lakeGrad;
+    ctx.fillRect(0, lakeTop, W, lakeH);
+
+    // Aurora reflection on the lake
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+
+    for (const ribbon of ribbons) {
+      const breathe = 0.7 + 0.3 * Math.sin(time * 0.3 + ribbon.phaseOffset);
+      const alpha = ribbon.brightness * breathe * 0.55; // strong enough to clearly see
+
+      ctx.globalAlpha = alpha;
+
+      // Reflected, so y is mirrored below horizon and distorted
+      for (let y = lakeTop; y < H; y += 4) {
+        const distFromTop = (y - lakeTop) / lakeH;
+        const mirrorY = lakeTop - (y - lakeTop); // point in sky being reflected
+        const ripple = Math.sin(y * 0.08 + time * 1.2) * (3 + distFromTop * 8);
+
+        // Sample ribbon color at this reflected position
+        const hue = ribbon.hue + Math.sin(time * 0.15 + ribbon.phaseOffset) * ribbon.hueShift;
+
+        // Horizontal shimmer
+        const shimmerAlpha = alpha * (0.6 + 0.4 * Math.sin(time * 0.8 + y * 0.05));
+        const fadeOut = 1 - distFromTop * 0.7;
+
+        ctx.fillStyle = `hsla(${hue}, ${ribbon.saturation}%, 55%, ${shimmerAlpha * fadeOut})`;
+        ctx.fillRect(0, y + ripple, W, 3);
+      }
+    }
+    ctx.restore();
+
+    // Water ripple lines
+    ctx.save();
+    ctx.globalAlpha = 0.06;
+    ctx.strokeStyle = 'rgba(120, 200, 160, 0.6)';
+    ctx.lineWidth = 0.6;
+    for (let y = lakeTop + 10; y < H; y += 5) {
+      const distFromTop = (y - lakeTop) / lakeH;
+      ctx.globalAlpha = 0.03 + distFromTop * 0.04;
+      ctx.beginPath();
+      for (let x = 0; x <= W; x += 8) {
+        const ripple = Math.sin(x * 0.015 + time * 0.5 + y * 0.1) * (1 + distFromTop * 3);
+        if (x === 0) ctx.moveTo(x, y + ripple);
+        else ctx.lineTo(x, y + ripple);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // -------------------- Draw: Shore line --------------------
+  function drawShore(time) {
+    const lakeTop = H * CFG.lakeY;
+    const horizY = H * CFG.horizonY;
+
+    // Thin dark strip between mountains and lake
+    ctx.save();
+    ctx.fillStyle = 'rgb(6, 10, 16)';
+    ctx.fillRect(0, horizY, W, lakeTop - horizY + 2);
+
+    // Subtle shore highlight
+    ctx.globalAlpha = 0.08;
+    const shoreGlow = ctx.createLinearGradient(0, horizY, 0, lakeTop);
+    shoreGlow.addColorStop(0, 'rgba(60, 140, 100, 0.3)');
+    shoreGlow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    ctx.fillStyle = shoreGlow;
+    ctx.fillRect(0, horizY, W, lakeTop - horizY);
+    ctx.restore();
+  }
+
+  // -------------------- Draw: Ambient glow --------------------
+  function drawAmbientGlow(time) {
+    // Soft green glow on the sky from the aurora
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    ctx.globalAlpha = 0.08 + 0.04 * Math.sin(time * 0.2);
+    const glow = ctx.createRadialGradient(W * 0.5, H * 0.15, 0, W * 0.5, H * 0.15, H * 0.5);
+    glow.addColorStop(0, 'rgba(60, 200, 120, 0.25)');
+    glow.addColorStop(0.5, 'rgba(40, 160, 100, 0.08)');
+    glow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, W, H * 0.6);
+    ctx.restore();
+  }
+
+  // -------------------- Draw: Grain --------------------
+  function drawGrain(time) {
+    if (!noisePattern) return;
+    ctx.save();
+    ctx.globalCompositeOperation = 'overlay';
+    ctx.globalAlpha = 0.04;
+    ctx.translate(Math.sin(time * 0.6) * 30, Math.cos(time * 0.4) * 30);
+    ctx.fillStyle = noisePattern;
+    ctx.fillRect(-40, -40, W + 80, H + 80);
+    ctx.restore();
+  }
+
+  // -------------------- Main loop --------------------
+  let last = performance.now();
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    // Sky
+    drawSky();
+
+    // Stars
+    drawStars(time);
+
+    // Ambient aurora glow on sky
+    drawAmbientGlow(time);
+
+    // Aurora ribbons
+    drawAurora(time);
+
+    // Mountains (back to front)
+    drawMountains();
+
+    // Tree line
+    drawTrees();
+
+    // Shore
+    drawShore(time);
+
+    // Lake with reflections
+    drawLake(time);
+
+    // Grain
+    drawGrain(time);
+
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
