@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Soap Bubbles</title>
+  <style>
+    html,body{ margin:0; height:100%; overflow:hidden; background:#0c1220; }
+    canvas{ display:block; width:100vw; height:100vh; cursor:crosshair; }
+    .hint{
+      position:fixed; left:50%; top:18px; transform:translateX(-50%);
+      padding:10px 14px; border-radius:999px;
+      background:rgba(255,255,255,0.14);
+      border:1px solid rgba(255,255,255,0.22);
+      color:rgba(255,255,255,0.88);
+      backdrop-filter:blur(10px);
+      font:500 14px/1.2 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      letter-spacing:.01em; user-select:none; pointer-events:none; transition:opacity 900ms ease;
+    }
+    .hint.fade{ opacity:0; }
+    .vignette{
+      position:fixed; inset:0; pointer-events:none;
+      background:
+        radial-gradient(110vmax 80vmax at 50% 10%, rgba(255,255,255,0.12), rgba(0,0,0,0) 36%),
+        radial-gradient(120vmax 100vmax at 50% 50%, rgba(0,0,0,0) 46%, rgba(0,0,0,0.24) 76%, rgba(0,0,0,0.62) 100%);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="hint" id="hint">Click bubbles to pop them.</div>
+  <div class="vignette"></div>
+<script>
+(() => {
+  const CFG = {
+    dprCap: 2,
+    bubbleCount: 24,
+    moteCount: 120,
+    maxBubbleRadius: 74,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+  const hint = document.getElementById('hint');
+  let W = 0, H = 0, DPR = 1;
+
+  let bubbles = [];
+  let motes = [];
+  let pops = [];
+  const pointer = { x: 0, y: 0, tx: 0, ty: 0, seen: false };
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  function resize() {
+    DPR = Math.min(CFG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    initScene();
+  }
+
+  function onPointer(x, y) {
+    pointer.seen = true;
+    pointer.tx = x;
+    pointer.ty = y;
+    hint.classList.add('fade');
+  }
+
+  window.addEventListener('resize', resize, { passive: true });
+  window.addEventListener('pointermove', (e) => onPointer(e.clientX, e.clientY), { passive: true });
+  window.addEventListener('pointerdown', (e) => {
+    onPointer(e.clientX, e.clientY);
+    popNearest(e.clientX, e.clientY);
+  }, { passive: true });
+
+  function initScene() {
+    bubbles = Array.from({ length: CFG.bubbleCount }, (_, i) => makeBubble(i, false));
+    motes = Array.from({ length: CFG.moteCount }, () => ({
+      x: rand(0, 1),
+      y: rand(0, 1),
+      r: rand(0.7, 2.4),
+      speed: rand(0.004, 0.02),
+      phase: rand(0, Math.PI * 2),
+      alpha: rand(0.08, 0.24),
+    }));
+    pops = [];
+  }
+
+  function makeBubble(id, small) {
+    const depth = Math.pow(Math.random(), 0.75);
+    const r = small ? rand(10, 26) : lerp(18, CFG.maxBubbleRadius, depth);
+    return {
+      id,
+      x: rand(r + 10, W - r - 10),
+      y: rand(H * 0.25, H + r),
+      r,
+      depth,
+      vx: rand(-10, 10),
+      vy: rand(12, 34),
+      wobble: rand(0.5, 1.6),
+      phase: rand(0, Math.PI * 2),
+      hue: rand(170, 340),
+      ring: rand(0.1, 0.4),
+      alpha: rand(0.45, 0.8),
+    };
+  }
+
+  function respawnBubble(b, small) {
+    const fresh = makeBubble(b.id, small);
+    fresh.y = H + fresh.r + rand(0, H * 0.3);
+    Object.assign(b, fresh);
+  }
+
+  function spawnPop(x, y, r, hue) {
+    pops.push({
+      x, y, r,
+      age: 0,
+      life: rand(0.35, 0.7),
+      hue,
+      sparks: Array.from({ length: (rand(8, 16) | 0) }, () => ({
+        angle: rand(0, Math.PI * 2),
+        speed: rand(24, 110),
+        radius: rand(1, 2.5),
+      })),
+    });
+  }
+
+  function popNearest(x, y) {
+    let best = null;
+    let bestD = 1e9;
+    for (const b of bubbles) {
+      const d = Math.hypot(x - b.x, y - b.y);
+      if (d < Math.max(36, b.r * 1.05) && d < bestD) {
+        best = b;
+        bestD = d;
+      }
+    }
+    if (!best) return;
+    spawnPop(best.x, best.y, best.r, best.hue);
+    const children = Math.min(3, Math.max(1, (best.r / 22) | 0));
+    for (let i = 0; i < children; i++) {
+      const child = makeBubble(bubbles.length + i, true);
+      child.x = clamp(best.x + rand(-best.r * 0.35, best.r * 0.35), child.r, W - child.r);
+      child.y = clamp(best.y + rand(-best.r * 0.35, best.r * 0.35), child.r, H - child.r);
+      child.vx = rand(-22, 22);
+      child.vy = rand(24, 50);
+      bubbles.push(child);
+    }
+    respawnBubble(best, false);
+  }
+
+  function update(dt, time) {
+    if (!pointer.seen) {
+      pointer.tx = W * (0.5 + Math.sin(time * 0.12) * 0.18);
+      pointer.ty = H * (0.55 + Math.cos(time * 0.09) * 0.12);
+    }
+    pointer.x = lerp(pointer.x || pointer.tx, pointer.tx, 0.04);
+    pointer.y = lerp(pointer.y || pointer.ty, pointer.ty, 0.04);
+
+    for (const m of motes) {
+      m.y -= m.speed * H * dt;
+      if (m.y < -0.03) {
+        m.y = 1.03;
+        m.x = rand(0, 1);
+      }
+    }
+
+    for (const b of bubbles) {
+      const dx = pointer.x - b.x;
+      const dy = pointer.y - b.y;
+      const dist = Math.hypot(dx, dy);
+      const influence = clamp(1 - dist / (180 + b.r), 0, 1);
+      b.x += (Math.sin(time * b.wobble + b.phase) * 16 + b.vx + dx * influence * 0.03) * dt;
+      b.y -= (b.vy + Math.cos(time * 0.8 + b.phase) * 4 - dy * influence * 0.015) * dt;
+      if (b.x < b.r) { b.x = b.r; b.vx *= -1; }
+      if (b.x > W - b.r) { b.x = W - b.r; b.vx *= -1; }
+      if (b.y < -b.r - 12) respawnBubble(b, b.r < 28);
+    }
+
+    for (let i = 0; i < bubbles.length; i++) {
+      const a = bubbles[i];
+      for (let j = i + 1; j < bubbles.length; j++) {
+        const b = bubbles[j];
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const d = Math.hypot(dx, dy) || 1;
+        const minD = a.r + b.r + 3;
+        if (d < minD) {
+          const push = (minD - d) * 0.5;
+          const nx = dx / d;
+          const ny = dy / d;
+          a.x -= nx * push;
+          a.y -= ny * push;
+          b.x += nx * push;
+          b.y += ny * push;
+        }
+      }
+    }
+
+    pops = pops.filter((p) => {
+      p.age += dt;
+      return p.age < p.life;
+    });
+
+    if (bubbles.length > CFG.bubbleCount + 18) bubbles = bubbles.slice(-CFG.bubbleCount - 18);
+  }
+
+  function drawBackground(time) {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#15203a');
+    g.addColorStop(0.4, '#24355d');
+    g.addColorStop(1, '#0f1625');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    const bloom = ctx.createRadialGradient(W * 0.5, H * 0.18, 0, W * 0.5, H * 0.18, H * 0.55);
+    bloom.addColorStop(0, 'rgba(255,255,255,0.12)');
+    bloom.addColorStop(0.4, 'rgba(174,219,255,0.08)');
+    bloom.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = bloom;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (let i = 0; i < 8; i++) {
+      const x = W * (0.08 + i * 0.12) + Math.sin(time * 0.08 + i) * 26;
+      const y = H * (0.15 + (i % 3) * 0.21);
+      const r = 55 + (i % 4) * 24;
+      const halo = ctx.createRadialGradient(x, y, 0, x, y, r);
+      halo.addColorStop(0, 'rgba(255,255,255,0.06)');
+      halo.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = halo;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawMotes(time) {
+    ctx.save();
+    for (const m of motes) {
+      const x = m.x * W + Math.sin(time * 0.7 + m.phase) * 8;
+      const y = m.y * H;
+      ctx.fillStyle = `rgba(255,255,255,${m.alpha})`;
+      ctx.beginPath();
+      ctx.arc(x, y, m.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawBubble(b, time) {
+    const x = b.x;
+    const y = b.y;
+    const pulse = 1 + Math.sin(time * 1.2 + b.phase) * 0.02;
+    const r = b.r * pulse;
+
+    ctx.save();
+
+    const fill = ctx.createRadialGradient(x - r * 0.25, y - r * 0.3, r * 0.1, x, y, r);
+    fill.addColorStop(0, 'rgba(255,255,255,0.10)');
+    fill.addColorStop(0.65, 'rgba(255,255,255,0.03)');
+    fill.addColorStop(1, 'rgba(255,255,255,0.00)');
+    ctx.fillStyle = fill;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = `rgba(255,255,255,${0.32 + b.alpha * 0.35})`;
+    ctx.lineWidth = Math.max(1.2, r * 0.032);
+    ctx.beginPath();
+    ctx.arc(x, y, r - 1, 0, Math.PI * 2);
+    ctx.stroke();
+
+    const arcCount = 4;
+    for (let i = 0; i < arcCount; i++) {
+      const a0 = time * 0.22 + b.phase + i * 1.55;
+      const a1 = a0 + Math.PI * 0.65;
+      const hue = (b.hue + i * 48 + Math.sin(time * 0.4 + i) * 22 + 360) % 360;
+      ctx.strokeStyle = `hsla(${hue}, 95%, 74%, ${0.16 + b.alpha * 0.12})`;
+      ctx.lineWidth = Math.max(0.8, r * 0.022);
+      ctx.beginPath();
+      ctx.arc(x, y, r - 3 - i * 1.4, a0, a1);
+      ctx.stroke();
+    }
+
+    ctx.fillStyle = 'rgba(255,255,255,0.22)';
+    ctx.beginPath();
+    ctx.arc(x - r * 0.35, y - r * 0.38, Math.max(2, r * 0.14), 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.16)';
+    ctx.lineWidth = Math.max(0.8, r * 0.016);
+    ctx.beginPath();
+    ctx.arc(x + r * 0.1, y + r * 0.08, r * 0.58, Math.PI * 0.9, Math.PI * 1.55);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function drawPops() {
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (const p of pops) {
+      const t = p.age / p.life;
+      const alpha = 1 - t;
+      ctx.strokeStyle = `hsla(${p.hue}, 95%, 78%, ${alpha * 0.35})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r * (0.35 + t * 0.8), 0, Math.PI * 2);
+      ctx.stroke();
+
+      for (const s of p.sparks) {
+        const px = p.x + Math.cos(s.angle) * s.speed * p.age;
+        const py = p.y + Math.sin(s.angle) * s.speed * p.age;
+        ctx.fillStyle = `hsla(${p.hue + 25}, 95%, 78%, ${alpha * 0.6})`;
+        ctx.beginPath();
+        ctx.arc(px, py, s.radius, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawPointer(time) {
+    if (!pointer.seen) return;
+    const r = 18 + Math.sin(time * 4.5) * 1.5;
+    ctx.strokeStyle = 'rgba(255,255,255,0.40)';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.arc(pointer.x, pointer.y, r, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    update(dt, time);
+    drawBackground(time);
+    drawMotes(time);
+    for (const b of bubbles.sort((a, b) => a.r - b.r)) drawBubble(b, time);
+    drawPops();
+    drawPointer(time);
+
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
