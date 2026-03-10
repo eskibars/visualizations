@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Bamboo Rain</title>
+  <style>
+    html,body{ margin:0; height:100%; overflow:hidden; background:#06110d; }
+    canvas{ display:block; width:100vw; height:100vh; }
+    .vignette{
+      position:fixed; inset:0; pointer-events:none;
+      background:
+        radial-gradient(120% 90% at 50% 12%, rgba(170,255,215,0.08), rgba(0,0,0,0) 40%),
+        radial-gradient(120% 100% at 50% 55%, rgba(0,0,0,0) 42%, rgba(0,0,0,0.22) 74%, rgba(0,0,0,0.62) 100%);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+<script>
+(() => {
+  const CFG = {
+    dprCap: 2,
+    bambooLayers: 4,
+    culmsPerLayer: [16, 14, 12, 9],
+    rainCount: 620,
+    mistCount: 16,
+    rippleCount: 26,
+    fireflyCount: 12,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+  let W = 0, H = 0, DPR = 1;
+
+  let layers = [];
+  let rain = [];
+  let mist = [];
+  let ripples = [];
+  let fireflies = [];
+
+  const pointer = { x: 0, y: 0, tx: 0, ty: 0, seen: false };
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function smoothstep(t) { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); }
+
+  function resize() {
+    DPR = Math.min(CFG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    initScene();
+  }
+
+  window.addEventListener('resize', resize, { passive: true });
+  window.addEventListener('pointermove', (e) => {
+    pointer.seen = true;
+    pointer.tx = (e.clientX / W) * 2 - 1;
+    pointer.ty = (e.clientY / H) * 2 - 1;
+  }, { passive: true });
+
+  function initScene() {
+    layers = [];
+    for (let i = 0; i < CFG.bambooLayers; i++) {
+      const depth = i / Math.max(1, CFG.bambooLayers - 1);
+      const culms = [];
+      const count = CFG.culmsPerLayer[i] || 10;
+      for (let j = 0; j < count; j++) culms.push(makeCulm(depth, j, count));
+      culms.sort((a, b) => a.x - b.x);
+      layers.push({
+        depth,
+        culms,
+        fogAlpha: lerp(0.22, 0.05, depth),
+      });
+    }
+
+    rain = Array.from({ length: CFG.rainCount }, () => ({
+      x: rand(-0.1, 1.1),
+      y: rand(-1, 1),
+      len: rand(10, 28),
+      speed: rand(480, 980),
+      drift: rand(-20, 28),
+      alpha: rand(0.08, 0.28),
+      thickness: rand(0.6, 1.7),
+      depth: Math.pow(Math.random(), 0.65),
+    }));
+
+    mist = Array.from({ length: CFG.mistCount }, () => ({
+      x: rand(-0.2, 1.2),
+      y: rand(0.05, 0.95),
+      w: rand(180, 420),
+      h: rand(50, 120),
+      speed: rand(4, 18),
+      alpha: rand(0.05, 0.13),
+      phase: rand(0, Math.PI * 2),
+    }));
+
+    ripples = Array.from({ length: CFG.rippleCount }, () => makeRipple(true));
+    fireflies = Array.from({ length: CFG.fireflyCount }, () => ({
+      x: rand(0.05, 0.95),
+      y: rand(0.22, 0.88),
+      phase: rand(0, Math.PI * 2),
+      speed: rand(0.8, 1.8),
+      alpha: rand(0.04, 0.18),
+      radius: rand(1.5, 3.5),
+    }));
+  }
+
+  function makeCulm(depth, index, count) {
+    const spread = (index + Math.random() * 0.8) / Math.max(1, count - 0.2);
+    const scale = lerp(0.42, 1.15, Math.pow(depth, 1.2));
+    const baseX = lerp(-0.08, 1.08, spread);
+    const lean = rand(-0.1, 0.1) * lerp(0.7, 1.3, depth);
+    const segs = (rand(7, 12) | 0);
+    const leaves = Array.from({ length: rand(8, 20) | 0 }, () => ({
+      y: rand(0.1, 0.95),
+      side: Math.random() < 0.5 ? -1 : 1,
+      len: rand(26, 90) * scale,
+      bend: rand(0.2, 1.0),
+      tilt: rand(-0.9, 0.9),
+      cluster: rand(0.5, 1.4),
+    }));
+    return {
+      x: baseX,
+      lean,
+      scale,
+      width: rand(7, 18) * scale,
+      height: rand(H * 0.52, H * 0.96) * lerp(0.7, 1.04, depth),
+      segments: segs,
+      phase: rand(0, Math.PI * 2),
+      sway: rand(0.3, 1.1),
+      hue: rand(110, 142),
+      sat: rand(18, 48),
+      lit: rand(16, 40),
+      leaves,
+      depth,
+    };
+  }
+
+  function makeRipple(randomAge) {
+    return {
+      x: rand(0.06, 0.94) * W,
+      y: rand(0.78, 0.97) * H,
+      r: randomAge ? rand(0, 30) : 0,
+      max: rand(18, 54),
+      speed: rand(18, 40),
+      alpha: rand(0.08, 0.22),
+      ringCount: rand(1, 3) | 0,
+    };
+  }
+
+  function update(dt, time) {
+    if (!pointer.seen) {
+      pointer.tx = Math.sin(time * 0.08) * 0.25;
+      pointer.ty = Math.cos(time * 0.06) * 0.18;
+    }
+    pointer.x = lerp(pointer.x, pointer.tx, 0.03);
+    pointer.y = lerp(pointer.y, pointer.ty, 0.03);
+
+    for (const d of rain) {
+      d.y += (d.speed * dt) / H;
+      d.x += (d.drift * dt) / W;
+      if (d.y > 1.12 || d.x < -0.18 || d.x > 1.18) {
+        d.y = rand(-0.3, -0.02);
+        d.x = rand(-0.1, 1.1);
+        if (Math.random() < 0.18) spawnRippleAt(d.x * W + rand(-18, 18));
+      }
+    }
+
+    for (const m of mist) {
+      m.x += (m.speed * dt) / W;
+      if (m.x * W - m.w > W + 40) {
+        m.x = -0.24;
+        m.y = rand(0.05, 0.95);
+      }
+    }
+
+    for (const r of ripples) {
+      r.r += r.speed * dt;
+      r.alpha -= dt * 0.05;
+      if (r.r > r.max || r.alpha <= 0) {
+        Object.assign(r, makeRipple(false));
+      }
+    }
+  }
+
+  function spawnRippleAt(x) {
+    const r = ripples[(Math.random() * ripples.length) | 0];
+    r.x = clamp(x, 30, W - 30);
+    r.y = rand(0.80, 0.98) * H;
+    r.r = 0;
+    r.max = rand(16, 42);
+    r.speed = rand(18, 38);
+    r.alpha = rand(0.10, 0.22);
+    r.ringCount = rand(1, 3) | 0;
+  }
+
+  function drawSky(time) {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#173b31');
+    g.addColorStop(0.2, '#143428');
+    g.addColorStop(0.55, '#0b241b');
+    g.addColorStop(1, '#06110d');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    const glow = ctx.createRadialGradient(W * 0.52, H * 0.08, 0, W * 0.52, H * 0.08, H * 0.75);
+    glow.addColorStop(0, 'rgba(170,255,220,0.22)');
+    glow.addColorStop(0.2, 'rgba(110,190,150,0.10)');
+    glow.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (let i = 0; i < 5; i++) {
+      const x = W * (0.16 + i * 0.18) + Math.sin(time * 0.12 + i * 1.7) * 30 + pointer.x * 14;
+      const beam = ctx.createLinearGradient(x - 20, 0, x + 80, H);
+      beam.addColorStop(0, 'rgba(200,255,235,0.09)');
+      beam.addColorStop(0.3, 'rgba(150,220,185,0.04)');
+      beam.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = beam;
+      ctx.beginPath();
+      ctx.moveTo(x - 60, 0);
+      ctx.lineTo(x + 10, 0);
+      ctx.lineTo(x + 150, H);
+      ctx.lineTo(x + 10, H);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawMist(time) {
+    ctx.save();
+    for (const m of mist) {
+      const x = m.x * W + Math.sin(time * 0.2 + m.phase) * 18 + pointer.x * 24;
+      const y = m.y * H + Math.cos(time * 0.16 + m.phase) * 8 + pointer.y * 10;
+      const grad = ctx.createRadialGradient(x, y, 0, x, y, m.w);
+      grad.addColorStop(0, `rgba(210,255,230,${m.alpha})`);
+      grad.addColorStop(1, 'rgba(210,255,230,0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.ellipse(x, y, m.w, m.h, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawBamboo(time) {
+    for (const layer of layers) {
+      const par = lerp(4, 26, layer.depth);
+      for (const culm of layer.culms) {
+        drawCulm(culm, time, par, layer.depth);
+      }
+
+      ctx.fillStyle = `rgba(180,255,220,${layer.fogAlpha})`;
+      ctx.fillRect(0, lerp(H * 0.12, H * 0.22, layer.depth), W, lerp(H * 0.22, H * 0.08, layer.depth));
+    }
+  }
+
+  function drawCulm(culm, time, parallax, depth) {
+    const baseX = culm.x * W + pointer.x * parallax;
+    const baseY = H + 8;
+    const topY = baseY - culm.height;
+    const sway = Math.sin(time * culm.sway + culm.phase) * lerp(4, 22, depth + 0.15) + pointer.x * 12 * depth;
+    const topX = baseX + culm.lean * culm.height * 0.2 + sway;
+    const grad = ctx.createLinearGradient(baseX - culm.width, baseY, topX + culm.width, topY);
+    grad.addColorStop(0, `hsla(${culm.hue}, ${culm.sat}%, ${culm.lit - 5}%, ${lerp(0.35, 0.88, depth)})`);
+    grad.addColorStop(0.45, `hsla(${culm.hue + 4}, ${culm.sat + 6}%, ${culm.lit + 10}%, ${lerp(0.5, 1, depth)})`);
+    grad.addColorStop(1, `hsla(${culm.hue - 6}, ${culm.sat}%, ${culm.lit - 8}%, ${lerp(0.35, 0.88, depth)})`);
+
+    ctx.lineWidth = culm.width;
+    ctx.strokeStyle = grad;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(baseX, baseY);
+    ctx.quadraticCurveTo((baseX + topX) * 0.5, baseY - culm.height * 0.52, topX, topY);
+    ctx.stroke();
+
+    ctx.lineWidth = Math.max(1, culm.width * 0.1);
+    ctx.strokeStyle = `rgba(220,255,230,${lerp(0.04, 0.12, depth)})`;
+    ctx.beginPath();
+    ctx.moveTo(baseX - culm.width * 0.18, baseY);
+    ctx.quadraticCurveTo((baseX + topX) * 0.5 - culm.width * 0.18, baseY - culm.height * 0.52, topX - culm.width * 0.15, topY);
+    ctx.stroke();
+
+    for (let i = 1; i < culm.segments; i++) {
+      const t = i / culm.segments;
+      const x = lerp(baseX, topX, t);
+      const y = lerp(baseY, topY, t);
+      const jointW = culm.width * (0.72 - t * 0.18);
+      ctx.strokeStyle = `rgba(200,255,220,${lerp(0.08, 0.18, depth)})`;
+      ctx.lineWidth = Math.max(1.2, culm.width * 0.14);
+      ctx.beginPath();
+      ctx.moveTo(x - jointW * 0.5, y);
+      ctx.lineTo(x + jointW * 0.5, y);
+      ctx.stroke();
+    }
+
+    for (const leaf of culm.leaves) {
+      drawLeafCluster(culm, leaf, baseX, baseY, topX, topY, time, depth);
+    }
+  }
+
+  function drawLeafCluster(culm, leaf, baseX, baseY, topX, topY, time, depth) {
+    const t = leaf.y;
+    const stemX = lerp(baseX, topX, t);
+    const stemY = lerp(baseY, topY, t);
+    const gust = Math.sin(time * (0.7 + culm.sway * 0.3) + culm.phase + t * 4) * 0.24 + pointer.x * 0.25;
+    const bend = leaf.side * (0.35 + leaf.bend * 0.8) + gust;
+    const len = leaf.len * (0.86 + Math.sin(time * 1.3 + t * 6 + culm.phase) * 0.06);
+    const angle = bend + leaf.tilt * 0.22;
+
+    ctx.strokeStyle = `hsla(${culm.hue + 8}, ${culm.sat + 12}%, ${culm.lit + 8}%, ${lerp(0.14, 0.38, depth)})`;
+    ctx.lineWidth = Math.max(0.8, culm.width * 0.06);
+    ctx.beginPath();
+    ctx.moveTo(stemX, stemY);
+    ctx.quadraticCurveTo(
+      stemX + Math.cos(angle) * len * 0.45,
+      stemY - len * 0.12 + Math.sin(angle) * len * 0.08,
+      stemX + Math.cos(angle) * len,
+      stemY - Math.sin(angle) * len * 0.34
+    );
+    ctx.stroke();
+
+    ctx.fillStyle = `hsla(${culm.hue + 6}, ${culm.sat + 18}%, ${culm.lit + 6}%, ${lerp(0.12, 0.34, depth)})`;
+    ctx.beginPath();
+    ctx.moveTo(stemX, stemY);
+    ctx.quadraticCurveTo(
+      stemX + Math.cos(angle) * len * 0.52,
+      stemY - len * 0.08 + Math.sin(angle) * len * 0.1,
+      stemX + Math.cos(angle) * len,
+      stemY - Math.sin(angle) * len * 0.34
+    );
+    ctx.quadraticCurveTo(
+      stemX + Math.cos(angle) * len * 0.62,
+      stemY - Math.sin(angle) * len * 0.22 - len * 0.08,
+      stemX,
+      stemY
+    );
+    ctx.fill();
+  }
+
+  function drawRain(time) {
+    ctx.save();
+    ctx.lineCap = 'round';
+    for (const d of rain) {
+      const x = d.x * W + pointer.x * d.depth * 16;
+      const y = d.y * H;
+      const len = d.len * (0.75 + d.depth * 0.9);
+      const dx = d.drift * 0.04 + pointer.x * 8;
+      ctx.strokeStyle = `rgba(210,255,240,${d.alpha})`;
+      ctx.lineWidth = d.thickness * (0.7 + d.depth * 0.8);
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + dx, y + len);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (const f of fireflies) {
+      const a = f.alpha * (0.35 + 0.65 * Math.sin(time * f.speed + f.phase));
+      if (a < 0.02) continue;
+      const x = f.x * W + Math.sin(time * 0.4 + f.phase) * 10 + pointer.x * 8;
+      const y = f.y * H + Math.cos(time * 0.3 + f.phase) * 6;
+      const g = ctx.createRadialGradient(x, y, 0, x, y, f.radius * 6);
+      g.addColorStop(0, `rgba(210,255,170,${a})`);
+      g.addColorStop(1, 'rgba(210,255,170,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(x, y, f.radius * 6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawGround() {
+    const g = ctx.createLinearGradient(0, H * 0.72, 0, H);
+    g.addColorStop(0, 'rgba(10,30,18,0)');
+    g.addColorStop(0.18, 'rgba(8,20,14,0.18)');
+    g.addColorStop(1, 'rgba(3,8,7,0.92)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, H * 0.70, W, H * 0.30);
+
+    ctx.fillStyle = 'rgba(150,255,220,0.05)';
+    ctx.fillRect(0, H * 0.82, W, H * 0.16);
+  }
+
+  function drawRipples() {
+    ctx.save();
+    for (const r of ripples) {
+      for (let i = 0; i < r.ringCount; i++) {
+        const rr = r.r - i * 8;
+        if (rr <= 0) continue;
+        ctx.strokeStyle = `rgba(210,255,240,${Math.max(0, r.alpha - i * 0.04)})`;
+        ctx.lineWidth = 1.1;
+        ctx.beginPath();
+        ctx.ellipse(r.x, r.y, rr * 1.8, rr * 0.48, 0, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawForegroundFog(time) {
+    const g = ctx.createLinearGradient(0, H * 0.64, 0, H);
+    g.addColorStop(0, 'rgba(180,255,230,0)');
+    g.addColorStop(0.4, 'rgba(180,255,230,0.07)');
+    g.addColorStop(1, 'rgba(10,20,16,0.28)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, H * 0.62, W, H * 0.38);
+
+    ctx.save();
+    ctx.globalAlpha = 0.11;
+    ctx.fillStyle = 'rgba(215,255,235,0.16)';
+    for (let i = 0; i < 4; i++) {
+      const x = W * (0.15 + i * 0.22) + Math.sin(time * 0.14 + i * 1.2) * 30 + pointer.x * 18;
+      const y = H * (0.84 + i * 0.02);
+      ctx.beginPath();
+      ctx.ellipse(x, y, W * 0.25, H * 0.08, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    update(dt, time);
+
+    drawSky(time);
+    drawMist(time);
+    drawBamboo(time);
+    drawRain(time);
+    drawGround();
+    drawRipples();
+    drawForegroundFog(time);
+
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
