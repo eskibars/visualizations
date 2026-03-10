@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Jellyfish Bloom</title>
+  <style>
+    html,body{ margin:0; height:100%; overflow:hidden; background:#020814; }
+    canvas{ display:block; width:100vw; height:100vh; }
+    .vignette{
+      pointer-events:none; position:fixed; inset:0;
+      background:
+        radial-gradient(120% 90% at 50% 8%,
+          rgba(110,220,255,0.09) 0%,
+          rgba(0,0,0,0) 34%,
+          rgba(0,0,0,0.26) 72%,
+          rgba(0,0,0,0.62) 100%);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+<script>
+(() => {
+  const CFG = {
+    dprCap: 2,
+    jellyCount: 15,
+    particleCount: 180,
+    bubbleCount: 34,
+    beamCount: 5,
+    causticBands: 6,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+  let W = 0, H = 0, DPR = 1;
+
+  let jellies = [];
+  let particles = [];
+  let bubbles = [];
+  let beams = [];
+
+  const pointer = { x: 0, y: 0, tx: 0, ty: 0, seen: false };
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  function resize() {
+    DPR = Math.min(CFG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    initScene();
+  }
+
+  window.addEventListener('resize', resize, { passive: true });
+  window.addEventListener('pointermove', (e) => {
+    pointer.seen = true;
+    pointer.tx = (e.clientX / W) * 2 - 1;
+    pointer.ty = (e.clientY / H) * 2 - 1;
+  }, { passive: true });
+
+  function initScene() {
+    beams = Array.from({ length: CFG.beamCount }, (_, i) => ({
+      x: lerp(0.08, 0.92, i / Math.max(1, CFG.beamCount - 1)) + rand(-0.07, 0.07),
+      width: rand(0.08, 0.18),
+      alpha: rand(0.05, 0.13),
+      drift: rand(0.12, 0.3),
+      phase: rand(0, Math.PI * 2),
+    }));
+
+    particles = Array.from({ length: CFG.particleCount }, () => ({
+      x: rand(0, 1),
+      y: rand(0, 1),
+      r: rand(0.6, 2.5),
+      speed: rand(0.01, 0.08),
+      sway: rand(0.003, 0.02),
+      phase: rand(0, Math.PI * 2),
+      alpha: rand(0.08, 0.35),
+      depth: Math.pow(Math.random(), 0.7),
+    }));
+
+    bubbles = Array.from({ length: CFG.bubbleCount }, () => ({
+      x: rand(0, 1),
+      y: rand(0, 1.2),
+      r: rand(4, 18),
+      speed: rand(18, 48),
+      wobble: rand(4, 15),
+      phase: rand(0, Math.PI * 2),
+      alpha: rand(0.08, 0.22),
+    }));
+
+    jellies = Array.from({ length: CFG.jellyCount }, (_, i) => makeJelly(i));
+    jellies.sort((a, b) => a.depth - b.depth);
+  }
+
+  function makeJelly(i) {
+    const depth = Math.pow(Math.random(), 0.7);
+    const scale = lerp(0.4, 1.45, depth);
+    const hue = rand(178, 318);
+    const tentacleCount = (rand(7, 13) | 0);
+    return {
+      id: i,
+      depth,
+      scale,
+      hue,
+      x: rand(0.05, 0.95),
+      y: rand(-0.2, 1.1),
+      rise: lerp(10, 38, depth),
+      swayAmp: lerp(16, 65, depth),
+      swaySpeed: rand(0.18, 0.6),
+      drift: rand(-12, 12),
+      phase: rand(0, Math.PI * 2),
+      pulseSpeed: rand(1.2, 2.4),
+      pulsePhase: rand(0, Math.PI * 2),
+      bellW: lerp(26, 78, scale),
+      bellH: lerp(20, 56, scale),
+      glow: lerp(12, 36, scale),
+      tentacles: Array.from({ length: tentacleCount }, (_, t) => ({
+        x: ((t / Math.max(1, tentacleCount - 1)) - 0.5) * rand(10, 34),
+        len: rand(45, 160) * scale,
+        width: rand(1.2, 3.8) * Math.pow(scale, 0.9),
+        curl: rand(5, 22),
+        phase: rand(0, Math.PI * 2),
+        knots: (rand(3, 6) | 0),
+      })),
+    };
+  }
+
+  function wrapJelly(j) {
+    if (j.y * H < -220 * j.scale) {
+      j.y = 1.1 + rand(0, 0.18);
+      j.x = rand(0.06, 0.94);
+      j.depth = Math.pow(Math.random(), 0.7);
+      j.scale = lerp(0.4, 1.45, j.depth);
+      j.rise = lerp(10, 38, j.depth);
+      j.swayAmp = lerp(16, 65, j.depth);
+      j.bellW = lerp(26, 78, j.scale);
+      j.bellH = lerp(20, 56, j.scale);
+      j.glow = lerp(12, 36, j.scale);
+      j.hue = rand(178, 318);
+      j.phase = rand(0, Math.PI * 2);
+      j.pulsePhase = rand(0, Math.PI * 2);
+      for (const t of j.tentacles) {
+        t.len = rand(45, 160) * j.scale;
+        t.width = rand(1.2, 3.8) * Math.pow(j.scale, 0.9);
+        t.phase = rand(0, Math.PI * 2);
+      }
+      jellies.sort((a, b) => a.depth - b.depth);
+    }
+  }
+
+  function update(dt, time) {
+    if (!pointer.seen) {
+      pointer.tx = Math.sin(time * 0.11) * 0.28;
+      pointer.ty = Math.cos(time * 0.09) * 0.18;
+    }
+    pointer.x = lerp(pointer.x, pointer.tx, 0.035);
+    pointer.y = lerp(pointer.y, pointer.ty, 0.035);
+
+    for (const p of particles) {
+      p.y -= p.speed * dt * (0.08 + p.depth * 0.25);
+      p.x += Math.sin(time * (0.25 + p.depth) + p.phase) * p.sway * dt * 0.06;
+      if (p.y < -0.04) {
+        p.y = 1.04;
+        p.x = rand(0, 1);
+      }
+      if (p.x < -0.05) p.x = 1.05;
+      if (p.x > 1.05) p.x = -0.05;
+    }
+
+    for (const b of bubbles) {
+      b.y -= (b.speed * dt) / H;
+      b.x += Math.sin(time * 0.7 + b.phase) * b.wobble * dt * 0.0015;
+      if (b.y < -0.08) {
+        b.y = 1.08;
+        b.x = rand(0, 1);
+        b.r = rand(4, 18);
+      }
+    }
+
+    for (const j of jellies) {
+      j.y -= (j.rise * dt) / H;
+      j.x += Math.sin(time * j.swaySpeed + j.phase) * 0.00018 * (1.4 + j.depth);
+      j.x += j.drift * dt * 0.000005;
+      if (j.x < -0.08) j.x = 1.08;
+      if (j.x > 1.08) j.x = -0.08;
+      wrapJelly(j);
+    }
+  }
+
+  function drawBackground(time) {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#0a2843');
+    g.addColorStop(0.18, '#093052');
+    g.addColorStop(0.55, '#06233c');
+    g.addColorStop(0.82, '#031726');
+    g.addColorStop(1, '#010811');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    const bloom = ctx.createRadialGradient(W * 0.5, H * 0.02, 0, W * 0.5, H * 0.02, H * 0.85);
+    bloom.addColorStop(0, 'rgba(110, 220, 255, 0.22)');
+    bloom.addColorStop(0.22, 'rgba(68, 173, 220, 0.10)');
+    bloom.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    ctx.fillStyle = bloom;
+    ctx.fillRect(0, 0, W, H);
+
+    for (const beam of beams) {
+      const bx = (beam.x + Math.sin(time * beam.drift + beam.phase) * 0.03 + pointer.x * 0.014) * W;
+      const bw = beam.width * W;
+      const grad = ctx.createLinearGradient(bx, 0, bx + bw * 0.25, H);
+      grad.addColorStop(0, `rgba(140, 235, 255, ${beam.alpha})`);
+      grad.addColorStop(0.3, `rgba(90, 210, 255, ${beam.alpha * 0.45})`);
+      grad.addColorStop(1, 'rgba(10, 40, 70, 0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(bx - bw * 0.2, 0);
+      ctx.lineTo(bx + bw * 0.5, 0);
+      ctx.lineTo(bx + bw, H);
+      ctx.lineTo(bx - bw * 0.45, H);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  function drawCaustics(time) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (let i = 0; i < CFG.causticBands; i++) {
+      const y = H * (0.08 + i * 0.11);
+      const alpha = 0.018 + i * 0.004;
+      ctx.beginPath();
+      for (let x = -30; x <= W + 30; x += 10) {
+        const wave =
+          Math.sin(x * 0.012 + time * (0.6 + i * 0.08) + i * 0.7) * (8 + i * 2) +
+          Math.sin(x * 0.021 - time * 0.35 + i * 1.8) * (4 + i);
+        const yy = y + wave + pointer.y * 10 * (i / CFG.causticBands);
+        if (x === -30) ctx.moveTo(x, yy);
+        else ctx.lineTo(x, yy);
+      }
+      ctx.lineWidth = 7 + i * 1.6;
+      ctx.strokeStyle = `rgba(140, 240, 255, ${alpha})`;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawParticles(time) {
+    ctx.save();
+    for (const p of particles) {
+      const x = p.x * W + pointer.x * 10 * p.depth;
+      const y = p.y * H + pointer.y * 8 * p.depth;
+      const a = p.alpha * (0.65 + 0.35 * Math.sin(time * (0.8 + p.depth) + p.phase));
+      ctx.fillStyle = `rgba(180, 245, 255, ${a})`;
+      ctx.beginPath();
+      ctx.arc(x, y, p.r * (0.5 + p.depth * 1.2), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawBubbles(time) {
+    ctx.save();
+    for (const b of bubbles) {
+      const x = b.x * W + Math.sin(time * 0.9 + b.phase) * b.wobble + pointer.x * 6;
+      const y = b.y * H;
+      ctx.strokeStyle = `rgba(200, 245, 255, ${b.alpha})`;
+      ctx.lineWidth = 1.15;
+      ctx.beginPath();
+      ctx.arc(x, y, b.r, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.fillStyle = `rgba(255, 255, 255, ${b.alpha * 0.25})`;
+      ctx.beginPath();
+      ctx.arc(x - b.r * 0.25, y - b.r * 0.25, Math.max(1, b.r * 0.17), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawJelly(j, time) {
+    const pulseWave = Math.sin(time * j.pulseSpeed + j.pulsePhase);
+    const pulse = 0.78 + 0.22 * pulseWave;
+    const x = j.x * W + Math.sin(time * j.swaySpeed + j.phase) * j.swayAmp + pointer.x * 28 * j.depth;
+    const y = j.y * H + Math.cos(time * (j.swaySpeed * 0.7) + j.phase) * 7 + pointer.y * 18 * j.depth;
+    const bellW = j.bellW * (0.92 + pulse * 0.12);
+    const bellH = j.bellH * (1.02 - pulse * 0.10);
+    const oralH = bellH * 0.62;
+    const bodyScaleX = 1 + pulseWave * 0.16;
+    const bodyScaleY = 1 - pulseWave * 0.12;
+    const tentacleRootY = bellH * (0.28 + pulseWave * 0.08);
+
+    ctx.save();
+    ctx.translate(x, y);
+
+    ctx.save();
+    ctx.scale(bodyScaleX, bodyScaleY);
+
+    ctx.globalAlpha = 0.08 + j.depth * 0.18;
+    ctx.fillStyle = `hsla(${j.hue}, 90%, 72%, 0.22)`;
+    ctx.shadowBlur = j.glow;
+    ctx.shadowColor = `hsla(${j.hue}, 90%, 68%, 0.85)`;
+    ctx.beginPath();
+    ctx.ellipse(0, bellH * 0.15, bellW * 0.95, bellH * 1.3, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = 1;
+
+    const bellGrad = ctx.createRadialGradient(0, -bellH * 0.32, bellW * 0.05, 0, 0, bellW);
+    bellGrad.addColorStop(0, `hsla(${j.hue + 10}, 95%, 96%, 0.92)`);
+    bellGrad.addColorStop(0.25, `hsla(${j.hue}, 96%, 82%, 0.72)`);
+    bellGrad.addColorStop(0.62, `hsla(${j.hue - 8}, 88%, 62%, 0.34)`);
+    bellGrad.addColorStop(1, `hsla(${j.hue - 18}, 85%, 50%, 0.10)`);
+    ctx.fillStyle = bellGrad;
+
+    ctx.beginPath();
+    ctx.moveTo(-bellW, oralH * 0.14);
+    ctx.bezierCurveTo(-bellW * 0.92, -bellH, -bellW * 0.42, -bellH * 1.06, 0, -bellH);
+    ctx.bezierCurveTo(bellW * 0.42, -bellH * 1.06, bellW * 0.92, -bellH, bellW, oralH * 0.14);
+    ctx.quadraticCurveTo(bellW * 0.56, oralH * 0.58, bellW * 0.18, oralH * 0.48);
+    ctx.quadraticCurveTo(0, oralH * 0.72, -bellW * 0.18, oralH * 0.48);
+    ctx.quadraticCurveTo(-bellW * 0.56, oralH * 0.58, -bellW, oralH * 0.14);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = `hsla(${j.hue + 22}, 95%, 96%, ${0.35 + j.depth * 0.2})`;
+    ctx.beginPath();
+    ctx.ellipse(0, -bellH * 0.36, bellW * 0.42, bellH * 0.24, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = `hsla(${j.hue - 4}, 92%, 82%, ${0.22 + j.depth * 0.16})`;
+    ctx.beginPath();
+    ctx.ellipse(0, bellH * 0.12, bellW * 0.34, bellH * 0.2, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    for (const t of j.tentacles) {
+      const baseX = t.x * bodyScaleX;
+      const segs = t.knots + 4;
+      ctx.beginPath();
+      ctx.moveTo(baseX, tentacleRootY);
+      for (let k = 1; k <= segs; k++) {
+        const tt = k / segs;
+        const sway =
+          Math.sin(time * 1.3 + t.phase + tt * 5.6) * t.curl * (0.25 + tt * 0.9) +
+          Math.sin(time * 0.55 + j.phase + tt * 7.2) * t.curl * 0.45 +
+          pointer.x * 10 * tt;
+        const py = tentacleRootY + tt * t.len + pulse * 8 * tt;
+        const px = baseX + sway;
+        ctx.lineTo(px, py);
+      }
+      ctx.strokeStyle = `hsla(${j.hue - 6}, 92%, ${lerp(74, 88, j.depth)}%, ${0.09 + j.depth * 0.22})`;
+      ctx.lineWidth = t.width;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
+  function drawDepthHaze() {
+    const g = ctx.createLinearGradient(0, H * 0.18, 0, H);
+    g.addColorStop(0, 'rgba(20, 80, 120, 0)');
+    g.addColorStop(0.56, 'rgba(8, 34, 52, 0.08)');
+    g.addColorStop(1, 'rgba(0, 0, 0, 0.28)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    update(dt, time);
+    drawBackground(time);
+    drawCaustics(time);
+    drawParticles(time);
+
+    for (const j of jellies) drawJelly(j, time);
+
+    drawBubbles(time);
+    drawDepthHaze();
+
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
