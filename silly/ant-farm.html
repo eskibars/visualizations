@@ -1,0 +1,1048 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Ant Farm</title>
+  <style>
+    html,body{
+      margin:0;
+      height:100%;
+      overflow:hidden;
+      background:linear-gradient(180deg, #b8e7ff, #f4fbff 28%, #eed9bc 29%, #d8b089 100%);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    }
+    canvas{
+      display:block;
+      width:100vw;
+      height:100vh;
+    }
+    .vignette{
+      position:fixed; inset:0; pointer-events:none;
+      background:
+        radial-gradient(120vmax 90vmax at 50% -10%, rgba(255,255,255,0.28), rgba(255,255,255,0) 42%),
+        radial-gradient(130vmax 110vmax at 50% 55%, rgba(0,0,0,0) 42%, rgba(0,0,0,0.16) 100%);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+
+  const CFG = {
+    dprCap: 2,
+    antCount: 26,
+    dustCount: 170,
+    pebbles: 180,
+    autoCrumbInterval: 6.5,
+    maxNodes: 58,
+    diggerRatio: 0.3,
+  };
+
+  let W = 0, H = 0, DPR = 1;
+  let tank = null;
+  let nodes = [];
+  let edges = [];
+  let ants = [];
+  let surfaceCrumbs = [];
+  let stockpiles = [];
+  let dust = [];
+  let pebbles = [];
+  let roots = [];
+  let flowers = [];
+  let surfaceRocks = [];
+  let nextNodeId = 1;
+  let nextEdgeId = 1;
+  let queenNodeId = 0;
+  let crumbTimer = 0;
+  let globalTime = 0;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function dist(ax, ay, bx, by) { return Math.hypot(ax - bx, ay - by); }
+  function choice(arr) { return arr[(Math.random() * arr.length) | 0]; }
+  function smooth(t) { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); }
+
+  function resize() {
+    DPR = Math.min(CFG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    initScene();
+  }
+
+  window.addEventListener('resize', resize, { passive: true });
+  window.addEventListener('pointerdown', (e) => {
+    addSurfaceCrumb(e.clientX);
+  }, { passive: true });
+
+  function initScene() {
+    tank = {
+      x: W * 0.10,
+      y: H * 0.11,
+      w: W * 0.80,
+      h: H * 0.80,
+      soilTop: H * 0.29,
+      soilBottom: H * 0.88,
+      surfaceY: H * 0.275,
+    };
+
+    nodes = [];
+    edges = [];
+    surfaceCrumbs = [];
+    stockpiles = [];
+    nextNodeId = 1;
+    nextEdgeId = 1;
+
+    const queen = createNode(tank.x + tank.w * 0.52, lerp(tank.soilTop, tank.soilBottom, 0.76), 'chamber', 34);
+    queenNodeId = queen.id;
+
+    const entranceCount = 4;
+    for (let i = 0; i < entranceCount; i++) {
+      const x = lerp(tank.x + tank.w * 0.12, tank.x + tank.w * 0.88, i / Math.max(1, entranceCount - 1));
+      createNode(x + rand(-20, 20), tank.soilTop + rand(8, 24), 'entrance', 12);
+    }
+
+    const shaftParents = nodes.filter((n) => n.type === 'entrance');
+    for (const entrance of shaftParents) {
+      const chamber = createNode(
+        entrance.x + rand(-40, 40),
+        entrance.y + rand(70, 130),
+        'chamber',
+        rand(20, 30)
+      );
+      createEdge(entrance.id, chamber.id, rand(12, 18));
+    }
+
+    const chamberRoots = nodes.filter((n) => n.type === 'chamber' && n.id !== queenNodeId);
+    for (const chamber of chamberRoots) {
+      if (Math.random() < 0.7) createEdge(chamber.id, queenNodeId, rand(12, 18));
+    }
+
+    stockpiles = nodes
+      .filter((n) => n.type === 'chamber' && n.id !== queenNodeId)
+      .slice(0, 3)
+      .map((n) => ({ nodeId: n.id, crumbs: rand(2, 6) | 0 }));
+
+    // Build initial network
+    for (let attempts = 0; attempts < 160 && nodes.length < 15; attempts++) {
+      growTunnelFromNode(choice(nodes));
+    }
+
+    // All initial edges are fully built
+    for (const edge of edges) edge.progress = 1;
+
+    ants = Array.from({ length: CFG.antCount }, (_, i) => makeAnt(i));
+
+    dust = Array.from({ length: CFG.dustCount }, () => ({
+      x: rand(tank.x, tank.x + tank.w),
+      y: rand(tank.soilTop, tank.soilBottom),
+      r: rand(0.5, 1.8),
+      alpha: rand(0.04, 0.15),
+    }));
+
+    pebbles = Array.from({ length: CFG.pebbles }, () => ({
+      x: rand(tank.x + 20, tank.x + tank.w - 20),
+      y: rand(tank.soilTop + 14, tank.soilBottom - 10),
+      rx: rand(2, 8),
+      ry: rand(1.5, 5),
+      rot: rand(0, Math.PI * 2),
+      alpha: rand(0.05, 0.18),
+      hue: rand(24, 38),
+    }));
+
+    // Roots from the surface
+    roots = Array.from({ length: 8 }, () => {
+      const x = rand(tank.x + 30, tank.x + tank.w - 30);
+      const segments = [];
+      let cx = x, cy = tank.soilTop;
+      const len = rand(40, 140);
+      const segs = 5 + (Math.random() * 4) | 0;
+      for (let i = 0; i < segs; i++) {
+        const nx = cx + rand(-18, 18);
+        const ny = cy + len / segs + rand(-4, 4);
+        segments.push({ x: nx, y: Math.min(ny, tank.soilBottom - 20) });
+        cx = nx;
+        cy = ny;
+        if (cy >= tank.soilBottom - 20) break;
+      }
+      return { x, segments, width: rand(0.8, 2.2), alpha: rand(0.06, 0.14) };
+    });
+
+    // Surface flowers
+    flowers = Array.from({ length: 5 }, () => ({
+      x: rand(tank.x + 20, tank.x + tank.w - 20),
+      petalColor: `hsl(${rand(0, 360)}, ${rand(55, 80)}%, ${rand(60, 78)}%)`,
+      stemH: rand(10, 22),
+      size: rand(3, 6),
+      petals: 4 + (Math.random() * 3) | 0,
+    }));
+
+    // Surface rocks
+    surfaceRocks = Array.from({ length: 6 }, () => ({
+      x: rand(tank.x + 15, tank.x + tank.w - 15),
+      rx: rand(3, 8),
+      ry: rand(2, 5),
+      shade: rand(0.3, 0.6),
+    }));
+
+    crumbTimer = rand(2.5, CFG.autoCrumbInterval);
+  }
+
+  // ---- Node/Edge helpers ----
+
+  function createNode(x, y, type, radius) {
+    const node = {
+      id: nextNodeId++,
+      x: clamp(x, tank.x + 26, tank.x + tank.w - 26),
+      y: clamp(y, tank.soilTop + 12, tank.soilBottom - 20),
+      type,
+      radius,
+      edges: [],
+      food: type === 'entrance' ? 0 : rand(0, 3) | 0,
+      // Eggs for chambers
+      eggs: type === 'chamber' ? (rand(2, 8) | 0) : 0,
+    };
+    nodes.push(node);
+    return node;
+  }
+
+  function getNode(id) { return nodes.find((n) => n.id === id); }
+
+  function createEdge(aId, bId, width) {
+    if (aId === bId) return null;
+    const a = getNode(aId);
+    const b = getNode(bId);
+    if (!a || !b) return null;
+    if (a.edges.includes(bId)) return null;
+
+    const edge = {
+      id: nextEdgeId++,
+      a: aId,
+      b: bId,
+      width,
+      progress: 0,
+      growthSpeed: rand(0.45, 1.2),
+      lastTraversed: 0,   // for pheromone glow
+      diggerOnEdge: false, // only advance progress when true
+    };
+    edges.push(edge);
+    a.edges.push(bId);
+    b.edges.push(aId);
+    return edge;
+  }
+
+  function edgeLength(edge) {
+    const a = getNode(edge.a);
+    const b = getNode(edge.b);
+    return dist(a.x, a.y, b.x, b.y);
+  }
+
+  function visibleNeighbors(nodeId) {
+    const node = getNode(nodeId);
+    if (!node) return [];
+    return node.edges.filter((otherId) => {
+      const edge = findEdge(nodeId, otherId);
+      return edge && edge.progress >= 0.995;
+    });
+  }
+
+  function findEdge(aId, bId) {
+    return edges.find((e) => (e.a === aId && e.b === bId) || (e.a === bId && e.b === aId));
+  }
+
+  // ---- Tunnel growth (only from a specific node, triggered by digger ants) ----
+
+  function growTunnelFromNode(parent) {
+    if (!parent || nodes.length >= CFG.maxNodes) return false;
+
+    const depthBias = smooth((parent.y - tank.soilTop) / (tank.soilBottom - tank.soilTop));
+    const angle = rand(-Math.PI * 0.92, Math.PI * 0.08) + (Math.random() < 0.35 ? rand(-0.65, 0.65) : 0);
+    const length = rand(46, 110) * (0.8 + depthBias * 0.5);
+    const nx = parent.x + Math.cos(angle) * length;
+    const ny = parent.y + Math.sin(angle) * length + rand(6, 24);
+
+    if (nx < tank.x + 28 || nx > tank.x + tank.w - 28 ||
+        ny < tank.soilTop + 16 || ny > tank.soilBottom - 18) return false;
+
+    const tooClose = nodes.some((n) => dist(nx, ny, n.x, n.y) < Math.min(parent.radius + 12, n.radius + 12));
+    if (tooClose) return false;
+
+    const typeRoll = Math.random();
+    const type = typeRoll < 0.28 ? 'chamber' : 'junction';
+    const radius = type === 'chamber' ? rand(18, 30) : rand(10, 16);
+    const child = createNode(nx, ny, type, radius);
+    const edge = createEdge(parent.id, child.id, rand(10, 18));
+
+    if (Math.random() < 0.22 && child.type === 'chamber') {
+      stockpiles.push({ nodeId: child.id, crumbs: rand(1, 4) | 0 });
+    }
+
+    if (Math.random() < 0.18) {
+      const possible = nodes.filter((n) =>
+        n.id !== child.id &&
+        n.id !== parent.id &&
+        dist(child.x, child.y, n.x, n.y) < 110 &&
+        visibleNeighbors(n.id).length < 5
+      );
+      const target = choice(possible);
+      if (target) createEdge(child.id, target.id, rand(9, 15));
+    }
+
+    return true;
+  }
+
+  // ---- Ants ----
+
+  function makeAnt(id) {
+    const start = choice(nodes.filter((n) => n.type !== 'entrance' || Math.random() < 0.35));
+    let next = choice(visibleNeighbors(start.id));
+    if (!next) next = queenNodeId === start.id ? start.id : queenNodeId;
+    const isDigger = Math.random() < CFG.diggerRatio;
+    return {
+      id,
+      edge: findEdge(start.id, next),
+      prev: start.id,
+      from: start.id,
+      to: next,
+      t: Math.random(),
+      speed: rand(18, 42),
+      carrying: Math.random() < 0.22,
+      size: rand(0.85, 1.25),
+      jitter: rand(0, Math.PI * 2),
+      pause: 0,
+      role: isDigger ? 'digger' : 'worker',
+      legPhase: rand(0, Math.PI * 2),
+      interacting: false,
+      interactTimer: 0,
+      interactPartner: null,
+    };
+  }
+
+  function nearestEntranceNode() {
+    const entrances = nodes.filter((n) => n.type === 'entrance');
+    return entrances.sort((a, b) => a.y - b.y)[0];
+  }
+
+  function addSurfaceCrumb(x) {
+    if (!tank) return;
+    const clampedX = clamp(x, tank.x + 20, tank.x + tank.w - 20);
+    surfaceCrumbs.push({
+      x: clampedX,
+      y: tank.surfaceY + rand(-2, 2),
+      size: rand(4, 9),
+      amount: rand(3, 8) | 0,
+      drift: rand(-8, 8),
+    });
+  }
+
+  function autoDropCrumb() {
+    addSurfaceCrumb(rand(tank.x + tank.w * 0.14, tank.x + tank.w * 0.86));
+  }
+
+  function antPos(ant) {
+    const a = getNode(ant.from);
+    const b = getNode(ant.to);
+    if (!a || !b) return { x: 0, y: 0, angle: 0 };
+    const x = lerp(a.x, b.x, ant.t);
+    const y = lerp(a.y, b.y, ant.t);
+    const angle = Math.atan2(b.y - a.y, b.x - a.x);
+    return { x, y, angle };
+  }
+
+  function updateAnt(ant, dt, time) {
+    // Handle interaction pause
+    if (ant.interacting) {
+      ant.interactTimer -= dt;
+      if (ant.interactTimer <= 0) {
+        ant.interacting = false;
+        ant.interactPartner = null;
+      }
+      return;
+    }
+
+    if (!ant.edge) {
+      const node = getNode(ant.from) || getNode(queenNodeId);
+      const nexts = visibleNeighbors(node.id);
+      if (!nexts.length) return;
+      ant.to = choice(nexts);
+      ant.edge = findEdge(node.id, ant.to);
+      ant.t = 0;
+    }
+
+    if (ant.pause > 0) {
+      ant.pause -= dt;
+      return;
+    }
+
+    // Advance leg phase while moving
+    ant.legPhase += dt * ant.speed * 0.5;
+
+    const fromNode = getNode(ant.from);
+    const toNode = getNode(ant.to);
+    if (!fromNode || !toNode) return;
+    const len = Math.max(10, edgeLength(ant.edge));
+    ant.t += (ant.speed * dt) / len;
+
+    // Mark edge as traversed for pheromone glow
+    if (ant.edge) ant.edge.lastTraversed = time;
+
+    // Digger ants advance incomplete edges
+    if (ant.role === 'digger' && ant.edge && ant.edge.progress < 1) {
+      ant.edge.diggerOnEdge = true;
+    }
+
+    if (ant.t >= 1) {
+      const previous = ant.from;
+      ant.from = ant.to;
+      ant.prev = previous;
+      ant.t = 0;
+      ant.pause = rand(0.02, 0.18);
+      const node = getNode(ant.from);
+      handleAntAtNode(ant, node, time);
+      chooseNextEdge(ant, node);
+    }
+  }
+
+  function handleAntAtNode(ant, node, time) {
+    if (!node) return;
+
+    // Digger ants try to extend the network from dead-end nodes
+    if (ant.role === 'digger' && node.edges.length <= 2 && Math.random() < 0.4) {
+      growTunnelFromNode(node);
+    }
+
+    // Pick up crumbs from surface entrances
+    if (!ant.carrying && node.type === 'entrance' && surfaceCrumbs.length) {
+      const crumb = surfaceCrumbs.sort((a, b) => Math.abs(a.x - node.x) - Math.abs(b.x - node.x))[0];
+      if (crumb && Math.abs(crumb.x - node.x) < 72 && crumb.amount > 0) {
+        crumb.amount--;
+        ant.carrying = true;
+        if (crumb.amount <= 0) surfaceCrumbs = surfaceCrumbs.filter((c) => c !== crumb);
+      }
+    }
+
+    const stock = stockpiles.find((s) => s.nodeId === node.id);
+    if (!ant.carrying && stock && stock.crumbs > 0 && Math.random() < 0.3) {
+      stock.crumbs--;
+      ant.carrying = true;
+    }
+
+    if (ant.carrying && node.id === queenNodeId) {
+      ant.carrying = false;
+      const pile = stockpiles.find((s) => s.nodeId === queenNodeId);
+      if (pile) pile.crumbs++;
+      else stockpiles.push({ nodeId: queenNodeId, crumbs: 1 });
+    }
+
+    if (ant.carrying && node.type === 'chamber' && node.id !== queenNodeId && Math.random() < 0.18) {
+      ant.carrying = false;
+      const pile = stockpiles.find((s) => s.nodeId === node.id);
+      if (pile) pile.crumbs++;
+      else stockpiles.push({ nodeId: node.id, crumbs: 1 });
+    }
+  }
+
+  function chooseNextEdge(ant, node) {
+    let neighbors;
+    if (ant.role === 'digger') {
+      // Diggers can traverse incomplete edges too
+      neighbors = node.edges.filter((otherId) => {
+        const edge = findEdge(node.id, otherId);
+        return edge != null;
+      });
+    } else {
+      neighbors = visibleNeighbors(node.id);
+    }
+    if (!neighbors.length) {
+      ant.edge = null;
+      return;
+    }
+
+    let candidates = neighbors.filter((id) => id !== ant.prev);
+    if (!candidates.length) candidates = neighbors.slice();
+
+    if (ant.carrying) {
+      candidates.sort((a, b) => {
+        const da = dist(getNode(a).x, getNode(a).y, getNode(queenNodeId).x, getNode(queenNodeId).y);
+        const db = dist(getNode(b).x, getNode(b).y, getNode(queenNodeId).x, getNode(queenNodeId).y);
+        return da - db;
+      });
+      ant.to = Math.random() < 0.78 ? candidates[0] : choice(candidates);
+    } else if (ant.role === 'digger') {
+      // Prefer incomplete edges or dead-ends
+      const incompleteNeighbors = candidates.filter((id) => {
+        const edge = findEdge(node.id, id);
+        return edge && edge.progress < 0.995;
+      });
+      if (incompleteNeighbors.length && Math.random() < 0.6) {
+        ant.to = choice(incompleteNeighbors);
+      } else {
+        ant.to = choice(candidates);
+      }
+    } else if (Math.random() < 0.28) {
+      const entrance = nearestEntranceNode();
+      if (entrance) {
+        candidates.sort((a, b) => Math.abs(getNode(a).x - entrance.x) - Math.abs(getNode(b).x - entrance.x));
+        ant.to = candidates[0];
+      } else {
+        ant.to = choice(candidates);
+      }
+    } else {
+      ant.to = choice(candidates);
+    }
+
+    ant.edge = findEdge(node.id, ant.to);
+  }
+
+  // ---- Ant interactions ----
+
+  function checkAntInteractions(time) {
+    for (let i = 0; i < ants.length; i++) {
+      if (ants[i].interacting || ants[i].pause > 0.1) continue;
+      const pi = antPos(ants[i]);
+      for (let j = i + 1; j < ants.length; j++) {
+        if (ants[j].interacting || ants[j].pause > 0.1) continue;
+        const pj = antPos(ants[j]);
+        const d = dist(pi.x, pi.y, pj.x, pj.y);
+        if (d < 12) {
+          // Ants meet! Brief interaction
+          ants[i].interacting = true;
+          ants[i].interactTimer = rand(0.3, 0.6);
+          ants[i].interactPartner = ants[j].id;
+          ants[j].interacting = true;
+          ants[j].interactTimer = rand(0.3, 0.6);
+          ants[j].interactPartner = ants[i].id;
+
+          // Food passing: carrying ant gives to non-carrying ant heading toward queen
+          if (ants[i].carrying && !ants[j].carrying) {
+            if (Math.random() < 0.3) {
+              ants[i].carrying = false;
+              ants[j].carrying = true;
+            }
+          } else if (ants[j].carrying && !ants[i].carrying) {
+            if (Math.random() < 0.3) {
+              ants[j].carrying = false;
+              ants[i].carrying = true;
+            }
+          }
+          break; // Only one interaction per ant per check
+        }
+      }
+    }
+  }
+
+  // ---- Main update ----
+
+  function update(dt, time) {
+    globalTime = time;
+
+    crumbTimer -= dt;
+    if (crumbTimer <= 0) {
+      autoDropCrumb();
+      crumbTimer = rand(CFG.autoCrumbInterval * 0.75, CFG.autoCrumbInterval * 1.35);
+    }
+
+    // Edge progress: only advance when a digger ant is on the edge
+    for (const edge of edges) {
+      if (edge.progress < 1 && edge.diggerOnEdge) {
+        edge.progress = Math.min(1, edge.progress + dt * edge.growthSpeed);
+      }
+      edge.diggerOnEdge = false; // Reset each frame, set by ant update
+    }
+
+    for (const ant of ants) updateAnt(ant, dt, time);
+
+    // Check interactions every few frames
+    if (Math.random() < 0.3) checkAntInteractions(time);
+
+    for (const crumb of surfaceCrumbs) {
+      crumb.x += Math.sin(time * 0.6 + crumb.drift) * 0.02;
+    }
+  }
+
+  // ---- Drawing ----
+
+  function drawBackdrop() {
+    const base = ctx.createLinearGradient(0, 0, 0, H);
+    base.addColorStop(0, '#a6dcff');
+    base.addColorStop(0.24, '#e8f7ff');
+    base.addColorStop(0.25, '#f2e3cb');
+    base.addColorStop(1, '#c69b73');
+    ctx.fillStyle = base;
+    ctx.fillRect(0, 0, W, H);
+
+    const desk = ctx.createLinearGradient(0, tank.surfaceY, 0, H);
+    desk.addColorStop(0, 'rgba(255,255,255,0)');
+    desk.addColorStop(0.1, 'rgba(170,118,72,0.10)');
+    desk.addColorStop(1, 'rgba(88,54,32,0.18)');
+    ctx.fillStyle = desk;
+    ctx.fillRect(0, tank.surfaceY, W, H - tank.surfaceY);
+
+    ctx.fillStyle = 'rgba(58,31,16,0.12)';
+    ctx.beginPath();
+    ctx.ellipse(tank.x + tank.w * 0.5, tank.y + tank.h + 18, tank.w * 0.46, 26, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawSky() {
+    const g = ctx.createLinearGradient(0, 0, 0, tank.surfaceY);
+    g.addColorStop(0, '#a6dcff');
+    g.addColorStop(0.55, '#e8f7ff');
+    g.addColorStop(1, '#f6eedf');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, tank.surfaceY);
+
+    const sun = ctx.createRadialGradient(W * 0.2, H * 0.10, 0, W * 0.2, H * 0.10, H * 0.22);
+    sun.addColorStop(0, 'rgba(255,255,255,0.46)');
+    sun.addColorStop(0.55, 'rgba(255,243,194,0.22)');
+    sun.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = sun;
+    ctx.fillRect(0, 0, W, tank.surfaceY);
+  }
+
+  function drawGrass(time) {
+    ctx.fillStyle = '#7caf58';
+    ctx.fillRect(tank.x, tank.surfaceY - 6, tank.w, 10);
+
+    ctx.strokeStyle = 'rgba(70,112,48,0.95)';
+    ctx.lineCap = 'round';
+    for (let x = tank.x + 2; x <= tank.x + tank.w; x += 6) {
+      const h = 8 + Math.sin(x * 0.05 + time * 0.8) * 2 + (x % 3);
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(x, tank.surfaceY + 1);
+      ctx.lineTo(x + Math.sin(time * 0.8 + x * 0.03) * 2, tank.surfaceY - h);
+      ctx.stroke();
+    }
+  }
+
+  function drawSurfaceDetails(time) {
+    // Flowers
+    for (const f of flowers) {
+      const baseY = tank.surfaceY - 2;
+      // Stem
+      ctx.strokeStyle = 'rgba(60,100,40,0.8)';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(f.x, baseY);
+      ctx.lineTo(f.x + Math.sin(time * 0.6) * 1, baseY - f.stemH);
+      ctx.stroke();
+      // Petals
+      ctx.fillStyle = f.petalColor;
+      const cx = f.x + Math.sin(time * 0.6) * 1;
+      const cy = baseY - f.stemH;
+      for (let i = 0; i < f.petals; i++) {
+        const a = (i / f.petals) * Math.PI * 2 + time * 0.2;
+        ctx.beginPath();
+        ctx.ellipse(cx + Math.cos(a) * f.size * 0.5, cy + Math.sin(a) * f.size * 0.5, f.size * 0.4, f.size * 0.25, a, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // Center
+      ctx.fillStyle = '#f0d060';
+      ctx.beginPath();
+      ctx.arc(cx, cy, f.size * 0.22, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Surface rocks
+    for (const r of surfaceRocks) {
+      ctx.fillStyle = `rgba(120,100,80,${r.shade})`;
+      ctx.beginPath();
+      ctx.ellipse(r.x, tank.surfaceY + 1, r.rx, r.ry, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function drawSurfaceCrumbs() {
+    for (const crumb of surfaceCrumbs) {
+      ctx.fillStyle = '#c99956';
+      const count = Math.max(1, crumb.amount);
+      for (let i = 0; i < count; i++) {
+        const ox = Math.sin(i * 2.3 + crumb.drift) * (crumb.size * 0.55);
+        const oy = Math.cos(i * 1.7 + crumb.drift) * 1.3;
+        ctx.beginPath();
+        ctx.arc(crumb.x + ox, crumb.y + oy, Math.max(1.6, crumb.size * 0.22), 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  function drawTank() {
+    const { x, y, w, h } = tank;
+    const r = Math.min(W, H) * 0.03;
+
+    ctx.save();
+    roundRect(x, y, w, h, r);
+    ctx.fillStyle = 'rgba(255,255,255,0.10)';
+    ctx.fill();
+
+    roundRect(x + 6, y + 6, w - 12, h - 12, r - 6);
+    ctx.clip();
+
+    drawSoil();
+    drawTunnels();
+    drawAnts();
+
+    ctx.restore();
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.lineWidth = 3;
+    roundRect(x, y, w, h, r);
+    ctx.stroke();
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+    ctx.lineWidth = 1.4;
+    roundRect(x + 7, y + 7, w - 14, h - 14, r - 7);
+    ctx.stroke();
+
+    const gloss = ctx.createLinearGradient(x, y, x + w, y);
+    gloss.addColorStop(0, 'rgba(255,255,255,0.18)');
+    gloss.addColorStop(0.16, 'rgba(255,255,255,0.04)');
+    gloss.addColorStop(0.4, 'rgba(255,255,255,0)');
+    gloss.addColorStop(0.86, 'rgba(255,255,255,0.03)');
+    gloss.addColorStop(1, 'rgba(255,255,255,0.12)');
+    ctx.fillStyle = gloss;
+    roundRect(x, y, w, h, r);
+    ctx.fill();
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function drawSoil() {
+    // Layered soil bands
+    const top = tank.soilTop;
+    const bot = tank.soilBottom;
+    const layers = [
+      { stop: 0.0, color: '#8a6040' },
+      { stop: 0.15, color: '#805236' },
+      { stop: 0.35, color: '#643d27' },
+      { stop: 0.6, color: '#4e2e1b' },
+      { stop: 0.85, color: '#3e2619' },
+      { stop: 1.0, color: '#26150d' },
+    ];
+    const g = ctx.createLinearGradient(0, top, 0, bot);
+    for (const l of layers) g.addColorStop(l.stop, l.color);
+    ctx.fillStyle = g;
+    ctx.fillRect(tank.x, top, tank.w, bot - top);
+
+    // Subtle layer lines
+    ctx.save();
+    ctx.globalAlpha = 0.05;
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1;
+    for (let i = 1; i < layers.length - 1; i++) {
+      const y = lerp(top, bot, layers[i].stop);
+      ctx.beginPath();
+      ctx.moveTo(tank.x, y);
+      ctx.lineTo(tank.x + tank.w, y);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // Top soil highlight
+    ctx.fillStyle = 'rgba(255,244,216,0.03)';
+    ctx.fillRect(tank.x, top, tank.w, 14);
+
+    // Roots
+    for (const root of roots) {
+      ctx.strokeStyle = `rgba(90,60,30,${root.alpha})`;
+      ctx.lineWidth = root.width;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(root.x, tank.soilTop);
+      for (const seg of root.segments) {
+        ctx.lineTo(seg.x, seg.y);
+      }
+      ctx.stroke();
+    }
+
+    // Pebbles
+    for (const pebble of pebbles) {
+      ctx.save();
+      ctx.translate(pebble.x, pebble.y);
+      ctx.rotate(pebble.rot);
+      ctx.fillStyle = `hsla(${pebble.hue}, 18%, 42%, ${pebble.alpha})`;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, pebble.rx, pebble.ry, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Dust
+    for (const d of dust) {
+      ctx.fillStyle = `rgba(30,18,10,${d.alpha})`;
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function drawTunnels() {
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+
+    for (const edge of edges) {
+      if (edge.progress <= 0) continue;
+      const a = getNode(edge.a);
+      const b = getNode(edge.b);
+      const ex = lerp(a.x, b.x, edge.progress);
+      const ey = lerp(a.y, b.y, edge.progress);
+
+      // Pheromone glow on recently-traversed edges
+      const pheromoneAge = globalTime - edge.lastTraversed;
+      const pheromoneAlpha = clamp(1 - pheromoneAge / 5, 0, 1) * 0.15;
+      if (pheromoneAlpha > 0.01) {
+        ctx.strokeStyle = `rgba(255,200,100,${pheromoneAlpha})`;
+        ctx.lineCap = 'round';
+        ctx.lineWidth = edge.width + 6;
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(ex, ey);
+        ctx.stroke();
+      }
+
+      ctx.strokeStyle = 'rgba(222,181,126,0.70)';
+      ctx.lineCap = 'round';
+      ctx.lineWidth = edge.width;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(ex, ey);
+      ctx.stroke();
+
+      ctx.strokeStyle = 'rgba(120,85,52,0.26)';
+      ctx.lineWidth = Math.max(1, edge.width * 0.16);
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y - edge.width * 0.16);
+      ctx.lineTo(ex, ey - edge.width * 0.16);
+      ctx.stroke();
+    }
+
+    for (const node of nodes) {
+      const visible = node.type === 'entrance' || node.edges.some((id) => {
+        const edge = findEdge(node.id, id);
+        return edge && edge.progress >= 0.995;
+      });
+      if (!visible) continue;
+      ctx.fillStyle = node.id === queenNodeId ? 'rgba(229,197,146,0.88)' : 'rgba(219,177,123,0.82)';
+      ctx.beginPath();
+      ctx.ellipse(node.x, node.y, node.radius, node.radius * lerp(0.65, 1.0, node.type === 'chamber' ? 1 : 0.7), 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = 'rgba(116,82,54,0.24)';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.ellipse(node.x, node.y, node.radius, node.radius * lerp(0.65, 1.0, node.type === 'chamber' ? 1 : 0.7), 0, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Eggs/larvae in chambers
+      if (node.type === 'chamber' && node.eggs > 0) {
+        const eggCount = node.id === queenNodeId ? Math.min(12, node.eggs + 4) : Math.min(6, node.eggs);
+        for (let i = 0; i < eggCount; i++) {
+          const ea = (i / eggCount) * Math.PI * 2 + 0.3;
+          const er = node.radius * rand(0.25, 0.55);
+          const ex = node.x + Math.cos(ea) * er;
+          const ey = node.y + Math.sin(ea) * er * 0.6;
+          ctx.fillStyle = 'rgba(255,248,230,0.65)';
+          ctx.beginPath();
+          ctx.ellipse(ex, ey, 2.2, 1.4, ea * 0.3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+
+    ctx.restore();
+
+    // Food stockpiles (drawn outside screen blend)
+    for (const pile of stockpiles) {
+      const node = getNode(pile.nodeId);
+      if (!node || pile.crumbs <= 0) continue;
+      ctx.fillStyle = pile.nodeId === queenNodeId ? '#d9a35b' : '#c38a44';
+      const count = Math.min(7, pile.crumbs);
+      for (let i = 0; i < count; i++) {
+        const a = i / Math.max(1, count) * Math.PI * 2;
+        const px = node.x + Math.cos(a) * node.radius * 0.35;
+        const py = node.y + Math.sin(a) * node.radius * 0.22;
+        ctx.beginPath();
+        ctx.arc(px, py, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  function drawAnts() {
+    // Draw queen ant first (in queen chamber)
+    const queenNode = getNode(queenNodeId);
+    if (queenNode) {
+      drawQueenAnt(queenNode);
+    }
+
+    // Worker/digger ants
+    for (const ant of ants) {
+      const p = antPos(ant);
+      const moving = ant.pause <= 0 && !ant.interacting;
+      const bob = moving ? Math.sin(performance.now() * 0.01 + ant.jitter + ant.t * 9) * 0.6 : 0;
+
+      ctx.save();
+      ctx.translate(p.x, p.y + bob);
+      ctx.rotate(p.angle);
+      ctx.scale(ant.size, ant.size);
+
+      // Animated legs with tripod gait
+      const phase = moving ? ant.legPhase : 0;
+      drawAntLegs(phase, moving);
+
+      // Body segments
+      ctx.fillStyle = ant.role === 'digger' ? '#3a1e10' : '#2a160d';
+      ctx.beginPath();
+      ctx.ellipse(-4.2, 0, 2.5, 1.9, 0, 0, Math.PI * 2);  // head
+      ctx.ellipse(-0.2, 0, 2.9, 2.2, 0, 0, Math.PI * 2);  // thorax
+      ctx.ellipse(4.0, 0, 3.6, 2.5, 0, 0, Math.PI * 2);   // abdomen
+      ctx.fill();
+
+      // Antennae
+      const antAngle = ant.interacting ? 0.15 : 0;
+      ctx.strokeStyle = 'rgba(36,18,10,0.7)';
+      ctx.lineWidth = 0.9;
+      ctx.beginPath();
+      ctx.moveTo(-5.5, -1);
+      ctx.quadraticCurveTo(-7, -3 - antAngle, -7.8 + Math.sin(globalTime * 3 + ant.jitter) * 0.8, -4 - antAngle);
+      ctx.moveTo(-5.5, 1);
+      ctx.quadraticCurveTo(-7, 3 + antAngle, -8.1 + Math.sin(globalTime * 3 + ant.jitter + 1) * 0.8, 3.8 + antAngle);
+      ctx.stroke();
+
+      // Carrying food
+      if (ant.carrying) {
+        ctx.fillStyle = '#d49a55';
+        ctx.beginPath();
+        ctx.arc(-7.8, 0, 1.8, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.restore();
+    }
+  }
+
+  function drawAntLegs(phase, moving) {
+    ctx.strokeStyle = 'rgba(36,18,10,0.58)';
+    ctx.lineWidth = 0.8;
+    ctx.lineCap = 'round';
+
+    // 3 pairs of legs, tripod gait (alternating sets)
+    const legPairs = [
+      { attachX: -2, restTipX: -4,  restTipY: 4, offset: 0 },
+      { attachX:  0, restTipX: -0.5, restTipY: 5, offset: Math.PI * 0.67 },
+      { attachX:  2, restTipX:  3,   restTipY: 5, offset: Math.PI * 1.33 },
+    ];
+
+    for (let side = -1; side <= 1; side += 2) {
+      for (let i = 0; i < 3; i++) {
+        const lp = legPairs[i];
+        const legOffset = lp.offset + (side === 1 ? Math.PI : 0);
+        const swing = moving ? Math.sin(phase + legOffset) * 2.2 : 0;
+        const lift = moving ? Math.max(0, Math.sin(phase + legOffset)) * 1.0 : 0;
+
+        const tipX = lp.restTipX + swing;
+        const tipY = (lp.restTipY - lift) * side;
+        const midX = lp.attachX + (tipX - lp.attachX) * 0.45;
+        const midY = side * 2.2;
+
+        ctx.beginPath();
+        ctx.moveTo(lp.attachX, side * 1);
+        ctx.quadraticCurveTo(midX, midY, tipX, tipY);
+        ctx.stroke();
+      }
+    }
+  }
+
+  function drawQueenAnt(node) {
+    ctx.save();
+    const wobble = Math.sin(globalTime * 0.4) * 2;
+    ctx.translate(node.x + wobble, node.y);
+    ctx.rotate(Math.sin(globalTime * 0.3) * 0.05);
+    const s = 1.8;
+    ctx.scale(s, s);
+
+    // Legs (resting)
+    drawAntLegs(0, false);
+
+    // Body — larger, darker brown
+    ctx.fillStyle = '#1e0e06';
+    ctx.beginPath();
+    ctx.ellipse(-4.2, 0, 2.8, 2.2, 0, 0, Math.PI * 2);  // head
+    ctx.ellipse(-0.2, 0, 3.2, 2.5, 0, 0, Math.PI * 2);   // thorax
+    ctx.ellipse(5.0, 0, 5.0, 3.5, 0, 0, Math.PI * 2);    // big abdomen
+    ctx.fill();
+
+    // Crown marking on head
+    ctx.fillStyle = 'rgba(200,160,80,0.3)';
+    ctx.beginPath();
+    ctx.arc(-4.2, -1.2, 1.2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Antennae (waving)
+    ctx.strokeStyle = 'rgba(30,14,6,0.7)';
+    ctx.lineWidth = 0.9;
+    ctx.beginPath();
+    ctx.moveTo(-6, -1.2);
+    ctx.quadraticCurveTo(-8, -3, -9 + Math.sin(globalTime * 2) * 1.2, -5);
+    ctx.moveTo(-6, 1.2);
+    ctx.quadraticCurveTo(-8, 3, -9.5 + Math.sin(globalTime * 2 + 1.5) * 1.2, 4.5);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function drawGlassDetails() {
+    const { x, y, w, h } = tank;
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fillRect(x + 12, y + 12, 10, h - 24);
+    ctx.fillStyle = 'rgba(255,255,255,0.04)';
+    ctx.fillRect(x + w - 20, y + 20, 6, h - 40);
+  }
+
+  function drawFrame(time) {
+    drawBackdrop();
+    drawSky();
+    drawGrass(time);
+    drawSurfaceDetails(time);
+    drawSurfaceCrumbs();
+    drawTank();
+    drawGlassDetails();
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    update(dt, time);
+    drawFrame(time);
+
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  autoDropCrumb();
+  autoDropCrumb();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
