@@ -1,0 +1,712 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Clockwork</title>
+  <style>
+    html,body{ margin:0; height:100%; overflow:hidden; background:#100b08; }
+    canvas{ display:block; width:100vw; height:100vh; }
+    .vignette{
+      position:fixed; inset:0; pointer-events:none;
+      background:
+        radial-gradient(120% 100% at 50% 20%, rgba(255,210,150,0.08), rgba(0,0,0,0) 40%),
+        radial-gradient(130% 110% at 50% 50%, rgba(0,0,0,0) 38%, rgba(0,0,0,0.28) 72%, rgba(0,0,0,0.72) 100%);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+<script>
+(() => {
+  const CFG = {
+    dprCap: 2,
+    dustCount: 90,
+    sparkCount: 18,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+  let W = 0, H = 0, DPR = 1;
+
+  let gears = [];
+  let rods = [];
+  let gauges = [];
+  let dust = [];
+  let sparks = [];
+  let escapement = null;
+  let pendulum = null;
+  let energy = 0;
+  let glitchTimer = 0;
+
+  const pointer = { x: 0, y: 0, tx: 0, ty: 0, seen: false };
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function ease(t) { return t * t * (3 - 2 * t); }
+
+  function resize() {
+    DPR = Math.min(CFG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    buildScene();
+  }
+
+  window.addEventListener('resize', resize, { passive: true });
+  window.addEventListener('pointermove', (e) => {
+    pointer.seen = true;
+    pointer.tx = (e.clientX / W) * 2 - 1;
+    pointer.ty = (e.clientY / H) * 2 - 1;
+  }, { passive: true });
+
+  function buildScene() {
+    const cx = W * 0.5;
+    const cy = H * 0.5;
+
+    const g0 = makeGear(cx - W * 0.14, cy + H * 0.04, Math.min(W, H) * 0.14, 26, 0.42, '#b88946');
+    const g1 = makeGear(g0.x + g0.r + Math.min(W, H) * 0.08, g0.y - Math.min(W, H) * 0.02, Math.min(W, H) * 0.075, 17, -(g0.speed * g0.r) / (Math.min(W, H) * 0.075), '#89939d');
+    const g2 = makeGear(g0.x - Math.min(W, H) * 0.13, g0.y - Math.min(W, H) * 0.16, Math.min(W, H) * 0.095, 20, -(g0.speed * g0.r) / (Math.min(W, H) * 0.095), '#8f6a36');
+    const g3 = makeGear(g1.x + Math.min(W, H) * 0.14, g1.y + Math.min(W, H) * 0.12, Math.min(W, H) * 0.115, 22, -(g1.speed * g1.r) / (Math.min(W, H) * 0.115), '#73808c');
+    const g4 = makeGear(g2.x + Math.min(W, H) * 0.18, g2.y - Math.min(W, H) * 0.16, Math.min(W, H) * 0.055, 14, -(g2.speed * g2.r) / (Math.min(W, H) * 0.055), '#b9904a');
+    const g5 = makeGear(g3.x + Math.min(W, H) * 0.16, g3.y - Math.min(W, H) * 0.12, Math.min(W, H) * 0.085, 18, -(g3.speed * g3.r) / (Math.min(W, H) * 0.085), '#9aa3ab');
+
+    gears = [g0, g1, g2, g3, g4, g5];
+
+    rods = [
+      { ax: g2.x, ay: g2.y, bx: g4.x, by: g4.y, phase: rand(0, Math.PI * 2) },
+      { ax: g1.x, ay: g1.y, bx: g3.x, by: g3.y, phase: rand(0, Math.PI * 2) },
+      { ax: g3.x, ay: g3.y, bx: g5.x, by: g5.y, phase: rand(0, Math.PI * 2) },
+    ];
+
+    gauges = [
+      makeGauge(W * 0.18, H * 0.81, Math.min(W, H) * 0.09, 'TORQUE'),
+      makeGauge(W * 0.50, H * 0.84, Math.min(W, H) * 0.075, 'LOAD'),
+      makeGauge(W * 0.82, H * 0.79, Math.min(W, H) * 0.095, 'TENSION'),
+    ];
+
+    escapement = {
+      x: W * 0.79,
+      y: H * 0.26,
+      r: Math.min(W, H) * 0.06,
+      angle: 0,
+      tick: 0,
+      pulse: 0,
+    };
+
+    pendulum = {
+      anchorX: W * 0.16,
+      anchorY: H * 0.16,
+      len: H * 0.36,
+      bobR: Math.min(W, H) * 0.038,
+      phase: 0,
+    };
+
+    dust = Array.from({ length: CFG.dustCount }, () => ({
+      x: rand(0, 1),
+      y: rand(0, 1),
+      r: rand(0.7, 2.6),
+      speed: rand(0.003, 0.016),
+      sway: rand(0.003, 0.012),
+      phase: rand(0, Math.PI * 2),
+      alpha: rand(0.04, 0.14),
+    }));
+
+    sparks = Array.from({ length: CFG.sparkCount }, () => makeSpark(true));
+  }
+
+  function makeGear(x, y, r, teeth, speed, hue) {
+    return {
+      x, y, r, teeth, speed, hue,
+      angle: rand(0, Math.PI * 2),
+      wobble: rand(0.4, 1.2),
+      ring: rand(0.38, 0.56),
+    };
+  }
+
+  function makeGauge(x, y, r, label) {
+    return {
+      x, y, r, label,
+      value: rand(0.2, 0.8),
+      target: rand(0.2, 0.8),
+      speed: rand(0.15, 0.45),
+      phase: rand(0, Math.PI * 2),
+    };
+  }
+
+  function makeSpark(hidden) {
+    return {
+      x: hidden ? -100 : W * 0.64 + rand(-20, 20),
+      y: hidden ? -100 : H * 0.33 + rand(-12, 12),
+      vx: rand(-60, 60),
+      vy: rand(-90, -20),
+      life: hidden ? 0 : rand(0.2, 0.8),
+      age: hidden ? 1 : 0,
+      size: rand(1.5, 3.5),
+      hue: rand(24, 42),
+    };
+  }
+
+  function triggerGlitch() {
+    glitchTimer = rand(0.05, 0.14);
+    energy = 1;
+    for (const s of sparks) {
+      if (s.age >= s.life) Object.assign(s, makeSpark(false));
+    }
+  }
+
+  function update(dt, time) {
+    if (!pointer.seen) {
+      pointer.tx = Math.sin(time * 0.11) * 0.22;
+      pointer.ty = Math.cos(time * 0.09) * 0.18;
+    }
+    pointer.x = lerp(pointer.x, pointer.tx, 0.03);
+    pointer.y = lerp(pointer.y, pointer.ty, 0.03);
+
+    for (const g of gears) {
+      g.angle += g.speed * dt;
+    }
+
+    if (glitchTimer > 0) glitchTimer -= dt;
+    energy = Math.max(0, energy - dt * 1.8);
+
+    const tickWave = Math.sin(time * 2.4 * Math.PI);
+    escapement.tick = tickWave > 0 ? 1 : -1;
+    escapement.angle += escapement.tick * dt * 0.6;
+    escapement.pulse = 0.5 + 0.5 * Math.abs(tickWave);
+    if (Math.abs(tickWave) > 0.995 && Math.random() < 0.28) triggerGlitch();
+
+    pendulum.phase += dt * 1.1;
+
+    for (const g of gauges) {
+      if (Math.random() < dt * 0.35) g.target = rand(0.16, 0.92);
+      g.value = lerp(g.value, g.target + Math.sin(time * g.speed + g.phase) * 0.06 + energy * 0.18, 0.02);
+    }
+
+    for (const d of dust) {
+      d.y += d.speed * dt;
+      d.x += Math.sin(time * 0.35 + d.phase) * d.sway * dt + pointer.x * 0.0006;
+      if (d.y > 1.05) {
+        d.y = -0.04;
+        d.x = rand(0, 1);
+      }
+    }
+
+    for (const s of sparks) {
+      if (s.age >= s.life) continue;
+      s.age += dt;
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      s.vy += 240 * dt;
+      s.vx *= 0.992;
+    }
+  }
+
+  function drawBackground(time) {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#2a1a12');
+    g.addColorStop(0.42, '#1b120d');
+    g.addColorStop(1, '#0b0908');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    // Primary warm light (upper center)
+    const glow = ctx.createRadialGradient(W * 0.53, H * 0.24, 0, W * 0.53, H * 0.24, H * 0.7);
+    glow.addColorStop(0, 'rgba(255,196,120,0.22)');
+    glow.addColorStop(0.36, 'rgba(255,150,70,0.09)');
+    glow.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, W, H);
+
+    // Secondary warm fill light (lower left)
+    const glow2 = ctx.createRadialGradient(W * 0.22, H * 0.72, 0, W * 0.22, H * 0.72, H * 0.55);
+    glow2.addColorStop(0, 'rgba(255,170,90,0.10)');
+    glow2.addColorStop(0.5, 'rgba(255,140,60,0.04)');
+    glow2.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = glow2;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,230,180,0.04)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 12; i++) {
+      const y = H * (0.08 + i * 0.075);
+      ctx.beginPath();
+      ctx.moveTo(0, y + Math.sin(time * 0.1 + i) * 3);
+      ctx.lineTo(W, y + Math.cos(time * 0.12 + i) * 3);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawBackPlate() {
+    const pad = Math.min(W, H) * 0.08;
+    const x = pad;
+    const y = pad * 0.75;
+    const w = W - pad * 2;
+    const h = H - pad * 1.5;
+    const radius = Math.min(W, H) * 0.04;
+
+    ctx.fillStyle = '#211711';
+    roundRect(ctx, x, y, w, h, radius);
+    ctx.fill();
+
+    const metal = ctx.createLinearGradient(x, y, x, y + h);
+    metal.addColorStop(0, 'rgba(255,255,255,0.05)');
+    metal.addColorStop(0.5, 'rgba(255,255,255,0)');
+    metal.addColorStop(1, 'rgba(0,0,0,0.22)');
+    ctx.fillStyle = metal;
+    roundRect(ctx, x, y, w, h, radius);
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(255,220,170,0.08)';
+    ctx.lineWidth = 1.4;
+    roundRect(ctx, x + 1, y + 1, w - 2, h - 2, radius - 2);
+    ctx.stroke();
+
+    // Engraved concentric decorative rings
+    ctx.save();
+    ctx.globalAlpha = 0.06;
+    ctx.strokeStyle = 'rgba(255,220,170,1)';
+    ctx.lineWidth = 0.8;
+    const rcx = x + w * 0.5, rcy = y + h * 0.45;
+    for (let i = 1; i <= 6; i++) {
+      ctx.beginPath();
+      ctx.arc(rcx, rcy, Math.min(w, h) * 0.08 * i, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    // Corner decorative arcs
+    const corners = [[x + w * 0.12, y + h * 0.12], [x + w * 0.88, y + h * 0.12],
+                     [x + w * 0.12, y + h * 0.88], [x + w * 0.88, y + h * 0.88]];
+    for (const [cx2, cy2] of corners) {
+      for (let i = 1; i <= 3; i++) {
+        ctx.beginPath();
+        ctx.arc(cx2, cy2, Math.min(w, h) * 0.04 * i, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+
+    for (let i = 0; i < 10; i++) {
+      const bx = x + w * (0.08 + (i % 5) * 0.21);
+      const by = y + h * (i < 5 ? 0.09 : 0.91);
+      drawBolt(bx, by, Math.min(W, H) * 0.012);
+    }
+  }
+
+  function roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function drawBolt(x, y, r) {
+    const g = ctx.createRadialGradient(x - r * 0.35, y - r * 0.35, 0, x, y, r);
+    g.addColorStop(0, 'rgba(255,255,255,0.45)');
+    g.addColorStop(0.4, '#9a8568');
+    g.addColorStop(1, '#4b3928');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+    ctx.beginPath();
+    ctx.moveTo(x - r * 0.45, y);
+    ctx.lineTo(x + r * 0.45, y);
+    ctx.stroke();
+  }
+
+  function drawGear(g, time) {
+    ctx.save();
+    ctx.translate(g.x + pointer.x * 14 * (g.r / 120), g.y + pointer.y * 10 * (g.r / 120));
+    ctx.rotate(g.angle + Math.sin(time * 0.35 + g.wobble) * 0.01);
+
+    const outer = g.r * 1.1;
+    const inner = g.r * 0.88;
+    const step = (Math.PI * 2) / g.teeth;
+    const toothHalf = step * 0.24;
+
+    ctx.beginPath();
+    for (let i = 0; i < g.teeth; i++) {
+      const a = i * step;
+      // Trapezoid tooth: root → angled rise → flat top → angled fall → root
+      const riseA = a - toothHalf;
+      const tipA1 = a - toothHalf * 0.65;
+      const tipA2 = a + toothHalf * 0.65;
+      const fallA = a + toothHalf;
+      if (i === 0) ctx.moveTo(Math.cos(riseA) * inner, Math.sin(riseA) * inner);
+      else ctx.lineTo(Math.cos(riseA) * inner, Math.sin(riseA) * inner);
+      ctx.lineTo(Math.cos(tipA1) * outer, Math.sin(tipA1) * outer);
+      ctx.lineTo(Math.cos(tipA2) * outer, Math.sin(tipA2) * outer);
+      ctx.lineTo(Math.cos(fallA) * inner, Math.sin(fallA) * inner);
+    }
+    ctx.closePath();
+
+    const ring = ctx.createRadialGradient(-g.r * 0.18, -g.r * 0.24, g.r * 0.08, 0, 0, g.r * 1.2);
+    ring.addColorStop(0, shade(g.hue, 38));
+    ring.addColorStop(0.35, shade(g.hue, 12));
+    ring.addColorStop(1, shade(g.hue, -18));
+    ctx.fillStyle = ring;
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(20,12,8,0.45)';
+    ctx.lineWidth = Math.max(1.2, g.r * 0.04);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(0, 0, g.r * g.ring, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(15,10,8,0.34)';
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(255,240,210,0.12)';
+    ctx.lineWidth = Math.max(1, g.r * 0.025);
+    ctx.beginPath();
+    ctx.arc(0, 0, g.r * 0.92, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Spoke lines
+    const spokeCount = Math.max(4, (g.teeth / 3) | 0);
+    for (let i = 0; i < spokeCount; i++) {
+      const a = (i / spokeCount) * Math.PI * 2;
+      ctx.strokeStyle = 'rgba(255,235,200,0.08)';
+      ctx.lineWidth = Math.max(1, g.r * 0.018);
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a) * g.r * 0.18, Math.sin(a) * g.r * 0.18);
+      ctx.lineTo(Math.cos(a) * g.r * 0.62, Math.sin(a) * g.r * 0.62);
+      ctx.stroke();
+    }
+
+    // Brushed-metal radial lines (fine machining marks)
+    ctx.save();
+    ctx.globalAlpha = 0.04;
+    ctx.strokeStyle = 'rgba(255,240,210,1)';
+    ctx.lineWidth = 0.5;
+    const brushCount = Math.max(16, g.teeth * 2);
+    for (let i = 0; i < brushCount; i++) {
+      const a = (i / brushCount) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a) * g.r * 0.2, Math.sin(a) * g.r * 0.2);
+      ctx.lineTo(Math.cos(a) * g.r * 0.82, Math.sin(a) * g.r * 0.82);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // Decorative engraved numerals on larger gears
+    if (g.r > Math.min(W, H) * 0.09) {
+      ctx.save();
+      ctx.fillStyle = 'rgba(255,230,190,0.09)';
+      const numR = g.r * 0.72;
+      const numerals = ['I','II','III','IV','V','VI','VII','VIII','IX','X','XI','XII'];
+      const fontSize = Math.max(8, g.r * 0.1);
+      ctx.font = `${fontSize}px Georgia, "Times New Roman", serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      for (let i = 0; i < 12; i++) {
+        const a = (i / 12) * Math.PI * 2 - Math.PI / 2;
+        const nx = Math.cos(a) * numR;
+        const ny = Math.sin(a) * numR;
+        ctx.fillText(numerals[i], nx, ny);
+      }
+      ctx.restore();
+    }
+
+    ctx.fillStyle = '#31231a';
+    ctx.beginPath();
+    ctx.arc(0, 0, g.r * 0.16, 0, Math.PI * 2);
+    ctx.fill();
+    drawBolt(0, 0, g.r * 0.09);
+
+    // Jewel bearing ring around center
+    const jR = g.r * 0.13;
+    const jg = ctx.createRadialGradient(-jR * 0.3, -jR * 0.3, 0, 0, 0, jR);
+    jg.addColorStop(0, 'rgba(220,60,80,0.6)');
+    jg.addColorStop(0.5, 'rgba(160,30,50,0.4)');
+    jg.addColorStop(1, 'rgba(80,10,20,0.15)');
+    ctx.fillStyle = jg;
+    ctx.beginPath();
+    ctx.arc(0, 0, jR, 0, Math.PI * 2);
+    ctx.fill();
+    // Jewel highlight
+    ctx.fillStyle = 'rgba(255,180,190,0.35)';
+    ctx.beginPath();
+    ctx.arc(-jR * 0.25, -jR * 0.25, jR * 0.3, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  function shade(base, offset) {
+    const table = {
+      '#b88946': [184, 137, 70],
+      '#89939d': [137, 147, 157],
+      '#8f6a36': [143, 106, 54],
+      '#73808c': [115, 128, 140],
+      '#b9904a': [185, 144, 74],
+      '#9aa3ab': [154, 163, 171],
+    }[base] || [150, 140, 120];
+    const r = clamp(table[0] + offset, 0, 255) | 0;
+    const g = clamp(table[1] + offset, 0, 255) | 0;
+    const b = clamp(table[2] + offset, 0, 255) | 0;
+    return `rgb(${r},${g},${b})`;
+  }
+
+  function drawRod(rod, time) {
+    const flex = Math.sin(time * 1.1 + rod.phase) * 10 + energy * 8;
+    const mx = (rod.ax + rod.bx) * 0.5 + flex;
+    const my = (rod.ay + rod.by) * 0.5 - flex * 0.3;
+    ctx.strokeStyle = 'rgba(165,175,185,0.34)';
+    ctx.lineWidth = Math.min(W, H) * 0.009;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(rod.ax, rod.ay);
+    ctx.quadraticCurveTo(mx, my, rod.bx, rod.by);
+    ctx.stroke();
+    drawBolt(rod.ax, rod.ay, Math.min(W, H) * 0.009);
+    drawBolt(rod.bx, rod.by, Math.min(W, H) * 0.009);
+  }
+
+  function drawSpring(x1, y1, x2, y2, turns, amp, color) {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const len = Math.hypot(dx, dy);
+    const ang = Math.atan2(dy, dx);
+    ctx.save();
+    ctx.translate(x1, y1);
+    ctx.rotate(ang);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = Math.max(1.4, Math.min(W, H) * 0.004);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    for (let i = 1; i < turns; i++) {
+      const t = i / turns;
+      const x = len * t;
+      const y = (i % 2 ? -1 : 1) * amp;
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(len, 0);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawEscapement(time) {
+    const x = escapement.x + pointer.x * 10;
+    const y = escapement.y + pointer.y * 6;
+    const pulse = escapement.pulse;
+
+    ctx.save();
+    ctx.translate(x, y);
+
+    ctx.strokeStyle = 'rgba(205,215,225,0.38)';
+    ctx.lineWidth = Math.min(W, H) * 0.008;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(-escapement.r * 1.1, -escapement.r * 1.7);
+    ctx.lineTo(0, -escapement.r * 0.18);
+    ctx.lineTo(escapement.r * 1.1, -escapement.r * 1.7);
+    ctx.stroke();
+
+    ctx.save();
+    ctx.rotate(Math.sin(time * 2.4 * Math.PI) * 0.17);
+    ctx.fillStyle = shade('#9aa3ab', -20);
+    const eTeeth = 7;
+    const eStep = (Math.PI * 2) / eTeeth;
+    const eInner = escapement.r * 0.72;
+    const eOuter = escapement.r * 1.02;
+    ctx.beginPath();
+    for (let i = 0; i < eTeeth; i++) {
+      const a = i * eStep;
+      // Ratchet tooth: gradual rise then sharp drop
+      const riseEnd = a + eStep * 0.7;
+      const dropEnd = a + eStep * 0.75;
+      if (i === 0) ctx.moveTo(Math.cos(a) * eInner, Math.sin(a) * eInner);
+      else ctx.lineTo(Math.cos(a) * eInner, Math.sin(a) * eInner);
+      ctx.lineTo(Math.cos(riseEnd) * eOuter, Math.sin(riseEnd) * eOuter);
+      ctx.lineTo(Math.cos(dropEnd) * eInner, Math.sin(dropEnd) * eInner);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(20,12,8,0.4)';
+    ctx.lineWidth = Math.max(1, escapement.r * 0.03);
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.fillStyle = `rgba(255,200,130,${0.06 + pulse * 0.12})`;
+    ctx.beginPath();
+    ctx.arc(0, 0, escapement.r * 1.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    drawBolt(0, 0, escapement.r * 0.18);
+    ctx.restore();
+  }
+
+  function drawPendulum(time) {
+    const swing = Math.sin(pendulum.phase) * 0.28 + pointer.x * 0.05;
+    const x = pendulum.anchorX;
+    const y = pendulum.anchorY;
+    const bx = x + Math.sin(swing) * pendulum.len;
+    const by = y + Math.cos(swing) * pendulum.len;
+
+    ctx.strokeStyle = 'rgba(180,190,200,0.42)';
+    ctx.lineWidth = Math.min(W, H) * 0.005;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(bx, by);
+    ctx.stroke();
+
+    const g = ctx.createRadialGradient(bx - pendulum.bobR * 0.25, by - pendulum.bobR * 0.25, 0, bx, by, pendulum.bobR);
+    g.addColorStop(0, '#f6c56a');
+    g.addColorStop(0.5, '#b47b34');
+    g.addColorStop(1, '#5d3a16');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(bx, by, pendulum.bobR, 0, Math.PI * 2);
+    ctx.fill();
+
+    drawBolt(x, y, pendulum.bobR * 0.3);
+  }
+
+  function drawGauge(g, time) {
+    ctx.save();
+    ctx.translate(g.x + pointer.x * 6, g.y + pointer.y * 4);
+
+    const face = ctx.createRadialGradient(-g.r * 0.2, -g.r * 0.2, 0, 0, 0, g.r);
+    face.addColorStop(0, 'rgba(250,245,228,0.95)');
+    face.addColorStop(1, 'rgba(184,170,146,0.92)');
+    ctx.fillStyle = face;
+    ctx.beginPath();
+    ctx.arc(0, 0, g.r, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(70,50,30,0.85)';
+    ctx.lineWidth = g.r * 0.12;
+    ctx.beginPath();
+    ctx.arc(0, 0, g.r * 0.94, 0, Math.PI * 2);
+    ctx.stroke();
+
+    const sweepStart = Math.PI * 5 / 6;   // ~8 o'clock (lower-left)
+    const sweepEnd   = Math.PI * 13 / 6;  // ~4 o'clock (lower-right), sweeping CW through top
+    for (let i = 0; i <= 10; i++) {
+      const a = lerp(sweepStart, sweepEnd, i / 10);
+      const r1 = g.r * 0.62;
+      const r2 = g.r * (i % 5 ? 0.78 : 0.86);
+      ctx.strokeStyle = 'rgba(60,45,28,0.65)';
+      ctx.lineWidth = i % 5 ? 1 : 2;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a) * r1, Math.sin(a) * r1);
+      ctx.lineTo(Math.cos(a) * r2, Math.sin(a) * r2);
+      ctx.stroke();
+    }
+
+    const needle = lerp(sweepStart, sweepEnd, clamp(g.value, 0, 1));
+    ctx.strokeStyle = `rgba(170,40,28,${0.75 + energy * 0.2})`;
+    ctx.lineWidth = Math.max(2, g.r * 0.05);
+    ctx.beginPath();
+    ctx.moveTo(-Math.cos(needle) * g.r * 0.12, -Math.sin(needle) * g.r * 0.12);
+    ctx.lineTo(Math.cos(needle) * g.r * 0.72, Math.sin(needle) * g.r * 0.72);
+    ctx.stroke();
+
+    ctx.fillStyle = 'rgba(70,50,30,0.9)';
+    ctx.beginPath();
+    ctx.arc(0, 0, g.r * 0.09, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = 'rgba(55,38,24,0.75)';
+    ctx.font = `${Math.max(10, g.r * 0.18)}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
+    ctx.textAlign = 'center';
+    ctx.fillText(g.label, 0, g.r * 0.56);
+
+    ctx.restore();
+  }
+
+  function drawDust(time) {
+    ctx.save();
+    for (const d of dust) {
+      const x = d.x * W + pointer.x * 10;
+      const y = d.y * H + Math.sin(time * 0.6 + d.phase) * 8;
+      ctx.fillStyle = `rgba(255,220,160,${d.alpha})`;
+      ctx.beginPath();
+      ctx.arc(x, y, d.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawSparks() {
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (const s of sparks) {
+      if (s.age >= s.life) continue;
+      const t = 1 - s.age / s.life;
+      const g = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, s.size * 6);
+      g.addColorStop(0, `hsla(${s.hue}, 95%, 70%, ${t * 0.9})`);
+      g.addColorStop(1, `hsla(${s.hue}, 95%, 60%, 0)`);
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.size * 6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawLabels() {
+    ctx.fillStyle = 'rgba(255,225,185,0.28)';
+    ctx.font = `${Math.max(12, Math.min(W, H) * 0.022)}px Georgia, "Times New Roman", serif`;
+    ctx.textAlign = 'left';
+    ctx.fillText('REGULATOR ASSEMBLY', W * 0.11, H * 0.20);
+    ctx.fillText('SERIES XII', W * 0.11, H * 0.23);
+
+    ctx.textAlign = 'right';
+    ctx.fillText('CLOCKWORK / AUTOMATON', W * 0.89, H * 0.20);
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    update(dt, time);
+
+    ctx.save();
+    if (glitchTimer > 0) {
+      ctx.translate(rand(-3, 3), rand(-2, 2));
+    }
+
+    drawBackground(time);
+    drawBackPlate();
+
+    drawSpring(W * 0.29, H * 0.27, W * 0.42, H * 0.17, 13, 11 + energy * 7, 'rgba(185,195,205,0.30)');
+    drawSpring(W * 0.64, H * 0.63, W * 0.80, H * 0.56, 12, 10 + energy * 6, 'rgba(195,168,108,0.28)');
+
+    for (const rod of rods) drawRod(rod, time);
+    for (const gear of gears) drawGear(gear, time);
+    drawEscapement(time);
+    drawPendulum(time);
+    for (const gauge of gauges) drawGauge(gauge, time);
+    drawDust(time);
+    drawSparks();
+    drawLabels();
+
+    if (glitchTimer > 0) {
+      ctx.fillStyle = `rgba(255,230,180,${glitchTimer * 0.35})`;
+      ctx.fillRect(0, 0, W, H);
+    }
+    ctx.restore();
+
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
