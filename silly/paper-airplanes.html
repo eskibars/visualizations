@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Paper Airplanes</title>
+  <style>
+    html,body{
+      margin:0;
+      height:100%;
+      overflow:hidden;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    canvas{
+      display:block;
+      width:100vw;
+      height:100vh;
+    }
+
+    .vignette{
+      pointer-events:none;
+      position:fixed;
+      inset:0;
+      background:
+        radial-gradient(110vmax 70vmax at 50% -8%, rgba(255,255,255,0.30), rgba(255,255,255,0) 45%),
+        radial-gradient(90vmax 70vmax at 18% 100%, rgba(255,205,145,0.18), rgba(255,205,145,0) 45%),
+        radial-gradient(120vmax 90vmax at 50% 50%, rgba(0,0,0,0) 50%, rgba(17,34,51,0.16) 100%);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+
+  const CFG = {
+    dprCap: 2,
+    planeCount: 20,
+    cloudCount: 11,
+    sparkCount: 60,
+  };
+
+  let W = 0, H = 0, DPR = 1;
+  let planes = [];
+  let clouds = [];
+  let sparks = [];
+
+  // Gentle global wind that drifts slowly
+  const wind = { x: 0.6, y: 0, targetX: 0.6, targetY: 0 };
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  function resize() {
+    DPR = Math.min(CFG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    initScene();
+  }
+
+  window.addEventListener('resize', resize, { passive: true });
+
+  // ---- Airplane type definitions ----
+  // Drawn from a 3/4 perspective: nose points right (+x), wings extend
+  // upward (-y). The fold/spine runs horizontally. "bank" parameter
+  // (-1 to 1) controls how much of the top vs bottom surface is visible.
+  // Positive bank = tilted toward viewer (see top surface more).
+
+  const planeTypes = [
+    // Type 0: Classic dart — sleek, narrow
+    {
+      name: 'dart',
+      draw(ctx, s, pal, bank) {
+        const topW = 0.32 * (0.5 + 0.5 * clamp(bank + 0.3, 0, 1));
+        const botW = 0.18 * (0.5 + 0.5 * clamp(-bank + 0.3, 0, 1));
+        // Top wing surface (visible from above)
+        ctx.fillStyle = pal[0];
+        ctx.beginPath();
+        ctx.moveTo(s * 0.65, 0);
+        ctx.lineTo(-s * 0.45, -s * topW);
+        ctx.lineTo(-s * 0.3, 0);
+        ctx.closePath();
+        ctx.fill();
+        // Bottom wing surface
+        ctx.fillStyle = pal[1];
+        ctx.beginPath();
+        ctx.moveTo(s * 0.65, 0);
+        ctx.lineTo(-s * 0.45, s * botW);
+        ctx.lineTo(-s * 0.3, 0);
+        ctx.closePath();
+        ctx.fill();
+        // Fold line
+        ctx.strokeStyle = pal[2];
+        ctx.lineWidth = Math.max(0.7, s * 0.018);
+        ctx.beginPath();
+        ctx.moveTo(s * 0.65, 0);
+        ctx.lineTo(-s * 0.45, 0);
+        ctx.stroke();
+        // Outline
+        ctx.strokeStyle = 'rgba(80,110,140,0.28)';
+        ctx.lineWidth = Math.max(0.5, s * 0.014);
+        ctx.beginPath();
+        ctx.moveTo(s * 0.65, 0);
+        ctx.lineTo(-s * 0.45, -s * topW);
+        ctx.lineTo(-s * 0.3, 0);
+        ctx.lineTo(-s * 0.45, s * botW);
+        ctx.closePath();
+        ctx.stroke();
+      }
+    },
+    // Type 1: Wide glider — broad swept wings
+    {
+      name: 'glider',
+      draw(ctx, s, pal, bank) {
+        const topW = 0.42 * (0.5 + 0.5 * clamp(bank + 0.3, 0, 1));
+        const botW = 0.22 * (0.5 + 0.5 * clamp(-bank + 0.3, 0, 1));
+        // Top wing
+        ctx.fillStyle = pal[0];
+        ctx.beginPath();
+        ctx.moveTo(s * 0.48, 0);
+        ctx.lineTo(-s * 0.1, -s * topW);
+        ctx.lineTo(-s * 0.52, -s * topW * 0.7);
+        ctx.lineTo(-s * 0.32, 0);
+        ctx.closePath();
+        ctx.fill();
+        // Bottom wing
+        ctx.fillStyle = pal[1];
+        ctx.beginPath();
+        ctx.moveTo(s * 0.48, 0);
+        ctx.lineTo(-s * 0.1, s * botW);
+        ctx.lineTo(-s * 0.52, s * botW * 0.7);
+        ctx.lineTo(-s * 0.32, 0);
+        ctx.closePath();
+        ctx.fill();
+        // Body ridge
+        ctx.strokeStyle = pal[2];
+        ctx.lineWidth = Math.max(0.8, s * 0.02);
+        ctx.beginPath();
+        ctx.moveTo(s * 0.48, 0);
+        ctx.lineTo(-s * 0.32, 0);
+        ctx.stroke();
+        // Outline
+        ctx.strokeStyle = 'rgba(80,110,140,0.22)';
+        ctx.lineWidth = Math.max(0.5, s * 0.013);
+        ctx.beginPath();
+        ctx.moveTo(s * 0.48, 0);
+        ctx.lineTo(-s * 0.1, -s * topW);
+        ctx.lineTo(-s * 0.52, -s * topW * 0.7);
+        ctx.lineTo(-s * 0.32, 0);
+        ctx.lineTo(-s * 0.52, s * botW * 0.7);
+        ctx.lineTo(-s * 0.1, s * botW);
+        ctx.closePath();
+        ctx.stroke();
+      }
+    },
+    // Type 2: Delta / fighter — stubby with tail fin
+    {
+      name: 'delta',
+      draw(ctx, s, pal, bank) {
+        const topW = 0.36 * (0.5 + 0.5 * clamp(bank + 0.3, 0, 1));
+        const botW = 0.2 * (0.5 + 0.5 * clamp(-bank + 0.3, 0, 1));
+        // Top wing
+        ctx.fillStyle = pal[0];
+        ctx.beginPath();
+        ctx.moveTo(s * 0.55, 0);
+        ctx.lineTo(-s * 0.25, -s * topW);
+        ctx.lineTo(-s * 0.42, -s * topW * 0.3);
+        ctx.lineTo(-s * 0.36, 0);
+        ctx.closePath();
+        ctx.fill();
+        // Bottom wing
+        ctx.fillStyle = pal[1];
+        ctx.beginPath();
+        ctx.moveTo(s * 0.55, 0);
+        ctx.lineTo(-s * 0.25, s * botW);
+        ctx.lineTo(-s * 0.42, s * botW * 0.3);
+        ctx.lineTo(-s * 0.36, 0);
+        ctx.closePath();
+        ctx.fill();
+        // Tail fin (always visible, sticks up)
+        const finH = s * 0.2;
+        ctx.fillStyle = pal[2];
+        ctx.beginPath();
+        ctx.moveTo(-s * 0.2, 0);
+        ctx.lineTo(-s * 0.42, -finH);
+        ctx.lineTo(-s * 0.46, 0);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(80,110,140,0.25)';
+        ctx.lineWidth = Math.max(0.5, s * 0.013);
+        ctx.stroke();
+        // Fold
+        ctx.strokeStyle = pal[2];
+        ctx.lineWidth = Math.max(0.6, s * 0.015);
+        ctx.beginPath();
+        ctx.moveTo(s * 0.55, 0);
+        ctx.lineTo(-s * 0.36, 0);
+        ctx.stroke();
+        // Outline
+        ctx.strokeStyle = 'rgba(80,110,140,0.26)';
+        ctx.lineWidth = Math.max(0.5, s * 0.014);
+        ctx.beginPath();
+        ctx.moveTo(s * 0.55, 0);
+        ctx.lineTo(-s * 0.25, -s * topW);
+        ctx.lineTo(-s * 0.42, -s * topW * 0.3);
+        ctx.lineTo(-s * 0.36, 0);
+        ctx.lineTo(-s * 0.42, s * botW * 0.3);
+        ctx.lineTo(-s * 0.25, s * botW);
+        ctx.closePath();
+        ctx.stroke();
+      }
+    },
+    // Type 3: Nakamura / boxy origami — wider nose, blunt
+    {
+      name: 'nakamura',
+      draw(ctx, s, pal, bank) {
+        const topW = 0.3 * (0.5 + 0.5 * clamp(bank + 0.3, 0, 1));
+        const botW = 0.18 * (0.5 + 0.5 * clamp(-bank + 0.3, 0, 1));
+        // Top surface
+        ctx.fillStyle = pal[0];
+        ctx.beginPath();
+        ctx.moveTo(s * 0.5, 0);
+        ctx.lineTo(s * 0.1, -s * topW);
+        ctx.lineTo(-s * 0.48, -s * topW * 0.9);
+        ctx.lineTo(-s * 0.38, 0);
+        ctx.closePath();
+        ctx.fill();
+        // Bottom surface
+        ctx.fillStyle = pal[1];
+        ctx.beginPath();
+        ctx.moveTo(s * 0.5, 0);
+        ctx.lineTo(s * 0.1, s * botW);
+        ctx.lineTo(-s * 0.48, s * botW * 0.9);
+        ctx.lineTo(-s * 0.38, 0);
+        ctx.closePath();
+        ctx.fill();
+        // Nose fold accent
+        ctx.fillStyle = pal[2];
+        ctx.beginPath();
+        ctx.moveTo(s * 0.5, 0);
+        ctx.lineTo(s * 0.1, -s * topW);
+        ctx.lineTo(s * 0.15, -s * topW * 0.35);
+        ctx.closePath();
+        ctx.fill();
+        // Fold
+        ctx.strokeStyle = 'rgba(80,110,140,0.2)';
+        ctx.lineWidth = Math.max(0.6, s * 0.015);
+        ctx.beginPath();
+        ctx.moveTo(s * 0.5, 0);
+        ctx.lineTo(-s * 0.38, 0);
+        ctx.stroke();
+        // Outline
+        ctx.strokeStyle = 'rgba(80,110,140,0.22)';
+        ctx.lineWidth = Math.max(0.5, s * 0.013);
+        ctx.beginPath();
+        ctx.moveTo(s * 0.5, 0);
+        ctx.lineTo(s * 0.1, -s * topW);
+        ctx.lineTo(-s * 0.48, -s * topW * 0.9);
+        ctx.lineTo(-s * 0.38, 0);
+        ctx.lineTo(-s * 0.48, s * botW * 0.9);
+        ctx.lineTo(s * 0.1, s * botW);
+        ctx.closePath();
+        ctx.stroke();
+      }
+    },
+  ];
+
+  const palettes = [
+    ['#ffffff', '#f0f4fa', 'rgba(140,170,200,0.3)'],
+    ['#fff8ee', '#ffe8c8', 'rgba(200,160,100,0.3)'],
+    ['#eef7ff', '#d4ecff', 'rgba(120,170,220,0.3)'],
+    ['#fff3f6', '#ffdde6', 'rgba(200,130,160,0.3)'],
+    ['#f4ffe8', '#ddf4c4', 'rgba(130,180,90,0.3)'],
+    ['#f8f0ff', '#e8d8f8', 'rgba(160,120,200,0.3)'],
+  ];
+
+  function initScene() {
+    clouds = Array.from({ length: CFG.cloudCount }, () => ({
+      x: rand(-0.15, 1.15),
+      y: rand(0.08, 0.55),
+      w: rand(130, 320),
+      h: rand(40, 95),
+      speed: rand(4, 14),
+      alpha: rand(0.18, 0.38),
+      fluff: Array.from({ length: 6 }, () => ({
+        dx: rand(-0.42, 0.42),
+        dy: rand(-0.22, 0.22),
+        sx: rand(0.45, 0.9),
+        sy: rand(0.45, 0.95),
+      })),
+    }));
+
+    sparks = Array.from({ length: CFG.sparkCount }, () => ({
+      x: rand(0, 1),
+      y: rand(0, 1),
+      size: rand(1, 2.8),
+      speed: rand(0.008, 0.035),
+      phase: rand(0, Math.PI * 2),
+      alpha: rand(0.06, 0.2),
+    }));
+
+    planes = Array.from({ length: CFG.planeCount }, (_, i) => makePlane(i, true));
+    planes.sort((a, b) => a.depth - b.depth);
+  }
+
+  function makePlane(i, scatter) {
+    const depth = 0.2 + Math.random() * 0.8;
+    const dir = Math.random() < 0.5 ? 1 : -1;
+    const size = lerp(36, 116, depth);
+    const altitude = rand(0.1, 0.88);
+    const typeIdx = Math.floor(rand(0, planeTypes.length));
+    const palette = palettes[Math.floor(rand(0, palettes.length))];
+
+    const speed = lerp(22, 65, depth) * dir;
+    const x = scatter
+      ? rand(-W * 0.3, W * 1.3)
+      : (dir === 1 ? rand(-W * 0.6, -W * 0.1) : rand(W * 1.1, W * 1.6));
+
+    return {
+      id: i,
+      depth,
+      dir,
+      size,
+      typeIdx,
+      x,
+      y: altitude * H,
+      baseY: altitude * H,
+      speed,
+      // Single smooth oscillation for gentle sway
+      swayAmp: rand(15, 45) * depth,
+      swayFreq: rand(0.08, 0.18),
+      phase: rand(0, Math.PI * 2),
+      // Very gentle pitch wobble
+      pitchAmp: rand(0.01, 0.03),
+      pitchFreq: rand(0.15, 0.3),
+      pitchPhase: rand(0, Math.PI * 2),
+      // Bank: always positive (top surface always faces viewer).
+      // Oscillates between ~0.1 and ~0.7 so we mostly see the top,
+      // with gentle variation showing more/less of it.
+      bankBase: rand(0.3, 0.5),
+      bankAmp: rand(0.1, 0.2),
+      bankFreq: rand(0.08, 0.18),
+      bankPhase: rand(0, Math.PI * 2),
+      trail: [],
+      palette,
+    };
+  }
+
+  function resetPlane(p) {
+    const np = makePlane(p.id, false);
+    Object.assign(p, np);
+  }
+
+  function update(dt, time) {
+    // Slowly drift wind direction
+    if (Math.random() < 0.003) {
+      wind.targetX = rand(0.3, 0.8);
+      wind.targetY = rand(-0.15, 0.15);
+    }
+    wind.x = lerp(wind.x, wind.targetX, 0.005);
+    wind.y = lerp(wind.y, wind.targetY, 0.005);
+
+    for (const c of clouds) {
+      c.x += (c.speed * dt) / W;
+      if (c.x * W - c.w > W + 60) {
+        c.x = -(c.w + 40) / W;
+        c.y = rand(0.06, 0.55);
+      }
+    }
+
+    for (const s of sparks) {
+      s.x += s.speed * dt;
+      if (s.x > 1.05) {
+        s.x = -0.03;
+        s.y = rand(0, 1);
+      }
+    }
+
+    for (const p of planes) {
+      // Smooth sinusoidal vertical sway - single wave, no jitter
+      const sway = Math.sin(time * p.swayFreq + p.phase) * p.swayAmp;
+
+      p.x += p.speed * dt + wind.x * 12 * dt * depth2scale(p.depth);
+      p.y = p.baseY + sway + wind.y * 10 * dt * depth2scale(p.depth);
+
+      // Slowly drift baseY to keep things interesting
+      p.baseY += Math.sin(time * 0.08 + p.phase) * 0.15;
+      p.baseY = clamp(p.baseY, H * 0.08, H * 0.92);
+
+      p.trail.push({ x: p.x, y: p.y });
+      if (p.trail.length > 14) p.trail.shift();
+
+      if (p.x < -W * 0.4 || p.x > W * 1.4 || p.y < -150 || p.y > H + 150) {
+        resetPlane(p);
+      }
+    }
+  }
+
+  function depth2scale(d) { return 0.3 + d * 0.7; }
+
+  function drawSky() {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#7ec8ff');
+    g.addColorStop(0.45, '#d6efff');
+    g.addColorStop(0.78, '#fff5de');
+    g.addColorStop(1, '#ffddb0');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    // Sun glow
+    const sun = ctx.createRadialGradient(W * 0.78, H * 0.18, 0, W * 0.78, H * 0.18, H * 0.38);
+    sun.addColorStop(0, 'rgba(255,255,255,0.55)');
+    sun.addColorStop(0.3, 'rgba(255,248,220,0.25)');
+    sun.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = sun;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function drawClouds(time) {
+    ctx.save();
+    for (const c of clouds) {
+      const x = c.x * W + Math.sin(time * 0.06 + c.y * 10) * 6;
+      const y = c.y * H;
+
+      ctx.globalAlpha = c.alpha;
+      for (const f of c.fluff) {
+        const cx = x + f.dx * c.w;
+        const cy = y + f.dy * c.h;
+        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, c.w * f.sx);
+        grad.addColorStop(0, 'rgba(255,255,255,0.92)');
+        grad.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.ellipse(cx, cy, c.w * f.sx, c.h * f.sy, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawSparks(time) {
+    ctx.save();
+    for (const s of sparks) {
+      const x = s.x * W;
+      const y = s.y * H + Math.sin(time * 0.5 + s.phase) * 6;
+      const twinkle = 0.5 + 0.5 * Math.sin(time * 1.5 + s.phase * 3);
+      ctx.fillStyle = `rgba(255,255,255,${s.alpha * twinkle})`;
+      ctx.beginPath();
+      ctx.arc(x, y, s.size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawTrail(p) {
+    if (p.trail.length < 4) return;
+    ctx.save();
+    ctx.beginPath();
+    for (let i = 0; i < p.trail.length; i++) {
+      const pt = p.trail[i];
+      if (i === 0) ctx.moveTo(pt.x, pt.y);
+      else ctx.lineTo(pt.x, pt.y);
+    }
+    ctx.strokeStyle = `rgba(255,255,255,${0.03 + p.depth * 0.08})`;
+    ctx.lineWidth = 1 + p.depth * 1.2;
+    ctx.setLineDash([6, 10]);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawPlane(p, time) {
+    drawTrail(p);
+
+    // Flight angle from trail
+    const prev = p.trail[p.trail.length - 2] || { x: p.x - p.dir * 2, y: p.y };
+    const angle = Math.atan2(p.y - prev.y, p.x - prev.x);
+    const pitch = Math.sin(time * p.pitchFreq + p.pitchPhase) * p.pitchAmp;
+
+    // Bank oscillates around bankBase: mostly showing top surface,
+    // occasionally dipping to show bottom
+    const bank = p.bankBase + Math.sin(time * p.bankFreq + p.bankPhase) * p.bankAmp;
+
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(angle + pitch);
+
+    // Draw the airplane type with bank value
+    planeTypes[p.typeIdx].draw(ctx, p.size, p.palette, bank);
+
+    ctx.restore();
+  }
+
+  function drawPaperTexture() {
+    ctx.save();
+    ctx.globalAlpha = 0.03;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    update(dt, time);
+
+    drawSky();
+    drawClouds(time);
+    drawSparks(time);
+    for (const p of planes) drawPlane(p, time);
+    drawPaperTexture();
+
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
