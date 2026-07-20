@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 import argparse
 import html
 import os
@@ -67,7 +69,13 @@ def list_html_files(base_dir: Path, only_dir: str | None) -> list[Path]:
             try:
                 rp = p.resolve(strict=True)
                 rb = base_dir.resolve(strict=True)
-                rp.relative_to(rb)
+                rel = rp.relative_to(rb)
+                # Visualizations live below a category directory. Ignore the
+                # generated static site so local builds do not duplicate them.
+                if len(rel.parts) < 2 or rel.parts[0] == "_site":
+                    continue
+                if any(part.startswith(".") for part in rel.parts):
+                    continue
                 files.append(rp)
             except Exception:
                 # If it doesn't resolve or escapes base_dir, skip
@@ -255,4 +263,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
