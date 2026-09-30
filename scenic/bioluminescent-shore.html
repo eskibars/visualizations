@@ -1,0 +1,744 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>Bioluminescent Shore</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #01030a; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+
+<script>
+/**
+ * Bioluminescent Shore
+ * --------------------
+ * A night beach where every breaking wave lights up: dinoflagellates stirred
+ * into the surf, the light smeared across the wet sand, and the water left
+ * speckled with drifting plankton.
+ *
+ * Why it is built this way
+ * ------------------------
+ * Glow is a field, so it is simulated as one. Breaking foam is not drawn as a
+ * line: each crest owns a scatter of precomputed "grains" (position along the
+ * wave, offset across it, size, flicker phase). Every frame, the grains that
+ * the travelling swell has lit stamp soft intensity profiles into a
+ * low-resolution Float32 buffer, which is then colorized through a palette LUT
+ * and blitted up. That buys three things:
+ *
+ *   1. Texture for free. Several hundred small overlapping stamps at varying
+ *      sizes read as broken, turbulent foam — a stroked line never does.
+ *   2. Bounded cost. Work scales with the field buffer and the number of lit
+ *      grains, not with the pixel area of a wide additive stroke, which is
+ *      what software rasterizers choke on.
+ *   3. Honest light. Contributions add, hot cores saturate toward white, and
+ *      the bloom is a separate high-threshold read of the same buffer, so the
+ *      dark water stays dark while the foam blooms.
+ *
+ * Static scenery — stars, dust lane, clouds, moon, sea and sand gradients,
+ * grain and vignette — is painted once per resize into an offscreen canvas,
+ * so a frame costs one background blit, a few narrow reflection blits, one
+ * field blit and one bloom blit.
+ *
+ * Keys: [space] stir the water, [f] fullscreen, [q] cycle quality.
+ */
+(() => {
+  const CFG = {
+    dprCap: 1.5,
+    horizonAt: 0.345,     // where sky meets sea
+    shoreAt: 0.735,       // where sea meets wet sand
+    fieldScale: 0.38,     // glow buffer resolution, relative to CSS pixels
+    bands: 7,             // breaking crests, far to near
+    plankton: 620,        // flecks drifting in the water column
+    sandFlecks: 300,      // marks cooling on the sand
+    moon: { x: 0.822, y: 0.128, r: 0.0158 },
+    haloScale: 2.15,      // width of the main bloom pass, in screen widths
+    hotCut: 0.30,         // field value above which light starts to bloom
+    reflectK: 0.44,       // vertical squash of the wet-sand reflection
+    wash: 1.0,            // brightness of the foam line at the waterline
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+
+  const glowCv = document.createElement('canvas');
+  const glowCx = glowCv.getContext('2d');
+  const hotCv = document.createElement('canvas');
+  const hotCx = hotCv.getContext('2d');
+  let glowImg = null, glowPix = null, hotImg = null, hotPix = null;
+
+  const bgCv = document.createElement('canvas');
+  const bgCx = bgCv.getContext('2d');
+
+  let FIELD = new Float32Array(1);
+  const LUT = new Uint8Array(256 * 3);
+  const HOTLUT = new Uint8Array(256 * 3);
+
+  let W = 0, H = 0, R = 1;
+  let FW = 0, FH = 0, FS = 1;
+  let horizonY = 0, shoreY = 0, moonR = 30;
+  let quality = 1;
+
+  const bands = [];
+  const plankton = [];
+  const sandFlecks = [];
+
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const lerp = (a, b, t) => a + (b - a) * t;
+
+  // ---------------------------------------------------------------- palette
+  // Deep water absorbs the glow; the foam reads cyan, then white-hot. The ramp
+  // is deliberately non-linear so thin foam still carries colour while the
+  // cores blow out.
+  function buildLut() {
+    const stops = [
+      [0.00, 0, 0, 0],
+      [0.06, 6, 46, 62],
+      [0.14, 12, 92, 116],
+      [0.26, 16, 140, 160],
+      [0.40, 28, 186, 196],
+      [0.56, 62, 222, 218],
+      [0.72, 124, 244, 236],
+      [0.88, 192, 253, 248],
+      [1.00, 248, 255, 255],
+    ];
+    const ramp = (i) => {
+      const t = i / 255;
+      let a = stops[0], b = stops[stops.length - 1];
+      for (let s = 0; s < stops.length - 1; s++) {
+        if (t >= stops[s][0] && t <= stops[s + 1][0]) { a = stops[s]; b = stops[s + 1]; break; }
+      }
+      const k = (t - a[0]) / Math.max(1e-6, b[0] - a[0]);
+      const s2 = k * k * (3 - 2 * k);
+      return [lerp(a[1], b[1], s2), lerp(a[2], b[2], s2), lerp(a[3], b[3], s2)];
+    };
+    for (let i = 0; i < 256; i++) {
+      const c = ramp(i);
+      LUT[i * 3] = c[0] | 0; LUT[i * 3 + 1] = c[1] | 0; LUT[i * 3 + 2] = c[2] | 0;
+      const h = Math.max(0, i / 255 - CFG.hotCut) / (1 - CFG.hotCut);
+      const hc = ramp((h * 255) | 0);
+      HOTLUT[i * 3] = hc[0] | 0; HOTLUT[i * 3 + 1] = hc[1] | 0; HOTLUT[i * 3 + 2] = hc[2] | 0;
+    }
+  }
+
+  // ------------------------------------------------------------- background
+  function paintBackground() {
+    const g = bgCx;
+    bgCv.width = Math.max(1, Math.floor(W * R));
+    bgCv.height = Math.max(1, Math.floor(H * R));
+    g.setTransform(R, 0, 0, R, 0, 0);
+    g.globalCompositeOperation = 'source-over';
+    g.globalAlpha = 1;
+
+    // --- sky: near-black overhead, barely lifting at the horizon
+    const sky = g.createLinearGradient(0, 0, 0, horizonY);
+    sky.addColorStop(0.00, '#010208');
+    sky.addColorStop(0.45, '#03081a');
+    sky.addColorStop(0.78, '#061224');
+    sky.addColorStop(0.94, '#08192b');
+    sky.addColorStop(1.00, '#0a2030');
+    g.fillStyle = sky;
+    g.fillRect(0, 0, W, horizonY);
+
+    // --- dust lane, built from soft overlapping blobs so it has no edges
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < 140; i++) {
+      const t = i / 139;
+      const x = lerp(-W * 0.06, W * 1.06, t) + rand(-W * 0.03, W * 0.03);
+      const y = lerp(horizonY * 1.02, horizonY * 0.03, t) + rand(-horizonY * 0.10, horizonY * 0.10);
+      const r = rand(W * 0.05, W * 0.17);
+      const edge = Math.pow(Math.sin(Math.PI * clamp(t, 0, 1)), 0.55);
+      const a = rand(0.008, 0.030) * edge;
+      const blob = g.createRadialGradient(x, y, 0, x, y, r);
+      blob.addColorStop(0, `rgba(190,206,248,${a.toFixed(4)})`);
+      blob.addColorStop(0.5, `rgba(150,172,232,${(a * 0.40).toFixed(4)})`);
+      blob.addColorStop(1, 'rgba(150,172,232,0)');
+      g.fillStyle = blob;
+      g.save();
+      g.translate(x, y);
+      g.scale(1, 0.33);
+      g.beginPath(); g.arc(0, 0, r, 0, Math.PI * 2); g.fill();
+      g.restore();
+    }
+    for (let i = 0; i < 34; i++) {
+      const t = Math.random();
+      const x = lerp(0, W, t), y = lerp(horizonY * 0.90, horizonY * 0.06, t);
+      const r = rand(W * 0.02, W * 0.07);
+      const blob = g.createRadialGradient(x, y, 0, x, y, r);
+      blob.addColorStop(0, `rgba(2,4,10,${rand(0.20, 0.46).toFixed(2)})`);
+      blob.addColorStop(1, 'rgba(2,4,10,0)');
+      g.fillStyle = blob;
+      g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+    }
+    g.restore();
+
+    // --- stars
+    for (let i = 0; i < 950; i++) {
+      const x = Math.random() * W;
+      const y = Math.pow(Math.random(), 0.68) * horizonY * 0.985;
+      const bright = Math.pow(Math.random(), 3.5);
+      const r = 0.32 + bright * 1.5;
+      const lift = 0.26 + (1 - y / horizonY) * 0.74;
+      const a = (0.07 + bright * 0.70) * lift;
+      const roll = Math.random();
+      const hue = roll < 0.13 ? '186,222,255' : (roll < 0.56 ? '255,248,232' : '218,230,255');
+      g.fillStyle = `rgba(${hue},${a.toFixed(3)})`;
+      g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+      if (bright > 0.905) {
+        g.strokeStyle = `rgba(204,226,255,${(a * 0.42).toFixed(3)})`;
+        g.lineWidth = 0.7;
+        g.beginPath();
+        g.moveTo(x - r * 6, y); g.lineTo(x + r * 6, y);
+        g.moveTo(x, y - r * 6); g.lineTo(x, y + r * 6);
+        g.stroke();
+      }
+    }
+
+    // --- high cloud: dark bellies, with only the lowest catching surf light
+    for (let i = 0; i < 26; i++) {
+      const cx = Math.random() * W;
+      const cy = horizonY - rand(horizonY * 0.10, horizonY * 0.86);
+      const rx = rand(W * 0.06, W * 0.24);
+      const ry = rand(2, 6.5);
+      g.save();
+      g.translate(cx, cy);
+      g.scale(1, ry / rx);
+      const dark = g.createRadialGradient(0, 0, 0, 0, 0, rx);
+      dark.addColorStop(0, `rgba(4,9,18,${rand(0.22, 0.50).toFixed(2)})`);
+      dark.addColorStop(0.6, `rgba(4,9,18,${rand(0.06, 0.18).toFixed(2)})`);
+      dark.addColorStop(1, 'rgba(4,9,18,0)');
+      g.fillStyle = dark;
+      g.beginPath(); g.arc(0, 0, rx, 0, Math.PI * 2); g.fill();
+      g.restore();
+
+      const low = clamp(1 - (horizonY - cy) / (horizonY * 0.5), 0, 1);
+      if (low > 0.02) {
+        g.save();
+        g.translate(cx, cy + ry * 1.8);
+        g.scale(1, 0.26);
+        const lit = g.createRadialGradient(0, 0, 0, 0, 0, rx * 0.7);
+        lit.addColorStop(0, `rgba(52,188,196,${(0.05 * low).toFixed(4)})`);
+        lit.addColorStop(1, 'rgba(52,188,196,0)');
+        g.fillStyle = lit;
+        g.beginPath(); g.arc(0, 0, rx * 0.7, 0, Math.PI * 2); g.fill();
+        g.restore();
+      }
+    }
+
+    // --- soft headland, purely to give the horizon a sense of scale
+    const head = g.createLinearGradient(0, horizonY - H * 0.055, 0, horizonY + 4);
+    head.addColorStop(0, 'rgba(2,6,12,0.96)');
+    head.addColorStop(1, 'rgba(2,6,12,0.28)');
+    g.fillStyle = head;
+    g.beginPath();
+    g.moveTo(-4, horizonY + 5);
+    g.lineTo(-4, horizonY - H * 0.042);
+    g.lineTo(W * 0.055, horizonY - H * 0.027);
+    g.lineTo(W * 0.108, horizonY - H * 0.014);
+    g.lineTo(W * 0.136, horizonY - 1);
+    g.lineTo(W * 0.146, horizonY + 5);
+    g.closePath();
+    g.fill();
+
+    // --- moon: halo, disc, craters, crescent carved out of the dark sky
+    const mx = W * CFG.moon.x, my = H * CFG.moon.y;
+    moonR = Math.max(10, W * CFG.moon.r);
+    const halo = g.createRadialGradient(mx, my, moonR * 0.75, mx, my, moonR * 12);
+    halo.addColorStop(0.00, 'rgba(146,178,228,0.12)');
+    halo.addColorStop(0.28, 'rgba(108,144,202,0.040)');
+    halo.addColorStop(1.00, 'rgba(108,144,202,0)');
+    g.fillStyle = halo;
+    g.beginPath(); g.arc(mx, my, moonR * 12, 0, Math.PI * 2); g.fill();
+
+    g.fillStyle = 'rgba(234,242,254,0.96)';
+    g.beginPath(); g.arc(mx, my, moonR, 0, Math.PI * 2); g.fill();
+    for (let i = 0; i < 8; i++) {
+      const a = rand(0, Math.PI * 2), d = rand(0, moonR * 0.74);
+      g.fillStyle = `rgba(172,188,214,${rand(0.08, 0.24).toFixed(2)})`;
+      g.beginPath();
+      g.arc(mx + Math.cos(a) * d, my + Math.sin(a) * d, rand(moonR * 0.06, moonR * 0.19), 0, Math.PI * 2);
+      g.fill();
+    }
+    g.fillStyle = 'rgba(5,11,22,0.955)';
+    g.beginPath(); g.arc(mx - moonR * 0.46, my + moonR * 0.24, moonR * 0.96, 0, Math.PI * 2); g.fill();
+
+    // --- sea: near-black, with only a whisper of lift at the horizon
+    const sea = g.createLinearGradient(0, horizonY, 0, shoreY + 8);
+    sea.addColorStop(0.00, '#061520');
+    sea.addColorStop(0.20, '#030e19');
+    sea.addColorStop(0.58, '#020910');
+    sea.addColorStop(1.00, '#01050a');
+    g.fillStyle = sea;
+    g.fillRect(0, horizonY, W, shoreY - horizonY + 8);
+
+    const hl = g.createLinearGradient(0, horizonY - 2, 0, horizonY + 5);
+    hl.addColorStop(0.00, 'rgba(46,150,170,0)');
+    hl.addColorStop(0.55, 'rgba(64,176,190,0.18)');
+    hl.addColorStop(1.00, 'rgba(46,150,170,0)');
+    g.fillStyle = hl;
+    g.fillRect(0, horizonY - 2, W, 7);
+
+    // --- wet sand, then dry beach behind the viewer
+    const sand = g.createLinearGradient(0, shoreY - 4, 0, H);
+    sand.addColorStop(0.00, '#09131b');
+    sand.addColorStop(0.20, '#070f17');
+    sand.addColorStop(0.60, '#040910');
+    sand.addColorStop(1.00, '#02050a');
+    g.fillStyle = sand;
+    g.fillRect(0, shoreY - 4, W, H - shoreY + 4);
+
+    const sheen = g.createLinearGradient(0, shoreY - 4, 0, shoreY + H * 0.07);
+    sheen.addColorStop(0, 'rgba(56,158,172,0.09)');
+    sheen.addColorStop(0.5, 'rgba(56,158,172,0.03)');
+    sheen.addColorStop(1, 'rgba(56,158,172,0)');
+    g.fillStyle = sheen;
+    g.fillRect(0, shoreY - 4, W, H * 0.075);
+
+    // --- sand speckle, coarser close to the viewer
+    for (let i = 0; i < 4200; i++) {
+      const y = rand(shoreY - 2, H);
+      const f = (y - shoreY) / Math.max(1, H - shoreY);
+      g.fillStyle = `rgba(142,160,180,${(0.010 + Math.random() * 0.032 * (1 - f * 0.45)).toFixed(3)})`;
+      g.fillRect(Math.random() * W, y, rand(0.7, 1.4 + f * 2.2), rand(0.7, 1.5));
+    }
+
+    // --- film grain, baked once and reused as a pattern
+    const grain = document.createElement('canvas');
+    grain.width = grain.height = 160;
+    const gc = grain.getContext('2d');
+    const gd = gc.createImageData(160, 160);
+    for (let i = 0; i < gd.data.length; i += 4) {
+      const v = 118 + Math.random() * 74;
+      gd.data[i] = gd.data[i + 1] = gd.data[i + 2] = v;
+      gd.data[i + 3] = 255;
+    }
+    gc.putImageData(gd, 0, 0);
+    g.save();
+    g.globalAlpha = 0.085;
+    g.globalCompositeOperation = 'overlay';
+    g.fillStyle = g.createPattern(grain, 'repeat');
+    g.fillRect(0, 0, W, H);
+    g.restore();
+
+    // --- vignette
+    const vig = g.createRadialGradient(W * 0.5, H * 0.44, Math.min(W, H) * 0.22,
+                                       W * 0.5, H * 0.5, Math.max(W, H) * 0.80);
+    vig.addColorStop(0, 'rgba(0,0,0,0)');
+    vig.addColorStop(0.62, 'rgba(0,0,0,0.28)');
+    vig.addColorStop(1, 'rgba(0,0,0,0.70)');
+    g.fillStyle = vig;
+    g.fillRect(0, 0, W, H);
+  }
+
+  // ------------------------------------------------------------------ scene
+  function buildScene() {
+    bands.length = 0;
+    for (let i = 0; i < CFG.bands; i++) {
+      const z = i / (CFG.bands - 1);          // 0 = far, 1 = near
+      const spread = Math.pow(z, 1.9);        // perspective compresses the far water
+      const baseY = lerp(horizonY + 4, shoreY - 5, spread);
+      const s = Math.random() * 100;
+      const b = {
+        z, baseY,
+        thick: lerp(4.5, 58, Math.pow(z, 1.7)),
+        bow: lerp(1.2, 22, Math.pow(z, 2.0)),
+        wobAmp: lerp(0.9, 7.0, Math.pow(z, 1.35)),
+        wob: { a: s, b: s * 1.71 + 2.1, c: s * 0.63 + 5.4, d: s * 2.93 + 0.7 },
+        v: lerp(13, 112, Math.pow(z, 1.25)),
+        bright: lerp(0.10, 1.0, Math.pow(z, 0.7)),
+        cycle: rand(3.6, 7.4),
+        fill: Math.random(),
+        grainN: Math.round(lerp(120, 420, Math.pow(z, 1.2))),
+        glow: 0, y: 0, state: 'advance', t0: 0,
+        foam: [],
+      };
+      b.y = b.baseY - b.thick * rand(3.4, 10);
+
+      // A crest is never lit from edge to edge: each band owns a few lobes of
+      // visibility along x, pulsing out of phase, so the glow travels along the
+      // wave as discrete patches. This is what keeps the surf from reading as
+      // a stack of horizontal stripes.
+      b.lobes = [];
+      const lobeN = 3 + ((Math.random() * 2) | 0);
+      for (let l = 0; l < lobeN; l++) {
+        b.lobes.push({
+          c: rand(-0.05, 1.05),
+          w: rand(0.16, 0.42),
+          a: rand(0.50, 0.95),
+          ph: rand(0, 6.283),
+          sp: rand(0.20, 0.55),
+        });
+      }
+
+      // Foam grains: stable across frames so patches do not shimmer like
+      // static, but each carries its own flicker phase so light travels.
+      // Sizes are hierarchical — a few big clumps, many small flecks — because
+      // uniform blobs read as cotton wool rather than as turbulent foam.
+      for (let k = 0; k < b.grainN; k++) {
+        const clump = Math.random() < 0.13;
+        b.foam.push({
+          fx: Math.random(),
+          dy: rand(-1.15, 1.05),
+          r: clump ? rand(1.9, 3.1) : rand(0.35, 1.35),
+          ph: rand(0, 6.283),
+          sp: rand(0.6, 2.2),
+        });
+      }
+      bands.push(b);
+    }
+
+    plankton.length = 0;
+    for (let i = 0; i < CFG.plankton; i++) {
+      plankton.push({
+        x: Math.random() * W,
+        y: rand(horizonY + 3, shoreY + 2),
+        r: rand(0.6, 1.9),
+        ph: rand(0, 6.283),
+        sp: rand(0.22, 1.0),
+      });
+    }
+
+    sandFlecks.length = 0;
+    for (let i = 0; i < CFG.sandFlecks; i++) {
+      sandFlecks.push({
+        x: Math.random() * W,
+        y: rand(shoreY - 6, H),
+        life: rand(0, 1),
+        rate: rand(0.05, 0.26),
+        r: rand(0.6, 2.1),
+        drift: rand(-14, 14),
+        tan: rand(0.3, 1.5),
+      });
+    }
+  }
+
+  function resize() {
+    const dpr = Math.min(CFG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    R = dpr * quality;
+
+    canvas.width = Math.max(1, Math.floor(W * R));
+    canvas.height = Math.max(1, Math.floor(H * R));
+    ctx.setTransform(R, 0, 0, R, 0, 0);
+
+    horizonY = Math.round(H * CFG.horizonAt);
+    shoreY = Math.round(H * CFG.shoreAt);
+
+    FS = CFG.fieldScale * quality;
+    FW = Math.max(16, Math.floor(W * FS));
+    FH = Math.max(16, Math.floor(H * FS));
+
+    // Reallocate only when the field geometry really changes: a resize that
+    // keeps the same dimensions must not churn a multi-megabyte buffer.
+    if (FIELD.length !== FW * FH) FIELD = new Float32Array(FW * FH);
+    else FIELD.fill(0);
+
+    glowCv.width = hotCv.width = FW;
+    glowCv.height = hotCv.height = FH;
+    glowImg = glowCx.createImageData(FW, FH);
+    glowPix = glowImg.data;
+    hotImg = hotCx.createImageData(FW, FH);
+    hotPix = hotImg.data;
+    for (let i = 3; i < glowPix.length; i += 4) { glowPix[i] = 255; hotPix[i] = 255; }
+
+    paintBackground();
+    buildScene();
+  }
+
+  // ------------------------------------------------------------------ field
+  // Four sine terms: cheap, seamless, and irregular enough that a crest never
+  // repeats a recognisable shape.
+  function wobble(x, w) {
+    return Math.sin(x * 0.019 + w.a) * 1.00
+         + Math.sin(x * 0.049 + w.b) * 0.52
+         + Math.sin(x * 0.128 + w.c) * 0.26
+         + Math.sin(x * 0.310 + w.d) * 0.10;
+  }
+
+  function stamp(cx, cy, radius, strength, yScale = 1) {
+    const rx = Math.max(0.7, radius * FS);
+    const ry = Math.max(0.7, radius * FS * yScale);
+    const x0 = Math.max(0, Math.floor(cx * FS - rx)), x1 = Math.min(FW - 1, Math.ceil(cx * FS + rx));
+    const y0 = Math.max(0, Math.floor(cy * FS - ry)), y1 = Math.min(FH - 1, Math.ceil(cy * FS + ry));
+    const ix = 1 / (rx * rx), iy = 1 / (ry * ry);
+    const fx = cx * FS, fy = cy * FS;
+    for (let py = y0; py <= y1; py++) {
+      const dy = (py + 0.5 - fy) / ry;
+      const dy2 = dy * dy;
+      if (dy2 >= 1) continue;
+      const row = py * FW;
+      for (let px = x0; px <= x1; px++) {
+        const dx = (px + 0.5 - fx) / rx;
+        const q = 1 - dx * dx - dy2;
+        if (q > 0) FIELD[row + px] += q * q * strength;
+      }
+      void ix; void iy;
+    }
+  }
+
+  // The bowed, wobbling centreline of a crest at a given x.
+  function crestY(b, x) {
+    const dx = x - W * 0.5;
+    return b.y + wobble(x, b.wob) * b.lineAmp + dx * dx * b.bowK;
+  }
+
+  // Visibility of a crest at x: sum of smooth bells, each pulsing on its own
+  // slow cycle. Uses a rational bell (1/(1+u^2)^2) rather than exp() because it
+  // is called tens of thousands of times a frame and looks the same here.
+  function envelope(b, xf, t) {
+    let s = 0;
+    const L = b.lobes;
+    for (let i = 0; i < L.length; i++) {
+      const u = (xf - L[i].c) / L[i].w;
+      const bell = 1 / ((1 + u * u) * (1 + u * u));
+      const pulse = 0.42 + 0.58 * Math.sin(t * L[i].sp + L[i].ph);
+      s += L[i].a * bell * (pulse > 0 ? pulse : 0);
+    }
+    return s > 1 ? 1 : s;
+  }
+
+  function stepAndStamp(dt, t) {
+    FIELD.fill(0);
+
+    for (const b of bands) {
+      if (b.state === 'advance') {
+        b.y += b.v * dt;
+        const span = b.thick * 3.4;
+        const p = clamp((b.y - (b.baseY - span * 2.2)) / (span * 2.2), 0, 1);
+        b.glow = Math.pow(p, 2.4) * 0.85;
+        if (b.y >= b.baseY) { b.state = 'break'; b.t0 = t; }
+      } else if (b.state === 'break') {
+        b.y += b.v * 0.09 * dt;
+        const age = (t - b.t0) / (0.5 + b.cycle * 0.075);
+        b.glow = clamp(1 - age, 0, 1);
+        if (age >= 1) { b.state = 'recede'; b.t0 = t; }
+      } else {
+        b.y -= b.v * 0.24 * dt;
+        const age = (t - b.t0) / (b.cycle * 0.26 + 1.0);
+        b.glow = clamp(1 - age, 0, 1) * 0.40;
+        if (age >= 1) {
+          b.state = 'advance';
+          b.y = b.baseY - b.thick * rand(3.4, 11);
+          b.glow = 0;
+        }
+      }
+
+      // geometry that only changes when the crest moves
+      b.lineAmp = b.wobAmp * (b.state === 'recede' ? 0.55 : 1) * (1 + (1 - b.glow) * 0.65);
+      b.bowK = b.bow / Math.pow(Math.max(1, W * 0.5), 2);
+      if (b.glow <= 0.02) continue;
+
+      const grainStep = quality < 0.8 ? 2 : 1;
+      const receding = b.state === 'recede';
+      const seed = b.wob.a + b.y * 0.021;
+      const invW = 1 / W;
+
+      // A faint swell body under the foam, following the same envelope, so the
+      // wave has a shape to ride on instead of foam floating on black water.
+      const bodyStep = Math.max(6, Math.round(W / 90));
+      for (let x = 0; x <= W; x += bodyStep) {
+        const env = envelope(b, x * invW, t);
+        if (env < 0.05) continue;
+        stamp(x, crestY(b, x), b.thick * 1.9,
+              b.glow * b.bright * env * 0.055, receding ? 0.5 : 0.9);
+      }
+
+      for (let k = 0; k < b.foam.length; k += grainStep) {
+        const f = b.foam[k];
+        const x = f.fx * W;
+        const env = envelope(b, f.fx, t);
+        if (env < 0.045) continue;
+        const swell = 0.5 + 0.5 * Math.sin(x * 0.021 + seed);
+        const own = 0.5 + 0.5 * Math.sin(t * f.sp + f.ph);
+        // Gaps in the crest, nested at two scales, are what break the line up.
+        const gaps = (0.45 + 0.55 * (0.5 + 0.5 * Math.sin(x * 0.0075 + b.wob.c)))
+                   * (0.66 + 0.34 * Math.sin(x * 0.031 + b.wob.d));
+        const lit = b.glow * b.bright * env * gaps
+                  * clamp(b.fill * 0.35 + swell * 0.85, 0, 1)
+                  * (0.30 + own * 1.10);
+        if (lit < 0.030) continue;
+
+        const rad = b.thick * (0.34 + f.r * 0.75) * (0.78 + own * 0.40);
+        const y = crestY(b, x) + f.dy * b.thick * 1.5;
+        stamp(x, y, rad, lit * 0.50, receding ? 0.55 : 1);
+
+        // Wet-sand reflection: only light close to the waterline smears onto
+        // the beach, and it dims with distance from it.
+        const above = shoreY - y;
+        if (b.z > 0.35 && above > -6 && above < 105) {
+          const fade = 1 - above / 105;
+          stamp(x, shoreY + above * CFG.reflectK, rad * 1.35,
+                lit * 0.50 * 0.36 * fade * fade, 0.5);
+        }
+      }
+    }
+
+    // Water column: faint bioluminescence everywhere the water has been stirred.
+    for (let i = 0; i < plankton.length; i++) {
+      const p = plankton[i];
+      const tw = 0.5 + 0.5 * Math.sin(t * p.sp * 1.6 + p.ph);
+      const depth = clamp((p.y - horizonY) / Math.max(1, shoreY - horizonY), 0, 1);
+      stamp(p.x + Math.sin(t * 0.19 + p.ph) * 5, p.y, p.r * 1.9,
+            0.012 + tw * 0.048 * (0.25 + depth * 0.9));
+    }
+
+    // Moon path: loose sparkles across the glitter column, never a solid beam.
+    const mx = W * CFG.moon.x;
+    for (let i = 0; i < 30; i++) {
+      const f = i / 30;
+      const y = lerp(horizonY + 4, shoreY - 8, Math.pow(f, 1.45));
+      const spread = lerp(W * 0.008, W * 0.075, Math.pow(f, 1.5));
+      const shim = 0.5 + 0.5 * Math.sin(t * (1.5 + f * 1.8) + i * 2.1);
+      const s = Math.pow(shim, 2.6);
+      if (s < 0.12) continue;
+      const x = mx + Math.sin(t * 0.7 + i * 2.3) * spread;
+      stamp(x, y, 1.4 + spread * 0.18, 0.22 * s * (1 - f * 0.25));
+    }
+
+    // The last wash up the sand: a bright foam line right at the waterline,
+    // trailed by stepped swashes so the edge never reads as a ruler.
+    const washPhase = (t * 0.19) % 1;
+    for (let s = 0; s < 3; s++) {
+      const up = Math.max(0, 1 - (((washPhase + s * 0.055) % 1) * 3.2));
+      const fade = 1 - s * 0.34;
+      for (let px = 0; px < FW; px++) {
+        const x = (px + 0.5) / FS;
+        const n = wobble(x * 1.15, { a: 11, b: 3.3, c: 8.1, d: 5.7 });
+        const gaps = (0.30 + 0.70 * (0.5 + 0.5 * Math.sin(x * 0.0092 + 2.1)))
+                   * (0.60 + 0.40 * Math.sin(x * 0.037 + 4.7));
+        const y = shoreY + n * 2.2 + H * 0.022 * (1 - up) - s * 2.0;
+        const a = CFG.wash * fade * gaps
+                * (0.16 + 0.55 * up) * (0.55 + 0.45 * Math.sin(x * 0.021 + 1.3));
+        stamp(x, y, 2.6 + s * 1.8, a * 0.55, 0.55);
+      }
+    }
+
+    // Marks left on the sand, cooling like embers.
+    for (const f of sandFlecks) {
+      f.life += f.rate * (1 - f.life) * 0.05;
+      if (f.life > 0.995) {
+        f.life = 0;
+        f.x = Math.random() * W;
+        f.y = rand(shoreY - 6, H);
+        f.r = rand(0.6, 2.1);
+      }
+      const a = Math.sin(f.life * Math.PI);
+      if (a <= 0.03) continue;
+      const depth = (f.y - shoreY) / Math.max(1, H - shoreY);
+      stamp(f.x + f.drift * f.life, f.y, f.r * 2.2, a * 0.22 * (1 - depth * 0.35));
+    }
+  }
+
+  function colorize() {
+    const n = FW * FH;
+    for (let i = 0, p = 0; i < n; i++, p += 4) {
+      const v = FIELD[i];
+      if (v <= 0.006) {
+        glowPix[p] = 0; glowPix[p + 1] = 0; glowPix[p + 2] = 0;
+        hotPix[p] = 0; hotPix[p + 1] = 0; hotPix[p + 2] = 0;
+        continue;
+      }
+      const idx = (Math.min(1, v) * 255) | 0;
+      const l = idx * 3;
+      glowPix[p] = LUT[l]; glowPix[p + 1] = LUT[l + 1]; glowPix[p + 2] = LUT[l + 2];
+      if (v <= CFG.hotCut) {
+        hotPix[p] = 0; hotPix[p + 1] = 0; hotPix[p + 2] = 0;
+      } else {
+        hotPix[p] = HOTLUT[l]; hotPix[p + 1] = HOTLUT[l + 1]; hotPix[p + 2] = HOTLUT[l + 2];
+      }
+    }
+    glowCx.putImageData(glowImg, 0, 0);
+    hotCx.putImageData(hotImg, 0, 0);
+  }
+
+  function composite() {
+    ctx.setTransform(R, 0, 0, R, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(bgCv, 0, 0, W, H);
+
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.96;
+    ctx.drawImage(glowCv, 0, 0, FW, FH, 0, 0, W, H);
+
+    // Bloom comes only from the hot cores, so the dark water stays dark.
+    const k = CFG.haloScale;
+    ctx.globalAlpha = 0.32;
+    ctx.drawImage(hotCv, 0, 0, FW, FH,
+      -(W * (k - 1)) / 2, -(H * (k - 1)) / 2, W * k, H * k);
+    ctx.globalAlpha = 0.13;
+    const k2 = k * 1.75;
+    ctx.drawImage(hotCv, 0, 0, FW, FH,
+      -(W * (k2 - 1)) / 2, -(H * (k2 - 1)) / 2, W * k2, H * k2);
+
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+  }
+
+  // -------------------------------------------------------- quality governor
+  // The page has to survive machines that push a big frame. Rather than
+  // dropping frames, shed resolution so the motion stays smooth.
+  let smooth = 16.7, since = 0;
+  function govern(dt) {
+    smooth = smooth * 0.9 + Math.min(dt * 1000, 100) * 0.1;
+    since += dt;
+    if (since < 2.5) return;
+    if (smooth > 27 && quality > 0.55) {
+      quality = quality === 1 ? 0.75 : 0.55;
+      since = 0; resize();
+    } else if (smooth < 15.5 && quality < 1) {
+      quality = quality === 0.55 ? 0.75 : 1;
+      since = 0; resize();
+    }
+  }
+
+  function stir() {
+    for (const f of sandFlecks) {
+      f.life = rand(0.04, 0.5);
+      f.x = Math.random() * W;
+      f.y = rand(shoreY - 6, H);
+    }
+    for (const b of bands) if (b.z > 0.5) { b.state = 'break'; b.t0 = tNow; }
+  }
+
+  let last = 0, tNow = 0, raf = 0, running = true;
+  function frame(now) {
+    raf = requestAnimationFrame(frame);
+    if (!last) last = now;
+    const dt = Math.min(0.05, Math.max(0.0005, (now - last) / 1000));
+    last = now;
+    tNow += dt;
+
+    stepAndStamp(dt, tNow);
+    colorize();
+    composite();
+    govern(dt);
+  }
+
+  window.addEventListener('resize', resize, { passive: true });
+  window.addEventListener('keydown', (e) => {
+    const k = e.key.toLowerCase();
+    if (k === ' ') { e.preventDefault(); stir(); }
+    if (k === 'f') { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.().catch(() => {}); }
+    if (k === 'q') { quality = quality === 1 ? 0.75 : (quality === 0.75 ? 0.55 : 1); resize(); }
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { cancelAnimationFrame(raf); running = false; }
+    else if (!running) { running = true; last = 0; raf = requestAnimationFrame(frame); }
+  });
+
+  buildLut();
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
