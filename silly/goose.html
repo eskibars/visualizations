@@ -378,6 +378,8 @@
         wobbleAmp: 8,          // px
         wobbleFreq: 2.2,       // Hz
         turnSmoothing: 0.14,   // 0..1
+        autoArmMs: 2500,       // hide the audio prompt if nobody clicks it
+        idleAfterMs: 4000,     // no pointer for this long -> roam on its own
       };
 
       // --- DOM ---
@@ -398,6 +400,11 @@
       let honks = 0;
 
       let lastT = performance.now();
+      // Timestamp of the last real pointer/touch input. Used to decide when to
+      // steer the goose on our own: on a kiosk or screensaver there is no
+      // mouse, and otherwise the goose parks next to its last known position.
+      let lastPointerAt = performance.now();
+      let idleNextAt = 0;
       let lastCatchHonk = 0;
       let lastClickHonk = 0;
 
@@ -410,6 +417,7 @@
       const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
       const lerp = (a,b,t) => a + (b-a)*t;
       const dist = (ax,ay,bx,by) => Math.hypot(ax-bx, ay-by);
+      const rand = (a,b) => a + Math.random()*(b-a);
 
       function setOverlayVisible(visible){
         overlay.classList.toggle("hidden", !visible);
@@ -526,6 +534,7 @@
 
       // --- Input ---
       window.addEventListener("mousemove", (e) => {
+        lastPointerAt = performance.now();
         target.x = e.clientX;
         target.y = e.clientY;
         targetEl.style.left = target.x + "px";
@@ -578,6 +587,17 @@
       function tick(tNow){
         const dt = Math.min(0.033, (tNow - lastT) / 1000); // cap dt
         lastT = tNow;
+
+        // Wander when there is no pointer to chase, so an unattended screen
+        // keeps moving instead of freezing beside the last cursor position.
+        const nowMs = performance.now();
+        if (nowMs - lastPointerAt > CFG.idleAfterMs && nowMs >= idleNextAt){
+          idleNextAt = nowMs + rand(1600, 4200);
+          target.x = rand(window.innerWidth * 0.08, window.innerWidth * 0.92);
+          target.y = rand(window.innerHeight * 0.12, window.innerHeight * 0.88);
+          targetEl.style.left = target.x + "px";
+          targetEl.style.top  = target.y + "px";
+        }
 
         const dx = target.x - pos.x;
         const dy = target.y - pos.y;
@@ -643,8 +663,12 @@
       goose.style.left = pos.x + "px";
       goose.style.top  = pos.y + "px";
 
-      // Show overlay first (audio gesture requirement)
+      // Show overlay first (audio gesture requirement). It is dismissed below
+      // even if it is never clicked: this visualization is meant for unattended
+      // displays, and a full-screen modal with no pointer would hide the scene
+      // forever. Sound simply stays off until someone does click.
       setOverlayVisible(true);
+      window.setTimeout(() => setOverlayVisible(false), CFG.autoArmMs);
 
       requestAnimationFrame((t) => {
         lastT = t;

@@ -141,6 +141,10 @@
       ctx.setTransform(DPR,0,0,DPR,0,0);
 
       seed(true);
+      // Assigning canvas.width/height resets the whole 2D context state, so the
+      // glow settings and font set at startup are silently lost on every
+      // resize (rotation, window resize, fullscreen). Re-apply them here.
+      setGlow(glowOn);
       // clear
       ctx.fillStyle = "#000";
       ctx.fillRect(0,0,W,H);

@@ -169,6 +169,7 @@ function buildSkyline() {
     offFarCtx = offFar.getContext('2d', { alpha: true });
     offNearCtx = offNear.getContext('2d', { alpha: true });
 
+    buildSkyline();
     buildCityLayers(scale);
     buildNoise();
     initRain();
@@ -246,7 +247,10 @@ function buildSkyline() {
     // but also add a faint static haze into offNear for depth.
     offNearCtx.save();
     const haze = offNearCtx.createLinearGradient(0, offNear.height*0.58, 0, offNear.height);
-    haze.addColorStop(0, `rgba(120,170,255,0.10)`);
+    // Start fully transparent: a non-transparent first stop draws a hard edge
+    // at exactly 0.58*H, which shows up as a straight seam across the pane.
+    haze.addColorStop(0, `rgba(120,170,255,0)`);
+    haze.addColorStop(0.35, `rgba(120,170,255,0.06)`);
     haze.addColorStop(1, `rgba(0,0,0,0.25)`);
     offNearCtx.fillStyle = haze;
     offNearCtx.fillRect(0, offNear.height*0.58, offNear.width, offNear.height);

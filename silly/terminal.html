@@ -363,9 +363,27 @@
       setInterval(regenNoise, 900);
 
       // --- terminal buffer + typing
-      const MAX_LINES = 240;          // visible-ish history (kept in buffer)
-      const VISIBLE_LINES = 120;      // displayed
+      const MAX_LINES = 240;          // history kept in the buffer
       const buffer = [];
+
+      // How many lines actually fit the viewport. The terminal box is
+      // ``overflow:hidden`` with no scrolling, so we must only render as many
+      // lines as fit: otherwise the newest output sits below the fold and the
+      // screen appears frozen on stale text.
+      function visibleLineCapacity(){
+        const lh = parseFloat(getComputedStyle(term).lineHeight);
+        const lineHeight = Number.isFinite(lh) && lh > 0 ? lh : 20;
+        // One line is reserved for the blinking cursor, which is rendered on
+        // its own row after the log text.
+        return Math.max(4, Math.floor(term.clientHeight / lineHeight) - 1);
+      }
+
+      function escapeHtml(s){
+        return s
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;");
+      }
 
       function pushLine(text, cls="line") {
         buffer.push({ text, cls });
@@ -374,20 +392,18 @@
       }
 
       function render() {
-        // show tail
-        const slice = buffer.slice(-VISIBLE_LINES);
+        const capacity = visibleLineCapacity();
+
+        // Show the tail so the most recent line is always on screen.
+        const slice = buffer.slice(-capacity);
 
         // main text
         term.innerHTML = slice.map(l => {
-          const safe = l.text
-            .replaceAll("&", "&amp;")
-            .replaceAll("<", "&lt;")
-            .replaceAll(">", "&gt;");
-          return `<span class="${l.cls}">${safe}</span>`;
+          return `<span class="${l.cls}">${escapeHtml(l.text)}</span>`;
         }).join("\n") + `<span class="cursor"></span>`;
 
-        // ghost layer: slightly older frame
-        const ghostSlice = buffer.slice(-Math.min(VISIBLE_LINES, 70));
+        // ghost layer: slightly older frame, aligned with what is on screen
+        const ghostSlice = buffer.slice(-Math.max(1, capacity - 3));
         ghost.textContent = ghostSlice.map(l => l.text).join("\n");
       }
 
@@ -562,6 +578,9 @@
           e.preventDefault();
         }
       });
+
+      // Re-compute how many lines fit whenever the viewport changes.
+      window.addEventListener('resize', () => render(), { passive: true });
 
       // go
       resetTerminal();

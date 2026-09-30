@@ -12,10 +12,13 @@
       --text:#f2c94c;          /* warm amber */
       --radius:18px;
 
-      --char-w:22px;
-      --char-h:34px;
-      --gap:3px;
-      --row-h:56px;
+      --char-w:calc(var(--row-h) * 0.393);
+      --char-h:calc(var(--row-h) * 0.607);
+      --gap:calc(var(--row-h) * 0.054);
+      /* The board is a fixed 17 rows tall and the page never scrolls, so the row
+         height has to follow the viewport: a hard-coded 56px overflowed (and
+         clipped) the bottom rows on anything shorter than ~1080px. */
+      --row-h:clamp(26px, calc((100vh - 140px) / 17), 56px);
 
       --font: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
     }
@@ -192,7 +195,7 @@
       align-items:center;
       justify-content:center;
       font-weight:700;
-      font-size:20px;
+      font-size:calc(var(--char-h) * 0.588);   /* scales with the flap */
       line-height:1;                 /* prevents metric drift */
       color:var(--text);
       text-shadow:0 0 22px rgba(242,201,76,.08);
@@ -263,13 +266,16 @@
     }
 
     @media (max-width: 980px){
-      :root{ --char-w:20px; --char-h:32px; --row-h:52px; }
       .row{ grid-template-columns: 110px 130px 1fr 90px 170px; }
     }
     @media (max-width: 780px){
-      :root{ --char-w:18px; --char-h:30px; --row-h:50px; }
       .row{ grid-template-columns: 98px 120px 1fr 82px 150px; }
       .topbar{ padding:14px 16px; }
+    }
+    /* Give the board a little more room on short screens. */
+    @media (max-height: 820px){
+      :root{ --row-h:clamp(24px, calc((100vh - 120px) / 17), 52px); }
+      .wrap{ padding:18px; }
     }
   </style>
 </head>
@@ -314,7 +320,7 @@
     const ROW_UPDATE_MIN_MS = 8000;
     const ROW_UPDATE_MAX_MS = 18000;
 
-    const CHARSET = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-'";
+    const CHARSET = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-'&()";
 
     // 100+ destinations (real + funny)
     const DESTINATIONS = [
@@ -337,8 +343,8 @@
       "DEEP SPACE 9", "CLOUD CITY", "HOTH", "ENDOR", "TATOOINE", "ALDERAAN", "HYPERSPACE", "THE UPSIDE DOWN", "AREA 51", "LOST & FOUND",
       "THE BACKROOMS", "THE METAVERSE", "INTERNET CAFE", "CACHE MISS", "NULL ISLAND", "404 NOT FOUND", "BLUE SCREEN", "LOW BATTERY", "PASSWORD RESET",
       "COFFEE RUN", "SECOND BREAKFAST", "SIESTA CITY", "BRUNCHTON", "MONDAY AGAIN", "FRIDAY EVE", "WEATHER DELAY", "LAUNDRY DAY",
-      "DRAGON'S LAIR", "WIZARD COUNCIL", "PIRATE COVE", "HAUNTED MANSN", "TIME LOOP", "TACO PLANET", "FREE WIFI", "MEETING ROOM B",
-      "CONF CALL", "BOSS FIGHT", "SIDE QUEST", "MAIN QUEST", "DLC ISLAND", "PATCH NOTES", "PROCRASTINATN", "DOOMSCROLLING",
+      "DRAGON'S LAIR", "WIZARD COUNCIL", "PIRATE COVE", "HAUNTED MANOR", "TIME LOOP", "TACO PLANET", "FREE WIFI", "MEETING ROOM B",
+      "CONF CALL", "BOSS FIGHT", "SIDE QUEST", "MAIN QUEST", "DLC ISLAND", "PATCH NOTES", "PROCRASTINATION", "DOOMSCROLLING",
       "TOUCH GRASS", "VIBE CHECK", "MIC MUTED", "UNMUTE PLEASE", "SUDDEN UPDATES", "YOUR HOUSE", "MY HOUSE", "NEVERLAND",
       "WONDERLAND", "UNDERLAND", "OVERTHERE", "NOT HERE", "SECRET TUNNEL", "TARDIS BAY", "HIDDEN LEVEL", "CAT HQ",
       "DOG PARK", "UNICORN RANCH", "TRAIN STATION", "DELAYED AGAIN", "GATE CHANGED", "RUN FASTER", "BOARDING SOON", "SNACK TIME"

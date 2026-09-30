@@ -67,7 +67,7 @@
       padding:24px;
       display:grid;
       grid-template-columns: 1.15fr .95fr .95fr;
-      grid-template-rows: auto 1fr 1fr auto;
+      grid-template-rows: auto minmax(min-content, 1fr) minmax(min-content, 1fr) auto;
       gap:18px;
     }
 
@@ -134,6 +134,10 @@
       backdrop-filter: blur(10px);
       position:relative;
       overflow:hidden;
+      /* Panels crop their contents, so they must never be squeezed below the
+         height their content needs (grid items with overflow:hidden otherwise
+         get an automatic minimum size of 0 and the bottom gets cut off). */
+      min-height: min-content;
     }
     .panel::before{
       content:"";
@@ -171,7 +175,6 @@
       padding:14px 16px 16px;
       position:relative; z-index:1;
     }
-
     /* Grid placement */
     #warp { grid-column: 1; grid-row: 2 / span 2; }
     #power{ grid-column: 2; grid-row: 2; }
@@ -525,6 +528,37 @@
       body{overflow:auto}
       .screenFx,.vignette,.noise{display:none}
       #bg{display:none}
+    }
+
+    /* Short viewports (e.g. 1600x900, 1440x900): the two middle grid rows are
+       equal 1fr halves, which is less space than the panel contents need, and
+       .panel{overflow:hidden} then silently crops them. Tighten the vertical
+       rhythm so everything still fits without scrolling. */
+    @media (max-height: 1040px){
+      .wrap{ padding:16px; gap:12px; }
+      .panelHead{padding:9px 14px 7px}
+      .panelBody{padding:9px 14px 10px}
+      .card{padding:9px}
+      .card h3{margin:0 0 6px}
+      .stat{margin:3px 0}
+      .barRow{margin:5px 0}
+      .reactGrid{gap:8px}
+      .logWrap{gap:10px}
+      .termBody{height:120px}
+    }
+
+    /* Very short screens (768-880px). Even tightened, the full panel set needs
+       more height than this, so let the rows size to their content and allow
+       the page to scroll rather than cropping panel contents. */
+    @media (max-height: 880px){
+      body{overflow:auto}
+      .wrap{
+        height:auto;
+        min-height:100%;
+        grid-template-rows:auto auto auto auto;
+        overflow:visible;
+      }
+      .termBody{height:150px}
     }
   </style>
 </head>

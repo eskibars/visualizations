@@ -1,0 +1,899 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>Reaction Diffusion</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #04060a; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    /* Glass over the specimen, so it reads as a lit dish rather than
+       as a texture pasted on the screen. */
+    .glass {
+      pointer-events: none; position: fixed; inset: 0;
+      background:
+        radial-gradient(ellipse 130% 105% at 50% 42%,
+          rgba(0,0,0,0) 26%, rgba(0,0,0,.40) 68%, rgba(0,0,0,.88) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(214, 228, 255, .30);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="glass"></div>
+  <div class="caption" id="caption">reaction · diffusion</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  REACTION DIFFUSION — Gray-Scott chemistry run as a GPU
+  //  reaction between two virtual species on ping-pong float
+  //  textures, lit as a glazed surface.
+  //
+  //  Feed and kill slide slowly between regimes, so the colony is
+  //  permanently mid-morphosis: labyrinth -> worms -> nets ->
+  //  mitosis -> ... It never resolves and never repeats.
+  //
+  //  Tuning knobs:
+  // ============================================================
+  const CONFIG = {
+    // --- dish size (cells) ------------------------------------
+    // Height in cells; width follows the window aspect so the
+    // pattern is never stretched. Keeping the cell count roughly
+    // constant keeps the filament width constant across screens.
+    simHeight: 760,
+    maxSimPixels: 1.6e6,
+    minSimWidth: 880,
+
+    // --- pacing -----------------------------------------------
+    stepsPerFrame: 5,       // starting substeps per frame
+    minStepsPerFrame: 1,
+    maxStepsPerFrame: 22,
+    simBudgetMs: 13,        // hard ceiling on simulation time per frame
+    warmupSteps: 2600,      // substeps run before the first paint
+    warmupBudgetMs: 1500,
+
+    // --- growth schedule (seconds) ----------------------------
+    holdSeconds: 78,        // sit on one regime
+    morphSeconds: 30,       // then slide to the next
+
+    // --- gardener ---------------------------------------------
+    // Fresh droplets dropped at random, which nucleate new colonies
+    // and stop the dish ageing into one uniform texture.
+    pokeEverySeconds: 8,
+    pokeRadius: 0.012,      // fraction of the dish width
+    reviveBelow: 0.010,     // mean B at which the dish counts as dead
+    watchdogSeconds: 20,
+
+    displayDPRCap: 2,
+    // Film grain in linear units. Above roughly 0.8/255 it stops
+    // reading as emulsion and starts reading as noise.
+    grain: 0.0026,
+  };
+
+  // ============================================================
+  //  Regimes — (feed, kill) pairs. These are not folklore: each
+  //  one was run to convergence offline and kept only if it covers
+  //  a healthy fraction of the dish and keeps real structure.
+  //  Rejected neighbours, for the record: f=0.026 k=0.051 and
+  //  f=0.052 k=0.060 flood the whole dish into a flat colour
+  //  field; f=0.012 k=0.050 and f=0.014 k=0.054 starve it down to
+  //  near-empty; f=0.030 k=0.063 settles into an ordered dot
+  //  lattice that reads as a screen door.
+  //
+  //  Ordered so each morph travels through live parameter space.
+  //  The index is also the glaze slot.
+  // ============================================================
+  const REGIMES = [
+    { label: "brain coral", f: 0.0545, k: 0.0620, glaze: 0 },
+    { label: "worm coral",  f: 0.0540, k: 0.0630, glaze: 1 },
+    { label: "net",         f: 0.0460, k: 0.0630, glaze: 2 },
+    { label: "mitosis",     f: 0.0367, k: 0.0649, glaze: 3 },
+    { label: "labyrinth",   f: 0.0340, k: 0.0620, glaze: 4 },
+    { label: "fine net",    f: 0.0290, k: 0.0570, glaze: 0 },
+    { label: "fingerprint", f: 0.0300, k: 0.0550, glaze: 2 },
+  ];
+
+  // ============================================================
+  //  Glazes. The low end is a real colour, not black: the ground
+  //  between the filaments stays glazed so a dense regime reads as
+  //  a surface rather than as line art on nothing.
+  // ============================================================
+  const GLAZES = [
+    { label: "reef", stops: [
+      [0.00, "#03121e"], [0.16, "#07384e"], [0.38, "#0f7f92"],
+      [0.60, "#66c2a6"], [0.80, "#e6dba6"], [1.00, "#ff8a5c"] ]},
+    { label: "raku", stops: [
+      [0.00, "#0c0709"], [0.18, "#3d1a20"], [0.40, "#8f4522"],
+      [0.62, "#d9972f"], [0.82, "#f8d894"], [1.00, "#fffaf0"] ]},
+    { label: "abyss", stops: [
+      [0.00, "#00050f"], [0.18, "#122b6d"], [0.42, "#1f83dc"],
+      [0.64, "#4ce4e8"], [0.84, "#cdfcff"], [1.00, "#ffffff"] ]},
+    { label: "cinnabar", stops: [
+      [0.00, "#0b0a0e"], [0.18, "#2a2a37"], [0.40, "#71394a"],
+      [0.62, "#c4492f"], [0.82, "#f0cba3"], [1.00, "#fff6e8"] ]},
+    { label: "magma", stops: [
+      [0.00, "#06030b"], [0.18, "#2f0d45"], [0.40, "#7e1b60"],
+      [0.62, "#ea4a60"], [0.82, "#ffb84a"], [1.00, "#fff6da"] ]},
+  ];
+
+  // ============================================================
+  //  Colour: mix in linear light, encode back to sRGB. Averaging
+  //  sRGB directly greys the midtones out; doing it in linear
+  //  keeps the glaze saturated as it fades.
+  // ============================================================
+  const srgbToLinear = (c) => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
+  function hexToLinear(hex) {
+    const n = parseInt(hex.slice(1), 16);
+    return [srgbToLinear(((n >> 16) & 255) / 255),
+            srgbToLinear(((n >> 8) & 255) / 255),
+            srgbToLinear((n & 255) / 255)];
+  }
+  const GLAZE_LINEAR = GLAZES.map((g) => g.stops.map(([pos, hex]) => [pos, hexToLinear(hex)]));
+  const MAX_STOPS = 8;
+
+  // ============================================================
+  //  GLSL
+  // ============================================================
+  const VERT = `#version 300 es
+  in vec2 aPos;
+  out vec2 vUv;
+  void main() {
+    vUv = aPos * 0.5 + 0.5;
+    gl_Position = vec4(aPos, 0.0, 1.0);
+  }`;
+
+  // Nine-point Laplacian with Karl Sims' weights: centre -1,
+  // orthogonal 0.2, diagonal 0.05. The weights sum to zero, so a
+  // flat field has no diffusion and only the reaction moves.
+  const FRAG_SIM = `#version 300 es
+  precision highp float;
+  uniform sampler2D uState;
+  uniform vec2 uTexel;
+  uniform float uFeed, uKill, uDa, uDb;
+  in vec2 vUv;
+  out vec4 outState;
+
+  void main() {
+    vec2 t = uTexel;
+    vec2 c  = texture(uState, vUv).xy;
+    vec2 n  = texture(uState, vUv + vec2( 0.0,  t.y)).xy;
+    vec2 s  = texture(uState, vUv + vec2( 0.0, -t.y)).xy;
+    vec2 e  = texture(uState, vUv + vec2( t.x,  0.0)).xy;
+    vec2 w  = texture(uState, vUv + vec2(-t.x,  0.0)).xy;
+    vec2 ne = texture(uState, vUv + vec2( t.x,  t.y)).xy;
+    vec2 nw = texture(uState, vUv + vec2(-t.x,  t.y)).xy;
+    vec2 se = texture(uState, vUv + vec2( t.x, -t.y)).xy;
+    vec2 sw = texture(uState, vUv + vec2(-t.x, -t.y)).xy;
+
+    vec2 lap = -c + 0.2 * (n + s + e + w) + 0.05 * (ne + nw + se + sw);
+
+    float A = c.x;
+    float B = c.y;
+    float reaction = A * B * B;              // A + 2B -> 3B
+    float dA = uDa * lap.x - reaction + uFeed * (1.0 - A);
+    float dB = uDb * lap.y + reaction - (uKill + uFeed) * B;
+
+    outState = vec4(clamp(A + dA, 0.0, 1.0), clamp(B + dB, 0.0, 1.0), 0.0, 1.0);
+  }`;
+
+  // Seed: a jittered lattice of soft droplets. Starting from a
+  // lattice rather than pure noise means the first paint already
+  // reads as a colony instead of as static.
+  const FRAG_SEED = `#version 300 es
+  precision highp float;
+  const int MAX_SEEDS = 512;
+  uniform vec3 uSeed[MAX_SEEDS];
+  uniform int uSeedCount;
+  in vec2 vUv;
+  out vec4 outState;
+
+  void main() {
+    float b = 0.0;
+    for (int i = 0; i < MAX_SEEDS; i++) {
+      if (i >= uSeedCount) break;
+      float d = distance(vUv, uSeed[i].xy);
+      float r = uSeed[i].z;
+      b = max(b, 1.0 - smoothstep(r * 0.55, r, d));
+    }
+    // Interior is all A; each droplet eats a little A and
+    // introduces B, which is what nucleates a colony.
+    outState = vec4(1.0 - b * 0.68, b, 0.0, 1.0);
+  }`;
+
+  // Gardener: read the dish, then stir in a few droplets.
+  const FRAG_POKE = `#version 300 es
+  precision highp float;
+  uniform sampler2D uState;
+  uniform vec3 uDrop[8];
+  uniform int uDropCount;
+  in vec2 vUv;
+  out vec4 outState;
+
+  void main() {
+    vec4 s = texture(uState, vUv);
+    float m = 0.0;
+    for (int i = 0; i < 8; i++) {
+      if (i >= uDropCount) break;
+      float d = distance(vUv, uDrop[i].xy);
+      m = max(m, 1.0 - smoothstep(uDrop[i].z * 0.55, uDrop[i].z, d));
+    }
+    outState = vec4(mix(s.xy, vec2(0.26, 0.88), m), 0.0, 1.0);
+  }`;
+
+  // Display: the B field becomes a height field, lit by one key
+  // light, which turns a flat chemical map into a wet glaze.
+  const FRAG_SHOW = `#version 300 es
+  precision highp float;
+  precision highp int;
+  uniform sampler2D uState;
+  uniform vec2 uTexel;
+  uniform vec2 uFit;
+  uniform vec2 uOffset;
+  uniform float uRelief;
+  uniform vec3 uLight;
+  uniform float uTime;
+  uniform float uGrain;
+  uniform vec2 uResolution;
+  uniform float uSheen;
+  uniform float uLo, uHi;
+  uniform vec3 uGlaze[8];
+  uniform float uGlazePos[8];
+  uniform int uGlazeCount;
+  in vec2 vUv;
+  out vec4 outColor;
+
+  vec3 glaze(float t) {
+    vec3 c = uGlaze[0];
+    for (int i = 0; i < 7; i++) {
+      if (i + 1 >= uGlazeCount) break;
+      c = mix(c, uGlaze[i + 1], smoothstep(uGlazePos[i], uGlazePos[i + 1], t));
+    }
+    return c;
+  }
+
+  // Height of the colony. The window is deliberately narrow: the
+  // live part of the B field sits in a small band, and mapping that
+  // band across the full glaze is what stops the dish looking like
+  // line art on black.
+  float height(vec2 uv) {
+    return smoothstep(uLo, uHi, texture(uState, uv).y);
+  }
+
+  void main() {
+    vec2 uv = vUv * uFit + uOffset;
+    vec2 t = uTexel;
+
+    float h  = height(uv);
+    float hl = height(uv - vec2(t.x, 0.0));
+    float hr = height(uv + vec2(t.x, 0.0));
+    float hd = height(uv - vec2(0.0, t.y));
+    float hu = height(uv + vec2(0.0, t.y));
+
+    // Surface normal from the height gradient.
+    vec3 n = normalize(vec3((hl - hr) * uRelief, (hd - hu) * uRelief, 1.0));
+
+    vec3 lightDir = normalize(uLight);
+    float diffuse = clamp(dot(n, lightDir), 0.0, 1.0);
+    float spec = pow(clamp(dot(reflect(-lightDir, n), vec3(0.0, 0.0, 1.0)), 0.0, 1.0), 30.0);
+
+    // Slope energy: the shoulders of each filament catch a little
+    // extra light, which is what gives the glaze its wet sheen.
+    float slope = clamp(length(vec2(hr - hl, hu - hd)) * 5.0, 0.0, 1.0);
+
+    vec3 base = glaze(h);
+    vec3 col = base * (0.30 + 0.72 * diffuse);
+    col += base * slope * 0.85 * uSheen;
+    col += vec3(1.0, 0.97, 0.93) * spec * 0.34;
+
+    // Troughs go dark, which keeps the ground readable between
+    // filaments even where the glaze's low end is not very dark.
+    // The floor is deliberately above zero: a dead black ground
+    // makes a dense colony read as line art.
+    col *= mix(0.55, 1.0, smoothstep(0.0, 0.55, h));
+
+    // Very faint animated grain, to break up banding across the
+    // large midtone areas.
+    if (uGrain > 0.0) {
+      vec2 g = vUv * uResolution + vec2(fract(uTime * 7.13) * 311.0, fract(uTime * 5.71) * 227.0);
+      col += (fract(sin(dot(floor(g), vec2(12.9898, 78.233))) * 43758.5453) - 0.5) * uGrain;
+    }
+
+    // Corner falloff.
+    vec2 d = (vUv - 0.5) * vec2(1.0, 1.07);
+    col *= 1.0 - 0.5 * pow(clamp(length(d) * 1.30, 0.0, 1.0), 2.4);
+
+    outColor = vec4(pow(max(col, 0.0), vec3(1.0 / 2.2)), 1.0);
+  }`;
+
+  // ============================================================
+  //  WebGL2 plumbing
+  // ============================================================
+  const canvas = document.getElementById("c");
+  const caption = document.getElementById("caption");
+  const params = new URLSearchParams(location.search);
+  const num = (key, fallback) => {
+    const v = Number(params.get(key));
+    return Number.isFinite(v) && params.get(key) !== null ? v : fallback;
+  };
+
+  function compile(gl, type, src) {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      throw new Error("shader: " + gl.getShaderInfoLog(sh));
+    }
+    return sh;
+  }
+
+  function program(gl, vsSrc, fsSrc) {
+    const p = gl.createProgram();
+    gl.attachShader(p, compile(gl, gl.VERTEX_SHADER, vsSrc));
+    gl.attachShader(p, compile(gl, gl.FRAGMENT_SHADER, fsSrc));
+    gl.bindAttribLocation(p, 0, "aPos");
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+      throw new Error("link: " + gl.getProgramInfoLog(p));
+    }
+    return { p, u: new Proxy({}, { get: (c, name) => (c[name] ??= gl.getUniformLocation(p, name)) }) };
+  }
+
+  function startWebGL() {
+    const gl = canvas.getContext("webgl2", {
+      alpha: false, antialias: false, depth: false, stencil: false,
+      premultipliedAlpha: false, powerPreference: "high-performance",
+    });
+    if (!gl) return false;
+    // The state lives in float textures. That is core WebGL2 to
+    // request, but not guaranteed to be renderable; without
+    // EXT_color_buffer_float there is nothing to fall back to, so
+    // signal the caller to use the CPU path instead.
+    if (!gl.getExtension("EXT_color_buffer_float")) return false;
+    const floatLinear = !!gl.getExtension("OES_texture_float_linear");
+    const filter = floatLinear ? gl.LINEAR : gl.NEAREST;
+
+    const simProg = program(gl, VERT, FRAG_SIM);
+    const seedProg = program(gl, VERT, FRAG_SEED);
+    const pokeProg = program(gl, VERT, FRAG_POKE);
+    const showProg = program(gl, VERT, FRAG_SHOW);
+
+    const quad = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+    // --- dish size -------------------------------------------
+    // Fixed for the life of the page. Growing or shrinking the grid
+    // on resize would either reset the colony or rescale its
+    // features, so the grid is sized once from the startup aspect
+    // and only the camera is refitted afterwards.
+    const resScale = Math.max(0.3, Math.min(2, num("res", 1)));
+    const aspect0 = Math.max(0.35, Math.min(4, window.innerWidth / Math.max(1, window.innerHeight)));
+    let gh = Math.max(160, Math.round(CONFIG.simHeight * resScale));
+    let gw = Math.max(CONFIG.minSimWidth, Math.round(gh * aspect0));
+    if (gw * gh > CONFIG.maxSimPixels) {
+      const k = Math.sqrt(CONFIG.maxSimPixels / (gw * gh));
+      gw = Math.round(gw * k); gh = Math.round(gh * k);
+    }
+
+    function makeField(w, h) {
+      const tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, w, h);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+      // Clamping gives the dish a clean rim instead of a seam where
+      // the pattern would otherwise meet itself.
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      const fbo = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      return { tex, fbo, w, h };
+    }
+
+    let read = makeField(gw, gh);
+    let write = makeField(gw, gh);
+
+    let W = 1, H = 1, dpr = 1, fit = [1, 1], offset = [0, 0];
+    function resize() {
+      dpr = Math.min(CONFIG.displayDPRCap, window.devicePixelRatio || 1);
+      W = Math.max(1, Math.floor(window.innerWidth * dpr));
+      H = Math.max(1, Math.floor(window.innerHeight * dpr));
+      canvas.width = W; canvas.height = H;
+      const screenAspect = W / H, gridAspect = gw / gh;
+      if (screenAspect > gridAspect) fit = [1, gridAspect / screenAspect];
+      else fit = [screenAspect / gridAspect, 1];
+      offset = [(1 - fit[0]) / 2, (1 - fit[1]) / 2];
+    }
+    window.addEventListener("resize", resize, { passive: true });
+    resize();
+
+    const drawQuad = () => gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    const bindTarget = (f) => { gl.bindFramebuffer(gl.FRAMEBUFFER, f.fbo); gl.viewport(0, 0, f.w, f.h); };
+    const swap = () => { const t = read; read = write; write = t; };
+
+    // --- seed --------------------------------------------------
+    (function seed() {
+      const MAX_SEEDS = 512;
+      // The lattice has to fit inside the uniform array, or the far
+      // half of the dish would silently stay empty. Solve the
+      // spacing from the aspect, then shrink until it fits. Density
+      // matters for looks as well as coverage: too few droplets and
+      // the colony keeps the lattice's own period, which reads as a
+      // repeating grid rather than as growth.
+      let cols = Math.max(10, Math.round(Math.sqrt(gw / gh) * 30));
+      let rows = Math.max(8, Math.round(cols * (gh / gw)));
+      while (cols * rows > MAX_SEEDS) { if (cols >= rows) cols--; else rows--; }
+
+      const data = new Float32Array(MAX_SEEDS * 3);
+      let count = 0;
+      for (let y = 0; y < rows && count < MAX_SEEDS; y++) {
+        for (let x = 0; x < cols && count < MAX_SEEDS; x++) {
+          data[count * 3] = (x + 0.5) / cols + (Math.random() - 0.5) * (1.0 / cols);
+          data[count * 3 + 1] = (y + 0.5) / rows + (Math.random() - 0.5) * (1.0 / rows);
+          data[count * 3 + 2] = 0.004 + Math.random() * 0.007;
+          count++;
+        }
+      }
+
+      gl.useProgram(seedProg.p);
+      gl.uniform3fv(seedProg.u.uSeed, data);
+      gl.uniform1i(seedProg.u.uSeedCount, count);
+      bindTarget(read);
+      drawQuad();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    })();
+
+    // --- one simulation substep -------------------------------
+    const texel = new Float32Array(2);
+    texel[0] = 1 / gw; texel[1] = 1 / gh;
+    let feed = 0, kill = 0;
+
+    function step() {
+      gl.useProgram(simProg.p);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, read.tex);
+      gl.uniform1i(simProg.u.uState, 0);
+      gl.uniform2fv(simProg.u.uTexel, texel);
+      gl.uniform1f(simProg.u.uFeed, feed);
+      gl.uniform1f(simProg.u.uKill, kill);
+      gl.uniform1f(simProg.u.uDa, 1.0);
+      gl.uniform1f(simProg.u.uDb, 0.5);
+      bindTarget(write);
+      drawQuad();
+      swap();
+    }
+
+    // --- gardener ---------------------------------------------
+    const dropData = new Float32Array(8 * 3);
+    function poke(count) {
+      const used = Math.max(1, Math.min(8, count));
+      for (let i = 0; i < used; i++) {
+        dropData[i * 3] = 0.06 + Math.random() * 0.88;
+        dropData[i * 3 + 1] = 0.06 + Math.random() * 0.88;
+        dropData[i * 3 + 2] = CONFIG.pokeRadius * (0.55 + Math.random());
+      }
+      gl.useProgram(pokeProg.p);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, read.tex);
+      gl.uniform1i(pokeProg.u.uState, 0);
+      gl.uniform3fv(pokeProg.u.uDrop, dropData);
+      gl.uniform1i(pokeProg.u.uDropCount, used);
+      bindTarget(write);
+      drawQuad();
+      swap();
+    }
+
+    // --- readability watchdog ---------------------------------
+    // A regime change can occasionally eat the colony. Rather than
+    // ever showing an empty dish, sample a small patch every so
+    // often and re-seed if the pattern has died out.
+    const probe = new Float32Array(24 * 14 * 4);
+    function meanB() {
+      try {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, read.fbo);
+        gl.readPixels(Math.floor(read.w / 2 - 12), Math.floor(read.h / 2 - 7),
+                      24, 14, gl.RGBA, gl.FLOAT, probe);
+        let sum = 0;
+        for (let i = 1; i < probe.length; i += 4) sum += probe[i];
+        return sum / (probe.length / 4);
+      } catch (e) {
+        return 1; // never re-seed on a platform that cannot read back
+      } finally {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      }
+    }
+
+    // --- glaze cross-fade state -------------------------------
+    // count is how many stops the shader walks, so it has to be at
+    // least the larger of the two ends or the longer glaze's tail
+    // would be dropped mid-morph.
+    const glaze = {
+      cur: new Float32Array(MAX_STOPS * 3), from: new Float32Array(MAX_STOPS * 3), to: new Float32Array(MAX_STOPS * 3),
+      pos: new Float32Array(MAX_STOPS), posFrom: new Float32Array(MAX_STOPS), posTo: new Float32Array(MAX_STOPS),
+      count: 0, countFrom: 0, countTo: 0,
+    };
+
+    // --- opening state ----------------------------------------
+    // Which regime and which glaze the piece opens on is random,
+    // so two loads do not look alike. Only the dense regimes are
+    // eligible openers — a sparse one as the very first impression
+    // would undersell the piece, though it is a fine place to
+    // arrive later in the cycle. The glaze is offset independently
+    // so the regime-to-glaze pairing varies as well.
+    const OPENERS = [0, 1, 2, 4, 5];
+    const startRegime = OPENERS[Math.floor(Math.random() * OPENERS.length)];
+    const glazeShift = Math.floor(Math.random() * GLAZES.length);
+
+    function loadGlaze(idx, into, posInto) {
+      const src = GLAZE_LINEAR[(((idx + glazeShift) % GLAZE_LINEAR.length) + GLAZE_LINEAR.length) % GLAZE_LINEAR.length];
+      into.fill(0);
+      if (posInto) posInto.fill(0);
+      for (let i = 0; i < src.length; i++) {
+        into[i * 3] = src[i][1][0];
+        into[i * 3 + 1] = src[i][1][1];
+        into[i * 3 + 2] = src[i][1][2];
+        if (posInto) posInto[i] = src[i][0];
+      }
+      return src.length;
+    }
+
+    // --- warm up ----------------------------------------------
+    // Prime the chemicals first. Warming up with the default feed
+    // and kill of zero would let the colony die before it is ever
+    // painted — feed is what keeps the substrate replenished.
+    feed = REGIMES[startRegime].f;
+    kill = REGIMES[startRegime].k;
+
+    // Two jobs: develop the colony so the first paint is a mature
+    // pattern rather than bare droplets, and measure the machine.
+    // The budget is wall-clock, so a machine that cannot afford a
+    // long warmup simply gets fewer steps instead of a frozen tab.
+    let warmupSteps = 0;
+    let msPerStep = 0;
+    (function warmup() {
+      const t0 = performance.now();
+      const batch = 40;
+      while (warmupSteps < CONFIG.warmupSteps) {
+        for (let i = 0; i < batch; i++) step();
+        warmupSteps += batch;
+        if (performance.now() - t0 > CONFIG.warmupBudgetMs) break;
+      }
+      const elapsed = performance.now() - t0;
+      msPerStep = elapsed / Math.max(1, warmupSteps);
+    })();
+
+    // --- running order ----------------------------------------
+    let regimeIndex = startRegime, phase = "hold", phaseStart = performance.now();
+    let label = REGIMES[startRegime].label;
+
+    function setRegime(index, now) {
+      regimeIndex = ((index % REGIMES.length) + REGIMES.length) % REGIMES.length;
+      const r = REGIMES[regimeIndex];
+      feed = r.f; kill = r.k;
+      glaze.count = loadGlaze(r.glaze, glaze.cur, glaze.pos);
+      glaze.from.set(glaze.cur);
+      glaze.to.set(glaze.cur);
+      glaze.posFrom.set(glaze.pos);
+      glaze.posTo.set(glaze.pos);
+      glaze.countFrom = glaze.countTo = glaze.count;
+      label = r.label;
+      caption.textContent = label;
+      phase = "hold";
+      phaseStart = now;
+    }
+    setRegime(startRegime, phaseStart);
+
+    function advance(now) {
+      const inPhase = (now - phaseStart) / 1000;
+      if (phase === "hold") {
+        if (inPhase < CONFIG.holdSeconds) return;
+        const next = (regimeIndex + 1) % REGIMES.length;
+        glaze.countFrom = loadGlaze(REGIMES[regimeIndex].glaze, glaze.from, glaze.posFrom);
+        glaze.countTo = loadGlaze(REGIMES[next].glaze, glaze.to, glaze.posTo);
+        glaze.count = Math.max(glaze.countFrom, glaze.countTo);
+        label = REGIMES[next].label;
+        caption.textContent = label;
+        phase = "morph";
+        phaseStart = now;
+        return;
+      }
+      if (inPhase >= CONFIG.morphSeconds) { setRegime(regimeIndex + 1, now); return; }
+
+      // Smoothstep, so the chemicals slide rather than jump.
+      const t = Math.min(1, inPhase / CONFIG.morphSeconds);
+      const e = t * t * (3 - 2 * t);
+      const a = REGIMES[regimeIndex], b = REGIMES[(regimeIndex + 1) % REGIMES.length];
+      feed = a.f + (b.f - a.f) * e;
+      kill = a.k + (b.k - a.k) * e;
+      for (let i = 0; i < MAX_STOPS * 3; i++) glaze.cur[i] = glaze.from[i] + (glaze.to[i] - glaze.from[i]) * e;
+      for (let i = 0; i < MAX_STOPS; i++) glaze.pos[i] = glaze.posFrom[i] + (glaze.posTo[i] - glaze.posFrom[i]) * e;
+    }
+
+    let nextPoke = phaseStart + CONFIG.pokeEverySeconds * 1000;
+    let nextWatchdog = phaseStart + CONFIG.watchdogSeconds * 1000;
+
+    // --- frame loop -------------------------------------------
+    // Pacing is governed by the rAF interval, with each frame's
+    // simulation work additionally capped by a wall-clock budget.
+    // Both are needed: a probe based on gl.finish() is not honest
+    // on every driver (SwiftShader reports 0ms while work is still
+    // queued), and rAF intervals alone lag by a frame. Start from
+    // what the warmup actually measured so the first seconds are
+    // already near the right quality.
+    let steps = msPerStep > 0
+      ? Math.max(CONFIG.minStepsPerFrame, Math.min(CONFIG.maxStepsPerFrame, Math.round(CONFIG.simBudgetMs / msPerStep)))
+      : CONFIG.stepsPerFrame;
+    let frameIndex = 0, last = performance.now(), paused = false;
+    document.addEventListener("visibilitychange", () => { paused = document.hidden; last = performance.now(); });
+
+    function runSteps() {
+      const t0 = performance.now();
+      for (let i = 0; i < steps; i++) {
+        step();
+        // Reading the clock every step costs more than the step
+        // does, so only check the budget every few substeps.
+        if ((i & 3) === 3 && performance.now() - t0 > CONFIG.simBudgetMs) break;
+      }
+    }
+
+    function frame(now) {
+      requestAnimationFrame(frame);
+      const interval = now - last;
+      last = now;
+      if (paused) return;
+
+      // Governor: back off hard on a slow frame, recover gently.
+      // Multiplicative back-off is what makes this settle in a
+      // handful of frames rather than a handful of minutes.
+      if (frameIndex++ > 1) {
+        if (interval > 34) steps = Math.max(CONFIG.minStepsPerFrame, Math.floor(steps * 0.6));
+        else if (interval < 19 && steps < CONFIG.maxStepsPerFrame) steps++;
+      }
+
+      advance(now);
+      if (now > nextPoke) { nextPoke = now + CONFIG.pokeEverySeconds * 1000; poke(Math.random() < 0.3 ? 2 : 1); }
+      if (now > nextWatchdog) { nextWatchdog = now + CONFIG.watchdogSeconds * 1000; if (meanB() < CONFIG.reviveBelow) poke(6); }
+
+      runSteps();
+
+      // --- paint ---------------------------------------------
+      gl.useProgram(showProg.p);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, read.tex);
+      gl.uniform1i(showProg.u.uState, 0);
+      gl.uniform2fv(showProg.u.uTexel, texel);
+      gl.uniform2fv(showProg.u.uFit, fit);
+      gl.uniform2fv(showProg.u.uOffset, offset);
+      // Relief scales with dish width so the perceived depth is the
+      // same whether the grid is 900 or 1700 cells across.
+      gl.uniform1f(showProg.u.uRelief, gw / 78);
+      gl.uniform3f(showProg.u.uLight, -0.42, 0.60, 0.68);
+      gl.uniform1f(showProg.u.uTime, now / 1000);
+      gl.uniform1f(showProg.u.uGrain, CONFIG.grain);
+      gl.uniform2f(showProg.u.uResolution, W, H);
+      gl.uniform1f(showProg.u.uSheen, 1.0);
+      gl.uniform1f(showProg.u.uLo, 0.07);
+      gl.uniform1f(showProg.u.uHi, 0.32);
+      gl.uniform3fv(showProg.u.uGlaze, glaze.cur);
+      gl.uniform1fv(showProg.u.uGlazePos, glaze.pos);
+      gl.uniform1i(showProg.u.uGlazeCount, glaze.count);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, W, H);
+      drawQuad();
+    }
+
+    requestAnimationFrame(frame);
+    document.body.classList.add("ready");
+    return true;
+  }
+
+  // ============================================================
+  //  CPU fallback — the same chemistry in JavaScript, on a much
+  //  smaller dish. Slower and softer, but it means the piece still
+  //  runs where WebGL2 float rendering is unavailable.
+  // ============================================================
+  function startCPU() {
+    const ctx = canvas.getContext("2d", { alpha: false });
+    if (!ctx) return false;
+
+    const aspect = window.innerWidth / Math.max(1, window.innerHeight);
+    const gh = 240;
+    const gw = Math.max(280, Math.round(gh * aspect));
+    const n = gw * gh;
+    let A = new Float32Array(n).fill(1);
+    let B = new Float32Array(n);
+    let A2 = new Float32Array(n), B2 = new Float32Array(n);
+
+    for (let y = 8; y < gh - 8; y += 12) {
+      for (let x = 8; x < gw - 8; x += 12) {
+        const cx = x + (Math.random() * 8 - 4), cy = y + (Math.random() * 8 - 4);
+        const r = 2 + Math.random() * 2;
+        for (let dy = -4; dy <= 4; dy++) {
+          for (let dx = -4; dx <= 4; dx++) {
+            const px = Math.round(cx + dx), py = Math.round(cy + dy);
+            if (px < 0 || py < 0 || px >= gw || py >= gh) continue;
+            if (Math.hypot(dx, dy) > r) continue;
+            const i = py * gw + px;
+            B[i] = 1; A[i] = 0.32;
+          }
+        }
+      }
+    }
+
+    const buf = document.createElement("canvas");
+    buf.width = gw; buf.height = gh;
+    const bctx = buf.getContext("2d");
+    const img = bctx.createImageData(gw, gh);
+
+    let feed = 0, kill = 0, regimeIndex = 0, phase = "hold", phaseStart = performance.now();
+    let stops = [];
+    const loadGlaze = (idx) => GLAZES[idx].stops.map(([p, hex]) => [p, hexToLinear(hex)]);
+
+    function setRegime(index, now) {
+      regimeIndex = ((index % REGIMES.length) + REGIMES.length) % REGIMES.length;
+      const r = REGIMES[regimeIndex];
+      feed = r.f; kill = r.k;
+      stops = loadGlaze(r.glaze);
+      caption.textContent = r.label;
+      phase = "hold"; phaseStart = now;
+    }
+    setRegime(0, phaseStart);
+
+    // ~1500 substeps to develop, then hand over to the frame loop.
+    for (let s = 0; s < 900; s++) {
+      for (let y = 1; y < gh - 1; y++) {
+        for (let x = 1; x < gw - 1; x++) {
+          const i = y * gw + x;
+          const a = A[i], b = B[i];
+          const lapA = (A[i - 1] + A[i + 1] + A[i - gw] + A[i + gw]) * 0.2
+            + (A[i - gw - 1] + A[i - gw + 1] + A[i + gw - 1] + A[i + gw + 1]) * 0.05 - a;
+          const lapB = (B[i - 1] + B[i + 1] + B[i - gw] + B[i + gw]) * 0.2
+            + (B[i - gw - 1] + B[i - gw + 1] + B[i + gw - 1] + B[i + gw + 1]) * 0.05 - b;
+          const re = a * b * b;
+          A2[i] = a + (lapA - re + feed * (1 - a));
+          B2[i] = b + (0.5 * lapB + re - (kill + feed) * b);
+        }
+      }
+      for (let x = 0; x < gw; x++) { A2[x] = A[x]; B2[x] = B[x]; const i = (gh - 1) * gw + x; A2[i] = A[i]; B2[i] = B[i]; }
+      for (let y = 0; y < gh; y++) { const i = y * gw; A2[i] = A[i]; B2[i] = B[i]; const j = i + gw - 1; A2[j] = A[j]; B2[j] = B[j]; }
+      let t = A; A = A2; A2 = t; t = B; B = B2; B2 = t;
+    }
+
+    const gl3 = [0, 0, 0];
+    function glazeAt(t, out) {
+      t = Math.max(0, Math.min(1, t));
+      let i = 0;
+      while (i < stops.length - 2 && t > stops[i + 1][0]) i++;
+      const [p0, c0] = stops[i], [p1, c1] = stops[i + 1];
+      const w = p1 > p0 ? Math.max(0, Math.min(1, (t - p0) / (p1 - p0))) : 0;
+      const e = w * w * (3 - 2 * w);
+      out[0] = c0[0] + (c1[0] - c0[0]) * e;
+      out[1] = c0[1] + (c1[1] - c0[1]) * e;
+      out[2] = c0[2] + (c1[2] - c0[2]) * e;
+      return out;
+    }
+
+    function resize() {
+      const dpr = Math.min(CONFIG.displayDPRCap, window.devicePixelRatio || 1);
+      canvas.width = Math.max(1, Math.floor(window.innerWidth * dpr));
+      canvas.height = Math.max(1, Math.floor(window.innerHeight * dpr));
+    }
+    window.addEventListener("resize", resize, { passive: true });
+    resize();
+
+    const enc = (v) => Math.max(0, Math.min(255, Math.round(Math.pow(Math.max(v, 0), 1 / 2.2) * 255)));
+    let paused = false;
+    document.addEventListener("visibilitychange", () => { paused = document.hidden; });
+
+    function substeps() {
+      for (let y = 1; y < gh - 1; y++) {
+        for (let x = 1; x < gw - 1; x++) {
+          const i = y * gw + x;
+          const a = A[i], b = B[i];
+          const lapA = (A[i - 1] + A[i + 1] + A[i - gw] + A[i + gw]) * 0.2
+            + (A[i - gw - 1] + A[i - gw + 1] + A[i + gw - 1] + A[i + gw + 1]) * 0.05 - a;
+          const lapB = (B[i - 1] + B[i + 1] + B[i - gw] + B[i + gw]) * 0.2
+            + (B[i - gw - 1] + B[i - gw + 1] + B[i + gw - 1] + B[i + gw + 1]) * 0.05 - b;
+          const re = a * b * b;
+          A2[i] = a + (lapA - re + feed * (1 - a));
+          B2[i] = b + (0.5 * lapB + re - (kill + feed) * b);
+        }
+      }
+      for (let x = 0; x < gw; x++) { A2[x] = A[x]; B2[x] = B[x]; const i = (gh - 1) * gw + x; A2[i] = A[i]; B2[i] = B[i]; }
+      for (let y = 0; y < gh; y++) { const i = y * gw; A2[i] = A[i]; B2[i] = B[i]; const j = i + gw - 1; A2[j] = A[j]; B2[j] = B[j]; }
+      let t = A; A = A2; A2 = t; t = B; B = B2; B2 = t;
+    }
+
+    let last = performance.now(), frameIndex = 0;
+
+    function frame(now) {
+      requestAnimationFrame(frame);
+      const interval = now - last;
+      last = now;
+      if (paused) return;
+
+      const inPhase = (now - phaseStart) / 1000;
+      if (phase === "hold" && inPhase >= CONFIG.holdSeconds) { phase = "morph"; phaseStart = now; }
+      else if (phase === "morph") {
+        const t = Math.min(1, inPhase / CONFIG.morphSeconds);
+        const e = t * t * (3 - 2 * t);
+        const a = REGIMES[regimeIndex], b = REGIMES[(regimeIndex + 1) % REGIMES.length];
+        feed = a.f + (b.f - a.f) * e;
+        kill = a.k + (b.k - a.k) * e;
+        if (t >= 1) setRegime(regimeIndex + 1, now);
+      }
+
+      if (frameIndex++ > 2) {
+        if (interval > 34) cpuSteps = Math.max(1, Math.floor(cpuSteps * 0.6));
+        else if (interval < 19 && cpuSteps < 6) cpuSteps++;
+      }
+      for (let s = 0; s < cpuSteps; s++) substeps();
+
+      const data = img.data;
+      for (let y = 0; y < gh; y++) {
+        for (let x = 0; x < gw; x++) {
+          const i = y * gw + x;
+          const b = B[i];
+          let h = (b - 0.08) / 0.26;
+          h = h < 0 ? 0 : h > 1 ? 1 : h;
+          h = h * h * (3 - 2 * h);
+          const xl = x > 0 ? i - 1 : i, xr = x < gw - 1 ? i + 1 : i;
+          const yu = y > 0 ? i - gw : i, yd = y < gh - 1 ? i + gw : i;
+          const slope = Math.min(1, Math.hypot(B[xr] - B[xl], B[yd] - B[yu]) * 12);
+          glazeAt(h, gl3);
+          const shade = (0.34 + 0.72 * h + 0.8 * slope) * (0.45 + 0.55 * h);
+          const o = i * 4;
+          data[o] = enc(gl3[0] * shade);
+          data[o + 1] = enc(gl3[1] * shade);
+          data[o + 2] = enc(gl3[2] * shade);
+          data[o + 3] = 255;
+        }
+      }
+      bctx.putImageData(img, 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(buf, 0, 0, canvas.width, canvas.height);
+    }
+
+    let cpuSteps = 2;
+    requestAnimationFrame(frame);
+    document.body.classList.add("ready");
+    return true;
+  }
+
+  let started = false;
+  try {
+    started = startWebGL();
+  } catch (e) {
+    console.warn("WebGL path failed; falling back to the CPU path.", e);
+    started = false;
+  }
+  if (!started) {
+    try {
+      if (!startCPU()) {
+        document.body.innerHTML =
+          '<p style="color:#8892a6;font:14px system-ui;padding:6vh 8vw">This visualization needs canvas support.</p>';
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+})();
+</script>
+</body>
+</html>

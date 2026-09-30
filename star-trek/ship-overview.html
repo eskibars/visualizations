@@ -433,19 +433,43 @@
       color: rgba(159,246,255,.95);
       font-size: clamp(10px, .85vw, 14px);
       white-space:nowrap;
+      flex: 0 0 auto;
+      position: relative;
+      z-index: 1;
+    }
+    /* The message scrolls, so it must be clipped to the area *after* the
+       "OPS LOG" label. Without a clipping viewport the marquee slides
+       underneath the label and the two overlap. */
+    .ticker .viewport{
+      position: relative;
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
     }
     .ticker .msg{
       color: rgba(207,238,255,.90);
       font-variant-numeric: tabular-nums;
       letter-spacing:.06em;
       font-size: clamp(10px, .86vw, 14px);
+      /* A marquee track: the message is rendered twice and the track slides by
+         exactly half its width, so the text loops seamlessly and the bar is
+         never empty. The previous single-copy version translated 200% of a
+         one-viewport-wide body, which left OPS LOG blank for half of every
+         cycle. Each copy carries its own trailing gap so one half-width step
+         lands exactly on the duplicate. */
+      display:flex;
+      width:max-content;
       white-space:nowrap;
-      animation: marquee 18s linear infinite;
+      animation: marquee 26s linear infinite;
       will-change: transform;
     }
+    .ticker .msg .seg{
+      flex: 0 0 auto;
+      padding-right: 6em;
+    }
     @keyframes marquee{
-      from{ transform:translateX(8%) }
-      to{ transform:translateX(-110%) }
+      from{ transform:translateX(0) }
+      to{ transform:translateX(-50%) }
     }
 
     /* Responsive fallback */
@@ -659,7 +683,9 @@
 
       <div class="ticker">
         <div class="tag">OPS LOG</div>
-        <div class="msg" id="tickerMsg">Initializing telemetry stream… calibrating sensor lattice… syncing EPS node map…</div>
+        <div class="viewport">
+          <div class="msg" id="tickerMsg"><span class="seg">Initializing telemetry stream… calibrating sensor lattice… syncing EPS node map…</span><span class="seg">Initializing telemetry stream… calibrating sensor lattice… syncing EPS node map…</span></div>
+        </div>
       </div>
     </div>
 
@@ -905,10 +931,12 @@
           ? "drop-shadow(0 0 10px rgba(255,59,59,.20)) drop-shadow(0 0 30px rgba(86,236,252,.20))"
           : "drop-shadow(0 0 7px rgba(86,236,252,.38)) drop-shadow(0 0 18px rgba(86,236,252,.18))";
 
-        // New ticker line
+        // New ticker line. Both marquee copies must carry the same text or the
+        // loop shows a visible seam.
         const pool = phrases[next];
-        tickerMsgEl.textContent = pool[Math.floor(Math.random()*pool.length)];
-        // restart marquee
+        const line = pool[Math.floor(Math.random()*pool.length)];
+        for (const seg of tickerMsgEl.children) seg.textContent = line;
+        // restart marquee from the top of the track
         tickerMsgEl.style.animation = "none";
         tickerMsgEl.offsetHeight; // reflow
         tickerMsgEl.style.animation = "";
