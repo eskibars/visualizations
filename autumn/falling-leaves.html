@@ -42,7 +42,7 @@
   const CONFIG = {
     dprCap: 1.6,
 
-    waterY: 0.74,
+    waterY: 0.76,           // the stream's far edge: the horizon the trees stand behind
     leavesAir: 140,          // leaves airborne at once
     gustEvery: [5, 11],      // s — wind gust releases a batch
 
@@ -54,6 +54,11 @@
   const ctx = canvas.getContext('2d', { alpha: false });
   let W = 0, H = 0, DPR = 1, S = 1;
   let waterY = 0;
+  // Pre-rendered tree layers are rasterised at this resolution and scaled down
+  // when blitted. Above 1x the thin trunks gain nothing measurable but each
+  // layer costs more to downscale every frame, which is the whole frame budget
+  // on a software rasteriser, so these stay at 1.
+  const RES = { far: 1, mid: 1, near: 1 };
 
   function rand(a, b) { return a + Math.random() * (b - a); }
   const pick = (arr) => arr[(Math.random() * arr.length) | 0];
@@ -99,61 +104,19 @@
   }
 
   // -------------------- trees --------------------
-  // pre-rendered canopy blobs + trunk skeletons, three depth layers
-  let treeLayers = [];
+  // "Lollipop" trees read as a beach umbrella with a ball balanced beside it:
+  // thin black strokes that stop in mid-air, and a cluster of glossy spheres
+  // hanging off to one side. So the trunk is a real tapering shape whose top
+  // curve continues into a *recursive* skeleton, every twig end carries a few
+  // small foliage clumps (the canopy is what the skeleton grew, not a
+  // free-floating pile), the trunk leans the way its canopy leans so the mass
+  // balances over the base, and the skeleton is drawn before the leaves it
+  // holds. Trees are built back-to-front into one canvas per depth band, so a
+  // nearer band covers a farther one instead of overlapping tree by tree.
 
-  function makeTreeLayer(count, yBase, scale, blurP, dark, trunksOnly) {
-    const c = document.createElement('canvas');
-    c.width = Math.ceil(W); c.height = Math.ceil(yBase + 8);
-    const g = c.getContext('2d');
-    for (let i = 0; i < count; i++) {
-      const tx = rand(-0.02, 1.02) * W;
-      const th = rand(0.34, 0.62) * scale * H;
-      const tw = th * rand(0.055, 0.085);
-      // trunk
-      g.fillStyle = dark ? '#241207' : '#3a2210';
-      g.beginPath();
-      g.moveTo(tx - tw / 2, yBase);
-      g.quadraticCurveTo(tx - tw * 0.3, yBase - th * 0.5, tx - tw * 0.12, yBase - th);
-      g.lineTo(tx + tw * 0.12, yBase - th);
-      g.quadraticCurveTo(tx + tw * 0.3, yBase - th * 0.5, tx + tw / 2, yBase);
-      g.closePath();
-      g.fill();
-      // branches
-      g.strokeStyle = g.fillStyle;
-      g.lineWidth = tw * 0.32;
-      for (let b = 0; b < 4; b++) {
-        const by = yBase - th * rand(0.55, 0.9);
-        const side = b % 2 ? 1 : -1;
-        g.beginPath();
-        g.moveTo(tx, by);
-        g.quadraticCurveTo(tx + side * tw * 2, by - th * 0.08, tx + side * tw * rand(2.6, 4), by - th * rand(0.1, 0.22));
-        g.stroke();
-      }
-      if (trunksOnly) continue;
-      // canopy: clustered blobs in golds
-      const blobs = 9 + (Math.random() * 8) | 0;
-      for (let b = 0; b < blobs; b++) {
-        const r = rand(th * 0.08, th * 0.17);
-        const bx = tx + rand(-tw * 3.6, tw * 3.6);
-        const byy = yBase - th - rand(-th * 0.16, th * 0.30);
-        const col = pick(CONFIG.treeGold);
-        const grad = g.createRadialGradient(bx, byy, 0, bx, byy, r);
-        if (dark) {
-          grad.addColorStop(0, col);
-          grad.addColorStop(1, '#241207');
-        } else {
-          grad.addColorStop(0, shade(col, 1.25));
-          grad.addColorStop(1, shade(col, 0.72));
-        }
-        g.fillStyle = grad;
-        g.beginPath();
-        g.arc(bx, byy, r, 0, Math.PI * 2);
-        g.fill();
-      }
-    }
-    return c;
-  }
+  const TREE_DEPTH = 5;
+  const DISTANT_GOLD = ['#9d4e1a', '#b06427', '#843f14'];
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
   function shade(hex, k) {
     const n = parseInt(hex.slice(1), 16);
@@ -161,12 +124,161 @@
     return `rgb(${f(n >> 16)},${f((n >> 8) & 255)},${f(n & 255)})`;
   }
 
-  let farTrees, midTrees, nearTrunks;
+  // A few clumps of leaves at the end of one twig. Small and overlapping:
+  // foliage should be the sum of many clumps, never one sphere sitting on a
+  // stick like a ball on a plinth.
+  function leafCluster(g, x, y, r, distant) {
+    const n = 3 + ((Math.random() * 3) | 0);
+    for (let i = 0; i < n; i++) {
+      const cx = x + rand(-r * 0.7, r * 0.7);
+      const cy = y + rand(-r * 0.6, r * 0.5);
+      const cr = r * rand(0.45, 0.80);
+      const col = distant ? pick(DISTANT_GOLD) : pick(CONFIG.treeGold);
+      const grad = g.createRadialGradient(cx - cr * 0.3, cy - cr * 0.34, cr * 0.08, cx, cy, cr);
+      if (distant) {
+        grad.addColorStop(0, shade(col, 1.04));
+        grad.addColorStop(1, shade(col, 0.72));
+      } else {
+        grad.addColorStop(0, shade(col, 1.10));
+        grad.addColorStop(0.55, col);
+        grad.addColorStop(1, shade(col, 0.70));
+      }
+      g.fillStyle = grad;
+      g.beginPath();
+      g.arc(cx, cy, cr, 0, Math.PI * 2);
+      g.fill();
+    }
+  }
+
+  // One limb: it rises, then forks. Limbs near the trunk climb steeply and the
+  // outer twigs flatten out and spread sideways, which is what gives the
+  // canopy a wide top instead of a vertical column of blobs.
+  function branch(g, x, y, dir, len, w, color, depth, distant, maxClump) {
+    const rise = 0.16 + 0.07 * depth;
+    const tipX = x + dir * len;
+    const tipY = y - len * rise;
+
+    g.beginPath();
+    g.moveTo(x, y);
+    g.quadraticCurveTo(x + dir * len * 0.4, y - len * rise * 0.5, tipX, tipY);
+    g.lineWidth = w;
+    g.lineCap = 'round';
+    g.strokeStyle = color;
+    g.stroke();
+
+    if (depth <= 0) {
+      leafCluster(g, tipX, tipY, Math.min(len, maxClump), distant);
+      return;
+    }
+
+    const kids = depth >= 3 && Math.random() < 0.6 ? 3 : 2;
+    for (let i = 0; i < kids; i++) {
+      // the leading shoot keeps going; the others fork off to either side
+      const spread = i === 0 ? rand(0.85, 1.15) : rand(0.75, 1.30) * (Math.random() < 0.5 ? 1 : -1);
+      const next = clamp(dir * spread, -2.4, 2.4);
+      branch(g, tipX, tipY, next, len * rand(0.70, 0.86), w * 0.62, color, depth - 1, distant, maxClump);
+    }
+  }
+
+  function drawTrunk(g, x0, y0, len, w0, lean, color, distant, depth) {
+    // Foliage clumps are capped in size. Left uncapped they grow with the tree,
+    // and a big tree stops looking like a canopy and starts looking like a
+    // bunch of balloons. Too small and the skeleton shows through as bare
+    // diagonals, so this wants to stay in the range where clumps just touch.
+    const maxClump = len * 0.2;
+    const x1 = x0 + lean * len * 3;
+    const y1 = y0 - len;
+    g.beginPath();
+    g.moveTo(x0 - w0 / 2, y0);
+    g.quadraticCurveTo(x0 - w0 * 0.26, y0 - len * 0.56, x1 - w0 * 0.15, y1);
+    g.lineTo(x1 + w0 * 0.15, y1);
+    g.quadraticCurveTo(x0 + w0 * 0.26, y0 - len * 0.56, x0 + w0 / 2, y0);
+    g.closePath();
+    g.fillStyle = color;
+    g.fill();
+
+    // a flare where the trunk meets the ground, so it is planted rather than cut
+    g.beginPath();
+    g.moveTo(x0 - w0 * 1.35, y0 + w0 * 0.1);
+    g.quadraticCurveTo(x0 - w0 * 0.55, y0 - w0 * 0.6, x0 + w0 * 0.55, y0 - w0 * 0.6);
+    g.quadraticCurveTo(x0 + w0 * 0.7, y0 - w0 * 0.55, x0 + w0 * 1.35, y0 + w0 * 0.1);
+    g.closePath();
+    g.fill();
+
+    // one or two leaders continue the trunk; the crown spreads from there
+    branch(g, x1, y1, lean * 0.6 + rand(-0.25, 0.25), len * rand(0.52, 0.68), w0 * 0.6, color, depth, distant, maxClump);
+    if (Math.random() < 0.55) {
+      branch(g, x1, y1 - len * rand(0.05, 0.2), rand(-1.15, -0.35), len * rand(0.36, 0.52), w0 * 0.42, color, depth - 1, distant, maxClump);
+    }
+
+    // A tall bare pole with a pillow of leaves on top still reads as a lollipop.
+    // Carry a couple of limbs out of the upper trunk as well, so the crown
+    // starts lower down and the trunk disappears into foliage.
+    for (let k = 0; k < 2; k++) {
+      const at = rand(0.52, 0.88);
+      const side = Math.random() < 0.5 ? 1 : -1;
+      branch(g, x0 + lean * len * 3 * at, y0 - len * at,
+        side * rand(0.55, 1.25), len * rand(0.30, 0.46), w0 * 0.40, color, depth - 2, distant, maxClump);
+    }
+  }
+
+  function drawTree(g, x, yBase, height, color, distant) {
+    const head = rand(-0.3, 0.3);          // which way this tree leans
+    const tw = height * rand(0.030, 0.040);
+    drawTrunk(g, x, yBase, height * 0.30, tw, head * 0.16, color, distant, TREE_DEPTH);
+  }
+
+  function makeTreeLayer(count, yBase, scale, distant, bands, res) {
+    const LR = res;
+    const c = document.createElement('canvas');
+    c.cssH = Math.ceil(yBase + 8);
+    c.width = Math.ceil(W * LR);
+    c.height = Math.ceil(c.cssH * LR);
+    const g = c.getContext('2d');
+    g.setTransform(LR, 0, 0, LR, 0, 0);
+    const color = distant ? '#2c1709' : '#3a2210';
+
+    // Shuffle the back-to-front slots first, so planting order does not follow
+    // the draw order (which would put the far half of every clump behind the
+    // near half). Nearer trees stand a little lower on the bank and are drawn
+    // last, so their trunks pass in front of the canopies behind them.
+    const slots = [];
+    for (let i = 0; i < count; i++) {
+      const depth = (i + Math.random()) / count;
+      const band = bands ? bands[i % bands.length] : [-0.03, 1.03];
+      slots.push({
+        depth,
+        x: rand(band[0], band[1]) * W,
+        height: rand(0.30, 0.58) * scale * H * (0.85 + 0.3 * depth),
+        dark: distant || Math.random() < 0.35,
+      });
+    }
+    slots.sort((a, b) => a.depth - b.depth);
+
+    for (const t of slots) {
+      const y = yBase - Math.pow(t.depth, 1.6) * scale * H * 0.03;
+      drawTree(g, t.x, y, t.height, t.dark ? '#2c1709' : color, t.dark);
+    }
+    return c;
+  }
+
+  let farTrees, midTrees, nearTrees;
+
+  // Pre-rendered layers are wider than the viewport in pixels, so they must
+  // always be blitted at their CSS size, never at their intrinsic pixel size.
+  function drawLayer(img) {
+    ctx.drawImage(img, 0, 0, W, img.cssH);
+  }
 
   function buildTrees() {
-    farTrees = makeTreeLayer(8, H * 0.70, 0.42, 3, false, false);
-    midTrees = makeTreeLayer(5, H * 0.82, 0.62, 1, false, false);
-    nearTrunks = makeTreeLayer(3, H * 1.02, 1.15, 0, true, true);
+    // Every tree stands on the far bank, just above the stream: the waterline is
+    // the horizon, and the water (drawn after the trees) covers the last few
+    // pixels of each trunk so the roots sit behind it instead of hovering over
+    // the surface. Depth comes from scale, from how dark the foliage is, and
+    // from drawing order: far band first, the big near trees last.
+    farTrees = makeTreeLayer(16, waterY - 3, 0.34, true, null, RES.far);
+    midTrees = makeTreeLayer(8, waterY - 1, 0.62, false, null, RES.mid);
+    nearTrees = makeTreeLayer(2, waterY + 3, 1.10, false, [[0.02, 0.26], [0.74, 0.98]], RES.near);
   }
 
   // -------------------- leaves --------------------
@@ -239,7 +351,7 @@
     mistBlobs = [];
     for (let i = 0; i < 7; i++) {
       mistBlobs.push({
-        x: Math.random(), y: rand(0.42, 0.66),
+        x: Math.random(), y: rand(0.46, 0.80),
         r: rand(0.08, 0.15),
         a: rand(0.04, 0.08),
         drift: rand(0.004, 0.014) * (Math.random() < 0.5 ? 1 : -1),
@@ -258,13 +370,13 @@
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, W, waterY);
 
-    // low sun glow behind the far ridge
+    // low sun glow behind the far trees
     ctx.save();
     ctx.beginPath();
     ctx.rect(0, 0, W, waterY);
     ctx.clip();
     ctx.globalCompositeOperation = 'screen';
-    const sx = W * 0.72, sy = H * 0.62;
+    const sx = W * 0.72, sy = waterY;
     const sg = ctx.createRadialGradient(sx, sy, 0, sx, sy, W * 0.35);
     const a = 0.20 + 0.03 * Math.sin(time * 0.2);
     sg.addColorStop(0, `rgba(255, 220, 140, ${a})`);
@@ -274,31 +386,56 @@
     ctx.restore();
   }
 
+  // The far bank the trees stand on, as a soft shadowed strip right at the
+  // waterline. Without it the trunks would end in a line of hard cut-offs
+  // against the sky; with it they stand on land that the water then laps.
+  function drawFarBank() {
+    const h = H * 0.018;
+    const g = ctx.createLinearGradient(0, waterY - h, 0, waterY);
+    g.addColorStop(0, 'rgba(48,28,10,0)');
+    g.addColorStop(0.55, 'rgba(42,24,8,0.55)');
+    g.addColorStop(1, 'rgba(30,17,5,0.9)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, waterY - h, W, h);
+  }
+
   function drawTrees() {
-    // far layer sits behind mist, mid above it
-    ctx.drawImage(farTrees, 0, 0);
+    drawLayer(farTrees);
+    drawFarBank();
   }
 
   function drawMidTrees() {
-    ctx.drawImage(midTrees, 0, 0);
+    drawLayer(midTrees);
   }
-
   function drawStream(time) {
     const wy = waterY;
     const h = H - wy;
     const g = ctx.createLinearGradient(0, wy, 0, H);
-    g.addColorStop(0, '#b0742e');
-    g.addColorStop(0.25, '#6b4520');
-    g.addColorStop(1, '#31200e');
+    g.addColorStop(0, '#8a5a24');
+    g.addColorStop(0.25, '#5c3b1a');
+    g.addColorStop(1, '#2b1c0c');
     ctx.fillStyle = g;
     ctx.fillRect(0, wy, W, h);
 
-    // mirrored far trees, rippled and faint
+    // mirrored mid trees, faint and half-swallowed by the near edge
     ctx.save();
-    ctx.globalAlpha = 0.16;
+    ctx.beginPath();
+    ctx.rect(0, wy, W, h);
+    ctx.clip();
+    ctx.globalAlpha = 0.15;
     ctx.translate(0, waterY * 2);
     ctx.scale(1, -1);
-    ctx.drawImage(farTrees, 0, 0);
+    drawLayer(midTrees);
+    ctx.restore();
+
+    // a dark scrim at the waterline, so the reflection starts in shadow the way
+    // a real one does and the join does not read as a hard cut
+    ctx.save();
+    const sgTop = ctx.createLinearGradient(0, wy, 0, wy + h * 0.34);
+    sgTop.addColorStop(0, 'rgba(28,16,5,0.55)');
+    sgTop.addColorStop(1, 'rgba(28,16,5,0)');
+    ctx.fillStyle = sgTop;
+    ctx.fillRect(0, wy, W, h * 0.34);
     ctx.restore();
 
     // sun streak on the water
@@ -389,8 +526,8 @@
     }
   }
 
-  function drawNearTrunks() {
-    ctx.drawImage(nearTrunks, 0, 0);
+  function drawNearTrees() {
+    drawLayer(nearTrees);
   }
 
   // -------------------- resize --------------------
@@ -457,9 +594,10 @@
     drawMist(time, dt);
     drawMidTrees();
     drawStream(time);
+    drawMist(time, dt);
     drawFloatLeaves(time);
     drawAirLeaves(time);
-    drawNearTrunks();
+    drawNearTrees();
 
     if (!ready) { ready = true; document.body.classList.add('ready'); }
     requestAnimationFrame(frame);

@@ -39,6 +39,23 @@
  *      the bloom is a separate high-threshold read of the same buffer, so the
  *      dark water stays dark while the foam blooms.
  *
+ * Where the light is allowed to go
+ * --------------------------------
+ * The scene only reads as a lit *sea* if the light stays in the water, so the
+ * bounds are explicit rather than left to a fading falloff:
+ *
+ *   - The bloom is blurred in place, never scaled about the frame centre. A
+ *     scale is a translation away from the centre, which drops a lit crest
+ *     sitting below it further down the frame — onto the sand.
+ *   - Light on the beach is a reflection, so its reach is set by geometry
+ *     (stamp radius * reflectK) and clamped to a short band below the
+ *     waterline. Nothing else is drawn there.
+ *   - A grain's size is bounded near its crest's thickness; its class changes
+ *     brightness, not radius. Radius is what lets a few hundred stamps merge
+ *     into a sheet of haze.
+ *   - The waterline keeps one deliberately hard edge, so the eye can tell where
+ *     the sea stops and the sand begins.
+ *
  * Static scenery — stars, dust lane, clouds, moon, sea and sand gradients,
  * grain and vignette — is painted once per resize into an offscreen canvas,
  * so a frame costs one background blit, a few narrow reflection blits, one
@@ -51,14 +68,33 @@
     dprCap: 1.5,
     horizonAt: 0.345,     // where sky meets sea
     shoreAt: 0.735,       // where sea meets wet sand
-    fieldScale: 0.38,     // glow buffer resolution, relative to CSS pixels
+    fieldScale: 0.50,     // glow buffer resolution, relative to CSS pixels
     bands: 7,             // breaking crests, far to near
     plankton: 620,        // flecks drifting in the water column
     sandFlecks: 300,      // marks cooling on the sand
     moon: { x: 0.822, y: 0.128, r: 0.0158 },
-    haloScale: 2.15,      // width of the main bloom pass, in screen widths
+    // Bloom: a bounded halo around the lit cores only. It is blurred in place
+    // rather than scaled, because scaling about the frame centre translates
+    // light downwards and paints the beach with the water's glow.
+    bloomScale: 0.35,     // bloom buffer resolution, relative to the glow field
+    bloomRadius: 3,       // box blur radius, in bloom-buffer pixels
+    // Strength of the halo added back. Kept modest on purpose: the halo is
+    // meant to put colour back into the hot cores, not to become its own layer
+    // of atmosphere over the sea.
+    bloomAmt: 0.60,       // strength of the halo that is added back
     hotCut: 0.30,         // field value above which light starts to bloom
+    // Past this brightness (as a fraction of a full-white core) the halo stops
+    // being drawn. A halo that fades out gradually is a halo that reaches the
+    // whole frame; this keeps it around the cores and nowhere else.
+    haloCull: 0.30,
     reflectK: 0.44,       // vertical squash of the wet-sand reflection
+    // Light on the sand is strictly a reflection, and a reflection cannot
+    // reach further down the beach than the light it mirrors is up the face of
+    // the wave. The window is fixed by geometry (stamp radius * reflectK), and
+    // the band below it is a hard cut standing in for the wet/dry sand line.
+    reflectMax: 46,       // px below the waterline the reflection may reach
+    reflectFade: 0.45,    // softness of the cut at that limit
+    sandGlowK: 1.0,       // strength of the reflection and of the sand marks
     wash: 1.0,            // brightness of the foam line at the waterline
   };
 
@@ -73,6 +109,12 @@
 
   const bgCv = document.createElement('canvas');
   const bgCx = bgCv.getContext('2d');
+
+  let bloomTmp = null;
+
+  // Quarter-ish resolution buffer the bloom is blurred and culled through.
+  const bloomCv = document.createElement('canvas');
+  const bloomCx = bloomCv.getContext('2d', { willReadFrequently: true });
 
   let FIELD = new Float32Array(1);
   const LUT = new Uint8Array(256 * 3);
@@ -293,12 +335,12 @@
     g.fillStyle = sand;
     g.fillRect(0, shoreY - 4, W, H - shoreY + 4);
 
-    const sheen = g.createLinearGradient(0, shoreY - 4, 0, shoreY + H * 0.07);
-    sheen.addColorStop(0, 'rgba(56,158,172,0.09)');
-    sheen.addColorStop(0.5, 'rgba(56,158,172,0.03)');
+    const sheen = g.createLinearGradient(0, shoreY - 4, 0, shoreY + H * 0.055);
+    sheen.addColorStop(0, 'rgba(56,158,172,0.055)');
+    sheen.addColorStop(0.45, 'rgba(56,158,172,0.018)');
     sheen.addColorStop(1, 'rgba(56,158,172,0)');
     g.fillStyle = sheen;
-    g.fillRect(0, shoreY - 4, W, H * 0.075);
+    g.fillRect(0, shoreY - 4, W, H * 0.058);
 
     // --- sand speckle, coarser close to the viewer
     for (let i = 0; i < 4200; i++) {
@@ -346,15 +388,15 @@
       const s = Math.random() * 100;
       const b = {
         z, baseY,
-        thick: lerp(4.5, 58, Math.pow(z, 1.7)),
-        bow: lerp(1.2, 22, Math.pow(z, 2.0)),
+        thick: lerp(4.5, 56, Math.pow(z, 1.7)),
+        bow: lerp(1.2, 15, Math.pow(z, 2.0)),
         wobAmp: lerp(0.9, 7.0, Math.pow(z, 1.35)),
         wob: { a: s, b: s * 1.71 + 2.1, c: s * 0.63 + 5.4, d: s * 2.93 + 0.7 },
         v: lerp(13, 112, Math.pow(z, 1.25)),
         bright: lerp(0.10, 1.0, Math.pow(z, 0.7)),
         cycle: rand(3.6, 7.4),
         fill: Math.random(),
-        grainN: Math.round(lerp(120, 420, Math.pow(z, 1.2))),
+        grainN: Math.round(lerp(150, 560, Math.pow(z, 1.2))),
         glow: 0, y: 0, state: 'advance', t0: 0,
         foam: [],
       };
@@ -378,8 +420,10 @@
 
       // Foam grains: stable across frames so patches do not shimmer like
       // static, but each carries its own flicker phase so light travels.
-      // Sizes are hierarchical — a few big clumps, many small flecks — because
-      // uniform blobs read as cotton wool rather than as turbulent foam.
+      // `r` is a *brightness* class, not a size: a few big clumps, many small
+      // flecks. Size is kept in a narrow band below, because radius is what sets
+      // how far a grain's light reaches — wide enough and a few hundred of them
+      // stop reading as turbulent foam and start reading as haze over the water.
       for (let k = 0; k < b.grainN; k++) {
         const clump = Math.random() < 0.13;
         b.foam.push({
@@ -408,7 +452,9 @@
     for (let i = 0; i < CFG.sandFlecks; i++) {
       sandFlecks.push({
         x: Math.random() * W,
-        y: rand(shoreY - 6, H),
+        // Stored as a depth below the waterline, not an absolute row, so a
+        // resize cannot slide the marks down the open beach.
+        d: rand(0, CFG.reflectMax * 0.75),
         life: rand(0, 1),
         rate: rand(0.05, 0.26),
         r: rand(0.6, 2.1),
@@ -442,6 +488,8 @@
 
     glowCv.width = hotCv.width = FW;
     glowCv.height = hotCv.height = FH;
+    bloomCv.width = Math.max(8, Math.ceil(FW * CFG.bloomScale));
+    bloomCv.height = Math.max(8, Math.ceil(FH * CFG.bloomScale));
     glowImg = glowCx.createImageData(FW, FH);
     glowPix = glowImg.data;
     hotImg = hotCx.createImageData(FW, FH);
@@ -542,12 +590,14 @@
 
       // A faint swell body under the foam, following the same envelope, so the
       // wave has a shape to ride on instead of foam floating on black water.
+      // Kept low and flat: the surround is what a lifted glow widens until it
+      // stops being surf and starts being atmosphere.
       const bodyStep = Math.max(6, Math.round(W / 90));
       for (let x = 0; x <= W; x += bodyStep) {
         const env = envelope(b, x * invW, t);
         if (env < 0.05) continue;
-        stamp(x, crestY(b, x), b.thick * 1.9,
-              b.glow * b.bright * env * 0.055, receding ? 0.5 : 0.9);
+        stamp(x, crestY(b, x), b.thick * 1.35,
+              b.glow * b.bright * env * 0.060, receding ? 0.5 : 0.9);
       }
 
       for (let k = 0; k < b.foam.length; k += grainStep) {
@@ -565,28 +615,41 @@
                   * (0.30 + own * 1.10);
         if (lit < 0.030) continue;
 
-        const rad = b.thick * (0.34 + f.r * 0.75) * (0.78 + own * 0.40);
-        const y = crestY(b, x) + f.dy * b.thick * 1.5;
-        stamp(x, y, rad, lit * 0.50, receding ? 0.55 : 1);
+        // Radius is bounded around the crest's own thickness; the grain's class
+        // leans towards brightness instead. Density, not size, is what makes the
+        // stamps read as one turbulent mass rather than as separate blobs.
+        const rr = 0.30 + f.r * 0.30;
+        const rad = b.thick * rr * (0.80 + own * 0.34);
+        const y = crestY(b, x) + f.dy * b.thick * 1.2;
+        stamp(x, y, rad, lit * 0.58 * (0.74 + f.r * 0.20), receding ? 0.55 : 1);
 
         // Wet-sand reflection: only light close to the waterline smears onto
-        // the beach, and it dims with distance from it.
+        // the beach. The reach is bounded by the geometry rather than left
+        // open, so the glowing water cannot trail light down the sand and read
+        // as fog sitting on the beach.
         const above = shoreY - y;
-        if (b.z > 0.35 && above > -6 && above < 105) {
-          const fade = 1 - above / 105;
-          stamp(x, shoreY + above * CFG.reflectK, rad * 1.35,
-                lit * 0.50 * 0.36 * fade * fade, 0.5);
+        if (b.z > 0.35 && above > -6) {
+          const reach = (rad * 1.35) * CFG.reflectK;
+          if (above < reach + CFG.reflectMax * CFG.reflectFade) {
+            const edge = CFG.reflectMax * CFG.reflectFade;
+            const fade = 1 - clamp((above * CFG.reflectK - (reach - edge)) / edge, 0, 1);
+            stamp(x, shoreY + above * CFG.reflectK, rad * 1.35,
+                  lit * 0.50 * 0.34 * CFG.sandGlowK * fade * fade, 0.45);
+          }
         }
       }
     }
 
-    // Water column: faint bioluminescence everywhere the water has been stirred.
+    // Water column: faint bioluminescence where the water has been stirred.
+    // The sparkle falls off towards the horizon, because those far lit grains
+    // are the ones a wide soft bloom used to smear into a sky-wide blue haze.
     for (let i = 0; i < plankton.length; i++) {
       const p = plankton[i];
       const tw = 0.5 + 0.5 * Math.sin(t * p.sp * 1.6 + p.ph);
       const depth = clamp((p.y - horizonY) / Math.max(1, shoreY - horizonY), 0, 1);
-      stamp(p.x + Math.sin(t * 0.19 + p.ph) * 5, p.y, p.r * 1.9,
-            0.012 + tw * 0.048 * (0.25 + depth * 0.9));
+      const far = 0.42 + 0.58 * depth;
+      stamp(p.x + Math.sin(t * 0.19 + p.ph) * 5, p.y, p.r * 1.6,
+            (0.012 + tw * 0.048 * (0.25 + depth * 0.9)) * far);
     }
 
     // Moon path: loose sparkles across the glitter column, never a solid beam.
@@ -602,8 +665,10 @@
       stamp(x, y, 1.4 + spread * 0.18, 0.22 * s * (1 - f * 0.25));
     }
 
-    // The last wash up the sand: a bright foam line right at the waterline,
-    // trailed by stepped swashes so the edge never reads as a ruler.
+    // The waterline itself: a thin bright line hugging the shore, with a tight
+    // swash just above it and nothing pushed down the beach. This is the one
+    // deliberate hard edge in the scene — without it the glow bleeds into the
+    // sand and reads as blue fog washing in and out instead of a lit sea.
     const washPhase = (t * 0.19) % 1;
     for (let s = 0; s < 3; s++) {
       const up = Math.max(0, 1 - (((washPhase + s * 0.055) % 1) * 3.2));
@@ -611,28 +676,34 @@
       for (let px = 0; px < FW; px++) {
         const x = (px + 0.5) / FS;
         const n = wobble(x * 1.15, { a: 11, b: 3.3, c: 8.1, d: 5.7 });
-        const gaps = (0.30 + 0.70 * (0.5 + 0.5 * Math.sin(x * 0.0092 + 2.1)))
-                   * (0.60 + 0.40 * Math.sin(x * 0.037 + 4.7));
-        const y = shoreY + n * 2.2 + H * 0.022 * (1 - up) - s * 2.0;
-        const a = CFG.wash * fade * gaps
-                * (0.16 + 0.55 * up) * (0.55 + 0.45 * Math.sin(x * 0.021 + 1.3));
-        stamp(x, y, 2.6 + s * 1.8, a * 0.55, 0.55);
+        const gaps = (0.34 + 0.66 * (0.5 + 0.5 * Math.sin(x * 0.0092 + 2.1)))
+                   * (0.62 + 0.38 * Math.sin(x * 0.037 + 4.7));
+        const mod = gaps * fade * (0.60 + 0.40 * Math.sin(x * 0.021 + 1.3));
+        // The line sits right on the waterline and stays there; the swash only
+        // ever moves seaward of it.
+        const y = shoreY + n * 2.0 - s * 2.2 * (0.4 + up * 0.6);
+        stamp(x, y, 2.5 + s * 1.4, CFG.wash * mod * (0.30 + 0.42 * up) * 0.30, 0.55);
+        // A tight core keeps the edge crisp under the soft glow around it.
+        stamp(x, y, 1.15, CFG.wash * mod * 0.42, 0.55);
       }
     }
 
-    // Marks left on the sand, cooling like embers.
+    // Marks left on the sand, cooling like embers. They are confined to the
+    // strip the swash actually reaches, so the beach stops reading as a field
+    // of drifting blue dots.
     for (const f of sandFlecks) {
       f.life += f.rate * (1 - f.life) * 0.05;
       if (f.life > 0.995) {
         f.life = 0;
         f.x = Math.random() * W;
-        f.y = rand(shoreY - 6, H);
+        f.d = rand(0, CFG.reflectMax * 0.75);
         f.r = rand(0.6, 2.1);
       }
       const a = Math.sin(f.life * Math.PI);
       if (a <= 0.03) continue;
-      const depth = (f.y - shoreY) / Math.max(1, H - shoreY);
-      stamp(f.x + f.drift * f.life, f.y, f.r * 2.2, a * 0.22 * (1 - depth * 0.35));
+      const fade = clamp(1 - f.d / (CFG.reflectMax * 0.95), 0, 1);
+      stamp(f.x + f.drift * f.life, shoreY + f.d, f.r * 1.7,
+            a * 0.20 * CFG.sandGlowK * fade * fade);
     }
   }
 
@@ -669,17 +740,94 @@
     ctx.globalAlpha = 0.96;
     ctx.drawImage(glowCv, 0, 0, FW, FH, 0, 0, W, H);
 
-    // Bloom comes only from the hot cores, so the dark water stays dark.
-    const k = CFG.haloScale;
-    ctx.globalAlpha = 0.32;
-    ctx.drawImage(hotCv, 0, 0, FW, FH,
-      -(W * (k - 1)) / 2, -(H * (k - 1)) / 2, W * k, H * k);
-    ctx.globalAlpha = 0.13;
-    const k2 = k * 1.75;
-    ctx.drawImage(hotCv, 0, 0, FW, FH,
-      -(W * (k2 - 1)) / 2, -(H * (k2 - 1)) / 2, W * k2, H * k2);
+    // Bloom comes only from the hot cores, and only close to them, so the dark
+    // water stays dark and the horizon stops being lifted into haze.
+    compositeBloom();
 
     ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+  }
+
+  // A box blur with a carried window: O(1) per pixel in the radius. Edge
+  // samples clamp to the border, which is what keeps the frame edge from
+  // developing a darker rim as the window runs off it.
+  function boxBlur(src, dst, w, h, r, horizontal) {
+    const span = 2 * r + 1;
+    const limit = horizontal ? w : h;
+    const outer = horizontal ? h : w;
+    const step = horizontal ? 4 : w * 4;
+    const clampI = (i) => (i < 0 ? 0 : (i >= limit ? limit - 1 : i));
+    for (let o = 0; o < outer; o++) {
+      const base = horizontal ? o * w * 4 : o * 4;
+      let s0 = 0, s1 = 0, s2 = 0;
+      for (let k = -r; k <= r; k++) {
+        const j = base + clampI(k) * step;
+        s0 += src[j]; s1 += src[j + 1]; s2 += src[j + 2];
+      }
+      for (let i = 0; i < limit; i++) {
+        const j = base + i * step;
+        dst[j] = s0 / span; dst[j + 1] = s1 / span; dst[j + 2] = s2 / span; dst[j + 3] = 255;
+        const add = base + clampI(i + 1 + r) * step;
+        const sub = base + clampI(i - r) * step;
+        s0 += src[add] - src[sub];
+        s1 += src[add + 1] - src[sub + 1];
+        s2 += src[add + 2] - src[sub + 2];
+      }
+    }
+  }
+
+  // ------------------------------------------------------------ bloom pass
+  // The bloom used to be a single wide blit of the hot buffer scaled up about
+  // the frame centre. The trouble with that is not its size but its geometry:
+  // scaling about the centre is a translation away from the middle, so light is
+  // not only spread, it is *moved*. A wave crest sitting below the centre gets
+  // pushed further down, a lit core at 73% of the height lands at 100% at a
+  // scale of 2.15 — the glow of the water is dropped onto the sand. That is
+  // what made the beach look like blue fog washing in and out.
+  //
+  // So the cores are blurred in place instead, at low resolution: a separable
+  // box blur, which leaves the light where it was emitted. The cull keeps the
+  // halo tight around the lit water and lets the rest of the frame stay dark.
+  function compositeBloom() {
+    const bCv = bloomCv, bCx = bloomCx;
+    const bw = bCv.width, bh = bCv.height;
+
+    // Downscale, which is the first half of the blur.
+    bCx.globalCompositeOperation = 'source-over';
+    bCx.globalAlpha = 1;
+    bCx.imageSmoothingEnabled = true;
+    bCx.clearRect(0, 0, bw, bh);
+    bCx.drawImage(hotCv, 0, 0, FW, FH, 0, 0, bw, bh);
+
+    // Separable box blur along x, then y. The window is carried as a running
+    // sum rather than re-added per pixel, so the cost does not grow with the
+    // radius — at this buffer size a naive window was costing more than the
+    // whole rest of the frame.
+    const r = CFG.bloomRadius;
+    if (r > 0) {
+      const img = bCx.getImageData(0, 0, bw, bh);
+      const d = img.data;
+      if (!bloomTmp || bloomTmp.length !== d.length) bloomTmp = new Uint8ClampedArray(d.length);
+      boxBlur(d, bloomTmp, bw, bh, r, true);
+      boxBlur(bloomTmp, d, bw, bh, r, false);
+
+      // Cull after the blur: everything below the threshold is dropped outright
+      // rather than added at a low value, which is what stops a soft pass from
+      // lifting the whole frame into haze.
+      for (let i = 0; i < d.length; i += 4) {
+        const t = (d[i] + d[i + 1] + d[i + 2]) / 765;
+        if (t <= CFG.haloCull) { d[i] = 0; d[i + 1] = 0; d[i + 2] = 0; continue; }
+        const f = (t - CFG.haloCull) / (1 - CFG.haloCull);
+        const c = f * f * (3 - 2 * f);
+        d[i] *= c; d[i + 1] *= c; d[i + 2] *= c;
+      }
+      bCx.putImageData(img, 0, 0);
+    }
+
+    // Drawn 1:1, not scaled up: the halo should sit where the light was, no
+    // wider, and upscaling here would reintroduce the offset.
+    ctx.globalAlpha = CFG.bloomAmt;
+    ctx.drawImage(bCv, 0, 0, bw, bh, 0, 0, W, H);
     ctx.globalAlpha = 1;
   }
 
@@ -704,7 +852,7 @@
     for (const f of sandFlecks) {
       f.life = rand(0.04, 0.5);
       f.x = Math.random() * W;
-      f.y = rand(shoreY - 6, H);
+      f.d = rand(0, CFG.reflectMax * 0.75);
     }
     for (const b of bands) if (b.z > 0.5) { b.state = 'break'; b.t0 = tNow; }
   }
