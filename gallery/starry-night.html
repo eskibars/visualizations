@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>The Starry Night</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #060a18; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 130% 105% at 50% 42%,
+        rgba(0,0,0,0) 40%, rgba(0,0,0,.30) 80%, rgba(0,0,0,.72) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(214, 228, 255, .30);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+    .nogl {
+      display: none; position: fixed; inset: 0; place-items: center;
+      color: #8b93a8; font: 14px system-ui; letter-spacing: .08em;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">after van gogh · 1889</div>
+  <div class="nogl" id="nogl">WebGL2 unavailable</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  THE STARRY NIGHT — the sky is a flow field: two great vortices
+  //  plus curl noise carry ribbed brush strokes that drift and
+  //  shimmer forever. Stars breathe in concentric haloes, windows
+  //  flicker, and the whole thing breathes at oil-painting pace.
+  //
+  //  Not a picture of the painting — the same grammar, animated.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 2,
+    renderScaleMax: 1.0,
+    renderScaleMin: 0.5,
+    frameBudgetMs: 15.5,
+    checkEveryMs: 1200,
+    scaleStep: 0.85,
+
+    flowSpeed: 0.030,      // sky current, uv/s
+    dabShimmer: 0.9,       // how much strokes crawl along the flow
+    grain: 0.012,
+  };
+
+  const canvas = document.getElementById('c');
+  const gl = canvas.getContext('webgl2', {
+    alpha: false, antialias: false, depth: false, stencil: false,
+    powerPreference: 'high-performance',
+  });
+  if (!gl) {
+    document.getElementById('nogl').style.display = 'grid';
+    return;
+  }
+
+  // -------------------- GLSL --------------------
+  const VERT = `#version 300 es
+  in vec2 aPos;
+  void main() { gl_Position = vec4(aPos, 0.0, 1.0); }`;
+
+  const FRAG = `#version 300 es
+  precision highp float;
+  uniform vec2 uResolution;
+  uniform float uTime;
+  uniform float uGrain;
+  out vec4 outColor;
+
+  float hash12(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+  }
+  float vnoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = hash12(i);
+    float b = hash12(i + vec2(1, 0));
+    float c = hash12(i + vec2(0, 1));
+    float d = hash12(i + vec2(1, 1));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+  }
+  float fbm(vec2 p) {
+    float v = 0.0, a = 0.55;
+    for (int i = 0; i < 4; i++) {
+      v += a * vnoise(p);
+      p = p * 2.03 + vec2(19.1, 7.7);
+      a *= 0.5;
+    }
+    return v;
+  }
+
+  // ---------- flow field: two great vortices + curl noise ----------
+  vec2 vortex(vec2 p, vec2 c, float r, float w) {
+    vec2 d = p - c;
+    float fall = exp(-dot(d, d) / (r * r));
+    return w * vec2(-d.y, d.x) * fall;
+  }
+  vec2 flowField(vec2 p) {
+    float t = uTime * ${CONFIG.flowSpeed.toFixed(4)};
+    vec2 v = vec2(0.0);
+    v += vortex(p, vec2(0.36, 0.66), 0.20, 1.6);
+    v += vortex(p, vec2(0.60, 0.78), 0.14, -1.1);
+    v += vortex(p, vec2(0.16, 0.85), 0.12, 0.7);
+    // curl of one drifting potential (small offsets = true derivative)
+    float e = 0.015;
+    vec2 drift = vec2(t * 2.4, t * 1.7);
+    float n1 = fbm(p * 3.4 + drift);
+    float n2 = fbm(p * 3.4 + drift + vec2(0.0, e));
+    float n3 = fbm(p * 3.4 + drift + vec2(e, 0.0));
+    v += vec2(n1 - n2, -(n1 - n3)) / e * 0.065;
+    // faint prevailing current — curl noise should dominate direction
+    v += vec2(-0.07, 0.045);
+    return v;
+  }
+
+  // ---------- ribbed brush strokes carried by the flow ----------
+  float brushStrokes(vec2 p, float scale, float phase) {
+    // per-layer offset so each pass sees a slightly different current
+    vec2 v = flowField(p + vec2(phase * 13.7, phase * 7.3) * 0.03);
+    float len = length(v) + 1e-4;
+    vec2 dir = v / len;
+    vec2 perp = vec2(-dir.y, dir.x);
+    // crawl along the flow
+    vec2 q = p - dir * uTime * ${CONFIG.dabShimmer.toFixed(2)} * ${CONFIG.flowSpeed.toFixed(4)} * (0.4 + 0.6 * fract(phase * 7.31));
+    // wobble the ribs so they never line up into global rows
+    float meander = fbm(q * 1.7 + phase * 11.0) * 5.0;
+    float rib = sin(dot(q, perp) * scale + meander + uTime * 0.35 + phase * 6.28);
+    rib = pow(rib * 0.5 + 0.5, 1.7);
+    float dab = vnoise(q * scale * 0.08 + vec2(phase * 31.7, phase * 17.3));
+    return rib * (0.74 + 0.42 * dab);
+  }
+
+  // ---------- palette helpers ----------
+  vec3 mix3(vec3 a, vec3 b, vec3 c, float t) {
+    return t < 0.5 ? mix(a, b, t * 2.0) : mix(b, c, t * 2.0 - 1.0);
+  }
+
+  // ---------- stars: cores + concentric Van Gogh haloes ----------
+  vec3 starHalo(vec2 p, vec2 c, float size, float tw, float phase) {
+    float d = length(p - c) / size;
+    float breathe = 0.75 + 0.25 * sin(uTime * tw + phase);
+    float core = exp(-d * d * 50.0) * 1.6;
+    float rings = sin(length(p - c) * 46.0 - uTime * 0.9 + phase * 6.0) * 0.5 + 0.5;
+    rings *= exp(-d * 0.35) * breathe * 0.65;
+    float glow = exp(-d * 0.16) * 0.30 * breathe;
+    return vec3(1.0, 0.92, 0.55) * (core + rings + glow);
+  }
+
+  // ---------- cypress tree ----------
+  float cypressMask(vec2 p) {
+    // flame-shaped silhouette on the right, drawn with a wavy spine
+    float base = 0.815;
+    float topY = 1.06;
+    float t = clamp((p.y - 0.16) / (topY - 0.16), 0.0, 1.0);
+    if (p.x < 0.62 || p.y < 0.14) return 0.0;
+    float sway = sin(p.y * 9.0 + 1.2) * 0.018 + sin(p.y * 23.0) * 0.007;
+    float spine = base - t * 0.055 + sway * t;
+    float halfw = 0.052 * pow(1.0 - t, 0.65) + 0.004;
+    halfw *= 1.0 + 0.16 * sin(p.y * 34.0 + 2.0) * t;
+    float flameEdge = 0.012 * sin(p.x * 90.0 + p.y * 30.0);
+    return step(abs(p.x - spine) + flameEdge * 0.0, halfw) * step(0.16, p.y);
+  }
+
+  void main() {
+    vec2 frag = gl_FragCoord.xy;
+    vec2 uv = frag / uResolution;                 // 0..1
+    vec2 p = uv;
+    p.x *= uResolution.x / uResolution.y;         // aspect-corrected x
+
+    float t = uTime;
+
+    // ---------- sky ----------
+    // base: deep night blues, lighter band low near the hills
+    vec3 col = mix3(vec3(0.023, 0.055, 0.145),
+                    vec3(0.055, 0.130, 0.290),
+                    vec3(0.115, 0.235, 0.400),
+                    smoothstep(0.0, 1.0, uv.y * 0.9 + 0.15));
+
+    // swirling stroke layers
+    float s1 = brushStrokes(p, 36.0, 0.21);
+    float s2 = brushStrokes(p, 74.0, 0.63);
+    float s3 = brushStrokes(p, 130.0, 0.87);
+
+    // sky strokes brighten near the vortices and high up
+    vec2 v0 = flowField(p);
+    float energy = clamp(length(v0) * 1.35, 0.0, 1.0);
+    float skyMask = smoothstep(0.16, 0.45, uv.y);
+
+    vec3 strokeCol = mix3(vec3(0.08, 0.19, 0.40),   // distant blue
+                          vec3(0.21, 0.46, 0.70),   // mid cyan-blue
+                          vec3(1.00, 0.85, 0.46),   // pale gold crest
+                          pow(energy, 1.4));
+    col = mix(col, strokeCol, skyMask * (0.38 + 0.52 * energy) * s1);
+    col = mix(col, strokeCol * vec3(0.70, 0.92, 1.18), skyMask * 0.30 * s2);
+    col += vec3(0.80, 0.92, 1.20) * skyMask * energy * 0.045 * s3;
+    // impasto: stroke ridges carve real light and shadow into the paint
+    col *= 1.0 - skyMask * 0.34 * (1.0 - s1) - skyMask * 0.07 * (1.0 - s2);
+    float lum = dot(col, vec3(0.299, 0.587, 0.114));
+    col = mix(vec3(lum), col, 1.20);
+
+    // ---------- stars ----------
+    // eleven great stars in the Van Gogh layout
+    vec2 sp = vec2(p.x / (uResolution.x / uResolution.y), uv.y);
+    col += starHalo(sp, vec2(0.135, 0.870), 0.012, 0.5, 0.3) * 0.9;
+    col += starHalo(sp, vec2(0.315, 0.905), 0.010, 0.7, 1.7) * 0.8;
+    col += starHalo(sp, vec2(0.470, 0.845), 0.009, 0.6, 2.9) * 0.7;
+    col += starHalo(sp, vec2(0.555, 0.925), 0.011, 0.4, 4.1) * 0.8;
+    col += starHalo(sp, vec2(0.640, 0.860), 0.009, 0.8, 5.2) * 0.7;
+    col += starHalo(sp, vec2(0.760, 0.915), 0.010, 0.5, 0.9) * 0.8;
+    col += starHalo(sp, vec2(0.890, 0.855), 0.012, 0.6, 2.1) * 0.9;
+    col += starHalo(sp, vec2(0.955, 0.930), 0.009, 0.7, 3.4) * 0.7;
+    col += starHalo(sp, vec2(0.230, 0.760), 0.008, 0.9, 4.8) * 0.6;
+    col += starHalo(sp, vec2(0.065, 0.690), 0.008, 0.8, 1.2) * 0.6;
+    col += starHalo(sp, vec2(0.700, 0.720), 0.008, 1.0, 5.7) * 0.55;
+
+    // the morning star — biggest, lower left of centre
+    col += starHalo(sp, vec2(0.245, 0.640), 0.020, 0.35, 0.0) * 1.5;
+
+    // ---------- crescent moon, upper right ----------
+    {
+      vec2 mc = vec2(0.905, 0.800);
+      vec2 d = sp - mc;
+      d.x *= 1.15;
+      float r = length(d);
+      float disc = 1.0 - smoothstep(0.040, 0.045, r);
+      float bite = 1.0 - smoothstep(0.034, 0.040, length(d - vec2(0.016, 0.014)));
+      float cres = clamp(disc - bite, 0.0, 1.0);
+      col += vec3(1.05, 0.92, 0.55) * cres * 1.8;
+      float rings = sin(r * 34.0 - uTime * 0.7) * 0.5 + 0.5;
+      col += vec3(0.95, 0.82, 0.45) * rings * exp(-r * 6.5) * 0.55;
+      col += vec3(0.85, 0.72, 0.40) * exp(-r * 2.6) * 0.22;
+    }
+
+    // ---------- hills & village ----------
+    float horizon = 0.205;
+    float hills = horizon + 0.035 * fbm(vec2(uv.x * 3.1, 7.7)) + 0.012 * sin(uv.x * 21.0);
+    float land = 1.0 - smoothstep(hills - 0.004, hills + 0.004, uv.y);
+
+    // rolling dark hills behind the village
+    float hills2 = 0.235 + 0.045 * fbm(vec2(uv.x * 2.2 + 4.0, 2.2));
+    float land2 = 1.0 - smoothstep(hills2 - 0.004, hills2 + 0.004, uv.y);
+
+    col = mix(col, vec3(0.030, 0.055, 0.105), land2 * step(uv.y, hills2));
+    col = mix(col, vec3(0.020, 0.038, 0.075), land);
+
+    // rooftops silhouette with a church spire
+    {
+      float roof = 0.155 + 0.018 * vnoise(vec2(uv.x * 26.0, 3.0));
+      // spire
+      float spireW = 0.028;
+      float spireT = 1.0 - smoothstep(0.0, 0.06, abs(uv.x - 0.385) / spireW - (uv.y - 0.155) * 2.4);
+      roof = max(roof, mix(0.155, 0.315, spireT));
+      float isRoof = (1.0 - smoothstep(roof - 0.003, roof + 0.003, uv.y)) * step(uv.y, 0.30);
+      col = mix(col, vec3(0.014, 0.024, 0.052), isRoof);
+
+      // windows — a loose scatter of warm lights, flickering slowly
+      vec2 cell = vec2(uv.x * 42.0, uv.y * 30.0);
+      vec2 id = floor(cell);
+      vec2 f = fract(cell) - 0.5;
+      float h = hash12(id);
+      float lit = step(0.80, h);
+      float inWin = 1.0 - smoothstep(0.10, 0.16, length(f));
+      float flick = 0.75 + 0.25 * sin(uTime * (0.6 + h) + h * 40.0);
+      vec3 winCol = vec3(1.0, 0.72, 0.30) * lit * inWin * flick * (1.0 - smoothstep(roof - 0.05, roof, uv.y)) * 0.9;
+      col += winCol * step(0.05, uv.y);
+    }
+
+    // ---------- cypress ----------
+    float cy = cypressMask(sp);
+    if (cy > 0.0) {
+      // dark green-black foliage with brushy inner movement
+      float foliage = fbm(vec2(sp.x * 30.0, sp.y * 7.0) + vec2(0.0, -t * 0.03));
+      vec3 cyCol = mix(vec3(0.012, 0.030, 0.018), vec3(0.055, 0.105, 0.055), foliage);
+      // wind makes the whole tree lean and shiver slightly
+      float lean = sin(t * 0.4) * 0.004 * (sp.y - 0.16);
+      cy = cypressMask(sp + vec2(lean, 0.0));
+      col = mix(col, cyCol, cy);
+      // edge light from the sky
+      float edge = cy * (1.0 - smoothstep(0.0, 0.012, abs(sp.x - (0.815 - clamp((sp.y - 0.16) / 0.9, 0.0, 1.0) * 0.055))));
+      col += vec3(0.10, 0.20, 0.16) * edge * 0.6;
+    }
+
+    // ---------- canvas weave + brush glaze ----------
+    float weave = (vnoise(uv * vec2(700.0, 70.0)) - 0.5) * 0.05
+                + (vnoise(uv * vec2(90.0, 620.0)) - 0.5) * 0.05;
+    col *= 1.0 + weave;
+
+    // aged varnish tint
+    col *= vec3(1.02, 1.0, 0.94);
+
+    // grain + vignette handled here (CSS adds a soft one too)
+    col += (hash12(frag + fract(t) * 100.0) - 0.5) * uGrain;
+    vec2 q = frag / uResolution;
+    col *= 0.55 + 0.45 * pow(16.0 * q.x * q.y * (1.0 - q.x) * (1.0 - q.y), 0.25);
+
+    // gentle tonemap so the brightest haloes roll off like oil paint
+    col = col / (1.0 + col * 0.16);
+    outColor = vec4(col, 1.0);
+  }`;
+
+  // -------------------- program --------------------
+  function compile(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      window.__err = gl.getShaderInfoLog(s);
+      console.error(window.__err);
+      return null;
+    }
+    return s;
+  }
+
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.error(gl.getProgramInfoLog(prog));
+    document.getElementById('nogl').style.display = 'grid';
+    return;
+  }
+  gl.useProgram(prog);
+
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  const aPos = gl.getAttribLocation(prog, 'aPos');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+  const uResolution = gl.getUniformLocation(prog, 'uResolution');
+  const uTime = gl.getUniformLocation(prog, 'uTime');
+  const uGrain = gl.getUniformLocation(prog, 'uGrain');
+
+  // -------------------- sizing / adaptive quality --------------------
+  let scale = 1.0;
+  let ema = 16;
+
+  function resize() {
+    const dpr = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    const w = Math.max(2, Math.floor(window.innerWidth * dpr * scale));
+    const h = Math.max(2, Math.floor(window.innerHeight * dpr * scale));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+      gl.viewport(0, 0, w, h);
+    }
+  }
+  window.addEventListener('resize', resize, { passive: true });
+
+  let last = performance.now();
+  let lastCheck = last;
+  let ready = false;
+
+  function frame(now) {
+    const dtMs = now - last;
+    last = now;
+    const time = now / 1000;
+
+    ema = ema * 0.94 + Math.min(dtMs, 100) * 0.06;
+    if (now - lastCheck > CONFIG.checkEveryMs) {
+      lastCheck = now;
+      if (ema > CONFIG.frameBudgetMs * 1.6 && scale > CONFIG.renderScaleMin) {
+        scale = Math.max(CONFIG.renderScaleMin, scale * CONFIG.scaleStep);
+        resize();
+      } else if (ema < CONFIG.frameBudgetMs * 0.62 && scale < CONFIG.renderScaleMax) {
+        scale = Math.min(CONFIG.renderScaleMax, scale / CONFIG.scaleStep);
+        resize();
+      }
+    }
+
+    gl.uniform2f(uResolution, canvas.width, canvas.height);
+    gl.uniform1f(uTime, time);
+    gl.uniform1f(uGrain, CONFIG.grain);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

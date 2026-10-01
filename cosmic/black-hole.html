@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Gargantua</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 135% 105% at 50% 45%,
+        rgba(0,0,0,0) 30%, rgba(0,0,0,.35) 72%, rgba(0,0,0,.8) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(255, 214, 170, .28);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+    .nogl {
+      display: none; position: fixed; inset: 0; place-items: center;
+      color: #8b93a8; font: 14px system-ui; letter-spacing: .08em;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">sagittarius a* · event horizon</div>
+  <div class="nogl" id="nogl">WebGL2 unavailable</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  BLACK HOLE — rays bent by a Schwarzschild-style geodesic
+  //  (the -1.5 h² r / r⁵ photon acceleration), marched against a
+  //  differentially-rotating accretion disk. The Einstein ring,
+  //  the disk folded over the top, and the photon ring all emerge
+  //  from the bending; nothing is painted on.
+  //
+  //  Relativistic dressing: Doppler beaming brightens the
+  //  approaching limb, gravitational redshift dims the inner rim.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1.5,
+    renderScaleMax: 1.0,   // fraction of DPR-sized pixels actually shaded
+    renderScaleMin: 0.45,
+    // adaptive quality: hold ~60fps by scaling the shaded area
+    frameBudgetMs: 15.5,
+    checkEveryMs: 1200,
+    scaleStep: 0.85,
+
+    exposure: 1.15,
+    maxSteps: 110,
+    diskInner: 2.6,        // ~ISCO in units of the horizon radius
+    diskOuter: 11.5,
+    horizon: 1.0,
+
+    // camera
+    orbitSpeed: 0.055,     // rad/s — a full lap in ~2 min
+    camDist: 17.0,
+    camHeight: 3.8,        // mean height above the disk plane
+    camSway: 1.4,          // vertical sway amplitude
+    tiltDamp: 0.06,        // pointer tilt easing
+    grain: 0.012,
+  };
+
+  const canvas = document.getElementById('c');
+  const gl = canvas.getContext('webgl2', {
+    alpha: false, antialias: false, depth: false, stencil: false,
+    powerPreference: 'high-performance',
+  });
+  if (!gl) {
+    document.getElementById('nogl').style.display = 'grid';
+    return;
+  }
+
+  // -------------------- GLSL --------------------
+  const VERT = `#version 300 es
+  in vec2 aPos;
+  void main() { gl_Position = vec4(aPos, 0.0, 1.0); }`;
+
+  const FRAG = `#version 300 es
+  precision highp float;
+  uniform vec2 uResolution;
+  uniform float uTime;
+  uniform vec2 uTilt;          // pointer-influenced camera offset
+  uniform float uGrain;
+  out vec4 outColor;
+
+  const float PI = 3.14159265;
+  const int   MAXSTEPS = ${CONFIG.maxSteps};
+  const float DISK_IN  = ${CONFIG.diskInner.toFixed(2)};
+  const float DISK_OUT = ${CONFIG.diskOuter.toFixed(2)};
+  const float HORIZON  = ${CONFIG.horizon.toFixed(2)};
+
+  // -------------------- hashing / noise --------------------
+  float hash12(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+  }
+  float hash13(vec3 p3) {
+    p3 = fract(p3 * 0.1031);
+    p3 += dot(p3, p3.zyx + 31.32);
+    return fract((p3.x + p3.y) * p3.z);
+  }
+  float vnoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = hash12(i);
+    float b = hash12(i + vec2(1, 0));
+    float c = hash12(i + vec2(0, 1));
+    float d = hash12(i + vec2(1, 1));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+  }
+  float fbm(vec2 p) {
+    float v = 0.0, a = 0.55;
+    for (int i = 0; i < 4; i++) {
+      v += a * vnoise(p);
+      p = p * 2.03 + vec2(17.3, 9.1);
+      a *= 0.5;
+    }
+    return v;
+  }
+
+  // -------------------- background sky --------------------
+  vec3 stars(vec3 rd) {
+    vec3 col = vec3(0.0);
+    // two parallax layers of point stars on a cubemap-ish grid
+    for (int layer = 0; layer < 2; layer++) {
+      float n = layer == 0 ? 22.0 : 40.0;
+      vec3 p = rd * n;
+      vec3 id = floor(p);
+      vec3 f = p - id - 0.5;
+      float h = hash13(id + float(layer) * 7.0);
+      vec3 ofs = fract(vec3(h * 127.1, h * 311.7, h * 74.7)) - 0.5;
+      float d = length(f - ofs * 0.8);
+      float star = 1.0 - smoothstep(0.0, 0.5, d);
+      star = pow(star, 14.0) * step(0.82 - float(layer) * 0.06, h);
+      float tw = 0.7 + 0.3 * sin(uTime * (1.0 + h * 3.0) + h * 40.0);
+      vec3 tint = mix(vec3(0.75, 0.82, 1.0), vec3(1.0, 0.88, 0.72), fract(h * 9.3));
+      col += star * tw * tint * (layer == 0 ? 1.0 : 0.55);
+    }
+    // milky way band — tilted, dusty (kept dim so the disk pops)
+    vec3 bn = normalize(vec3(0.35, 1.0, -0.25));
+    float band = exp(-abs(dot(rd, bn)) * 3.2);
+    float dust = fbm(vec2(atan(rd.z, rd.x) * 3.0, rd.y * 6.0));
+    col += band * (0.016 + 0.032 * dust) * vec3(0.55, 0.58, 0.75);
+    col += band * smoothstep(0.55, 1.0, dust) * vec3(0.30, 0.22, 0.35) * 0.07;
+    return col;
+  }
+
+  // -------------------- accretion disk --------------------
+  // Temperature-ish ramp: white-hot rim -> saturated orange -> ember.
+  vec3 diskRamp(float t) {          // t: 0 at inner edge, 1 at outer
+    vec3 hot   = vec3(1.40, 1.28, 1.02);
+    vec3 mid   = vec3(1.25, 0.52, 0.11);
+    vec3 ember = vec3(0.45, 0.10, 0.025);
+    return t < 0.28 ? mix(hot, mid, t / 0.28) : mix(mid, ember, (t - 0.28) / 0.72);
+  }
+
+  mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+
+  // Density of the disk material at a point. Texture space is the
+  // point rotated back by Keplerian flow (omega ~ r^-1.5), so the
+  // noise is sheared into trailing streaks as time advances.
+  float diskDensity(vec3 p) {
+    float r = length(p.xz);
+    float omega = 2.4 / pow(r, 1.5);
+    vec2 q = rot(-uTime * omega) * p.xz;
+    // large-scale wisps + fine filaments
+    float n = 0.70 * fbm(q * 1.2) + 0.30 * fbm(q * 4.3 + 7.7);
+    // static spiral banding (integer angular frequency = seamless)
+    float a = atan(q.y, q.x);
+    float spiral = 0.70 + 0.30 * sin(3.0 * a + 11.0 * log(r));
+    return clamp(n * spiral * 1.5 - 0.12, 0.0, 1.2);
+  }
+
+  vec3 diskShade(vec3 p, vec3 rd, out float alpha) {
+    float r = length(p.xz);
+    float t = (r - DISK_IN) / (DISK_OUT - DISK_IN);
+    t = clamp(t, 0.0, 1.0);
+
+    float dens = diskDensity(p);
+    float edgeIn  = smoothstep(0.0, 0.16, t);
+    float edgeOut = 1.0 - smoothstep(0.60, 1.0, t);
+    float fade = edgeIn * edgeOut;
+    // faint continuous sheet under the bright filaments
+    alpha = clamp(dens * 1.35 + 0.10, 0.0, 1.0) * fade;
+
+    // brightness: hotter inward, modulated by density
+    float glow = pow(DISK_IN / r, 2.4) * (0.20 + 1.30 * dens);
+
+    // Doppler beaming — orbit is counter-clockwise seen from +y
+    vec3 tangent = normalize(vec3(-p.z, 0.0, p.x));
+    float beta = min(0.62, 0.55 / sqrt(r / DISK_IN));
+    float dopp = 1.0 / (1.0 - beta * dot(tangent, -rd));
+    glow *= pow(max(dopp, 0.35), 2.4);
+
+    // gravitational redshift dims the inner rim
+    glow *= sqrt(max(1.0 - HORIZON / r, 0.05));
+
+    // blue-shift the approaching limb slightly
+    vec3 col = diskRamp(t);
+    col = mix(col, col * vec3(0.82, 0.92, 1.25), clamp((dopp - 1.0) * 0.55, 0.0, 0.45));
+
+    return col * glow;
+  }
+
+  // -------------------- tone mapping --------------------
+  vec3 aces(vec3 x) {
+    return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+  }
+
+  void main() {
+    vec2 frag = gl_FragCoord.xy;
+    vec2 uv = (frag - 0.5 * uResolution) / uResolution.y;
+
+    // camera: slow orbit + gentle sway, pointer nudges the tilt
+    float ang = uTime * ${CONFIG.orbitSpeed.toFixed(4)};
+    float camH = ${CONFIG.camHeight.toFixed(2)}
+               + ${CONFIG.camSway.toFixed(2)} * sin(uTime * 0.11)
+               + uTilt.y * 4.0;
+    vec3 ro = vec3(cos(ang), 0.0, sin(ang)) * ${CONFIG.camDist.toFixed(2)};
+    ro.y = camH;
+    vec3 ta = vec3(0.0, uTilt.y * 1.2 - 0.15, 0.0);
+
+    vec3 fw = normalize(ta - ro);
+    vec3 rt = normalize(cross(fw, vec3(0.0, 1.0, 0.0)));
+    vec3 up = cross(rt, fw);
+    vec3 rd = normalize(fw * 1.7 + rt * uv.x + up * uv.y);
+
+    // -------------------- geodesic march --------------------
+    vec3 pos = ro;
+    vec3 vel = rd;
+    vec3 h = cross(pos, vel);
+    float h2 = dot(h, h);
+
+    vec3 col = vec3(0.0);
+    float transmit = 1.0;
+    float prevY = pos.y;
+    bool captured = false;
+    int crossings = 0;
+
+    for (int i = 0; i < MAXSTEPS; i++) {
+      float r2 = dot(pos, pos);
+      float r = sqrt(r2);
+
+      // adaptive step: fine near the hole and the disk, coarse far out
+      float dt = clamp(0.16 * (r - 0.6), 0.035, 0.9);
+      if (r > DISK_OUT + 4.0 && abs(pos.y) > 2.0) dt = 1.6;
+
+      // photon acceleration (weak-field null geodesic)
+      vec3 acc = -1.5 * h2 * pos / pow(r2, 2.5);
+      vel += acc * dt;
+      vec3 newPos = pos + vel * dt;
+
+      // accretion disk plane crossing
+      if (newPos.y * pos.y < 0.0 && crossings < 6) {
+        float f = pos.y / (pos.y - newPos.y);
+        vec3 hit = mix(pos, newPos, f);
+        float hr = length(hit.xz);
+        if (hr > DISK_IN * 0.92 && hr < DISK_OUT) {
+          float a;
+          vec3 dc = diskShade(hit, vel, a);
+          col += transmit * a * dc;
+          transmit *= (1.0 - a * 0.85);
+          crossings++;
+          if (transmit < 0.02) break;
+        }
+      }
+
+      pos = newPos;
+      prevY = pos.y;
+
+      if (dot(pos, pos) < HORIZON * HORIZON) { captured = true; break; }
+      if (dot(pos, pos) > 900.0 && dot(vel, pos) > 0.0) break;   // escaped
+    }
+
+    if (!captured) col += transmit * stars(normalize(vel));
+    if (transmit > 0.02 && !captured) {
+      // faint ambient haze so space is not pure black
+      col += transmit * vec3(0.012, 0.014, 0.022);
+    }
+
+    // -------------------- post --------------------
+    col *= ${CONFIG.exposure.toFixed(2)};
+    col = aces(col);
+    col = pow(col, vec3(0.4545));
+
+    // vignette + grain
+    vec2 q = frag / uResolution;
+    col *= 0.35 + 0.65 * pow(16.0 * q.x * q.y * (1.0 - q.x) * (1.0 - q.y), 0.28);
+    col += (hash12(frag + fract(uTime) * 100.0) - 0.5) * uGrain;
+
+    outColor = vec4(col, 1.0);
+  }`;
+
+  // -------------------- program --------------------
+  function compile(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      window.__err = gl.getShaderInfoLog(s);
+      console.error(window.__err);
+      return null;
+    }
+    return s;
+  }
+
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.error(gl.getProgramInfoLog(prog));
+    document.getElementById('nogl').style.display = 'grid';
+    return;
+  }
+  gl.useProgram(prog);
+
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  const aPos = gl.getAttribLocation(prog, 'aPos');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+  const uResolution = gl.getUniformLocation(prog, 'uResolution');
+  const uTime = gl.getUniformLocation(prog, 'uTime');
+  const uTilt = gl.getUniformLocation(prog, 'uTilt');
+  const uGrain = gl.getUniformLocation(prog, 'uGrain');
+
+  // -------------------- sizing / adaptive quality --------------------
+  let scale = 1.0;
+  let ema = 16;
+
+  function resize() {
+    const dpr = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    const w = Math.max(2, Math.floor(window.innerWidth * dpr * scale));
+    const h = Math.max(2, Math.floor(window.innerHeight * dpr * scale));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+      gl.viewport(0, 0, w, h);
+    }
+  }
+  window.addEventListener('resize', resize, { passive: true });
+
+  // -------------------- pointer parallax --------------------
+  const tilt = { x: 0, y: 0, tx: 0, ty: 0 };
+  window.addEventListener('pointermove', (e) => {
+    tilt.tx = (e.clientX / window.innerWidth - 0.5) * 2;
+    tilt.ty = (e.clientY / window.innerHeight - 0.5) * 2;
+  }, { passive: true });
+
+  // -------------------- loop --------------------
+  let last = performance.now();
+  let lastCheck = last;
+  let ready = false;
+
+  function frame(now) {
+    const dtMs = now - last;
+    last = now;
+    const time = now / 1000;
+
+    // adaptive resolution: sample EMA of frame time, adjust with hysteresis
+    ema = ema * 0.94 + Math.min(dtMs, 100) * 0.06;
+    if (now - lastCheck > CONFIG.checkEveryMs) {
+      lastCheck = now;
+      if (ema > CONFIG.frameBudgetMs * 1.6 && scale > CONFIG.renderScaleMin) {
+        scale = Math.max(CONFIG.renderScaleMin, scale * CONFIG.scaleStep);
+        resize();
+      } else if (ema < CONFIG.frameBudgetMs * 0.62 && scale < CONFIG.renderScaleMax) {
+        scale = Math.min(CONFIG.renderScaleMax, scale / CONFIG.scaleStep);
+        resize();
+      }
+    }
+
+    tilt.x += (tilt.tx - tilt.x) * CONFIG.tiltDamp;
+    tilt.y += (tilt.ty - tilt.y) * CONFIG.tiltDamp;
+
+    gl.uniform2f(uResolution, canvas.width, canvas.height);
+    gl.uniform1f(uTime, time);
+    gl.uniform2f(uTilt, tilt.x, tilt.y);
+    gl.uniform1f(uGrain, CONFIG.grain);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    if (!ready) {
+      ready = true;
+      document.body.classList.add('ready');
+    }
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

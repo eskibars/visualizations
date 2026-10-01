@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Stellar Nursery</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #01020a; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 135% 105% at 50% 45%,
+        rgba(0,0,0,0) 30%, rgba(0,0,0,.35) 74%, rgba(0,0,0,.82) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(190, 214, 255, .28);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+    .nogl {
+      display: none; position: fixed; inset: 0; place-items: center;
+      color: #8b93a8; font: 14px system-ui; letter-spacing: .08em;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">orion · stellar nursery</div>
+  <div class="nogl" id="nogl">WebGL2 unavailable</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  STELLAR NURSERY — a volumetric emission nebula: jittered
+  //  raymarch through domain-warped fbm gas, lit by newborn stars
+  //  embedded in the cloud. The camera orbits the nursery forever,
+  //  so the wisps keep finding new parallax.
+  //
+  //  Hubble-shelf palette: teal depths, gold plasma around the
+  //  protostars, crimson knots where the gas compresses.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1.5,
+    renderScaleMax: 0.9,
+    renderScaleMin: 0.4,
+    frameBudgetMs: 15.5,
+    checkEveryMs: 1200,
+    scaleStep: 0.85,
+
+    exposure: 1.25,
+    maxSteps: 48,
+    marchNear: 2.0,
+    marchFar: 16.0,
+    absorption: 1.0,
+
+    orbitSpeed: 0.028,     // one lap in ~3.7 min
+    camDist: 8.6,
+    grain: 0.010,
+  };
+
+  const canvas = document.getElementById('c');
+  const gl = canvas.getContext('webgl2', {
+    alpha: false, antialias: false, depth: false, stencil: false,
+    powerPreference: 'high-performance',
+  });
+  if (!gl) {
+    document.getElementById('nogl').style.display = 'grid';
+    return;
+  }
+
+  // -------------------- GLSL --------------------
+  const VERT = `#version 300 es
+  in vec2 aPos;
+  void main() { gl_Position = vec4(aPos, 0.0, 1.0); }`;
+
+  const FRAG = `#version 300 es
+  precision highp float;
+  uniform vec2 uResolution;
+  uniform float uTime;
+  uniform float uGrain;
+  out vec4 outColor;
+
+  const int   STEPS = ${CONFIG.maxSteps};
+  const float NEAR = ${CONFIG.marchNear.toFixed(2)};
+  const float FAR  = ${CONFIG.marchFar.toFixed(2)};
+
+  // -------------------- hashing / noise --------------------
+  float hash13(vec3 p3) {
+    p3 = fract(p3 * 0.1031);
+    p3 += dot(p3, p3.zyx + 31.32);
+    return fract((p3.x + p3.y) * p3.z);
+  }
+  float hash12(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+  }
+  float noise3(vec3 p) {
+    vec3 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float n000 = hash13(i);
+    float n100 = hash13(i + vec3(1, 0, 0));
+    float n010 = hash13(i + vec3(0, 1, 0));
+    float n110 = hash13(i + vec3(1, 1, 0));
+    float n001 = hash13(i + vec3(0, 0, 1));
+    float n101 = hash13(i + vec3(1, 0, 1));
+    float n011 = hash13(i + vec3(0, 1, 1));
+    float n111 = hash13(i + vec3(1, 1, 1));
+    return mix(mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+               mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y), f.z);
+  }
+  float fbm(vec3 p) {
+    float v = 0.0, a = 0.55;
+    for (int i = 0; i < 4; i++) {
+      v += a * noise3(p);
+      p = p * 2.07 + vec3(11.5, 5.3, 7.1);
+      a *= 0.5;
+    }
+    return v;
+  }
+  // ridged — filaments and shock fronts
+  float ridge(vec3 p) {
+    float v = 0.0, a = 0.5;
+    for (int i = 0; i < 3; i++) {
+      v += a * (1.0 - abs(noise3(p) * 2.0 - 1.0));
+      p = p * 2.13 + vec3(3.7, 9.1, 1.3);
+      a *= 0.5;
+    }
+    return v;
+  }
+
+  mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+
+  // -------------------- newborn stars --------------------
+  // pos + colour + strength; occluded by the gas via transmittance
+  const int NSTARS = 4;
+  vec3 starPos(int i) {
+    if (i == 0) return vec3(0.9, 0.55, -1.2);
+    if (i == 1) return vec3(-2.3, -0.9, 1.6);
+    if (i == 2) return vec3(1.7, -1.8, 2.6);
+    return vec3(-1.1, 2.1, -2.8);
+  }
+  vec3 starCol(int i) {
+    if (i == 0) return vec3(1.05, 0.85, 0.58) * 4.0;   // gold
+    if (i == 1) return vec3(0.62, 0.78, 1.30) * 2.7;   // blue-white
+    if (i == 2) return vec3(1.30, 0.55, 0.32) * 2.1;   // ember
+    return vec3(0.78, 0.90, 1.35) * 2.4;               // young blue
+  }
+
+  // -------------------- gas --------------------
+  float density(vec3 p) {
+    // slow swirl of the whole cloud
+    vec2 xz = rot(uTime * 0.012) * p.xz;
+    vec3 q = vec3(xz.x, p.y, xz.y);
+    float wt = uTime * 0.02;
+    // domain warp — curls the wisps
+    q += 0.55 * vec3(
+      noise3(vec3(p.xy * 1.6, wt)) - 0.5,
+      noise3(vec3(p.yz * 1.6, 9.2 - wt * 0.7)) - 0.5,
+      noise3(vec3(p.zx * 1.6, 4.7 + wt * 0.5)) - 0.5);
+
+    float base = fbm(q * 1.5);
+    float fil  = ridge(q * 2.6);
+
+    // envelope: a cavity around the cluster, flattened, fading outward
+    float r = length(p);
+    float env = smoothstep(1.3, 3.0, r) * (1.0 - smoothstep(5.2, 8.6, r));
+    env *= exp(-abs(p.y) * 0.30);
+
+    float d = base * (0.45 + 0.95 * fil) * env;
+    return max(d - 0.34, 0.0) * 2.2;
+  }
+
+  vec3 palette(float core, float knot) {
+    // teal depths -> gold plasma; crimson at compressed knots
+    vec3 deep  = vec3(0.030, 0.075, 0.130);
+    vec3 teal  = vec3(0.05, 0.36, 0.46);
+    vec3 gold  = vec3(1.25, 0.55, 0.14);
+    vec3 crimson = vec3(0.90, 0.16, 0.10);
+    vec3 c = mix(deep, teal, smoothstep(0.0, 0.5, core));
+    c = mix(c, gold, smoothstep(0.38, 0.92, core));
+    return mix(c, crimson, knot * 0.6);
+  }
+
+  vec3 stars(vec3 rd) {
+    vec3 col = vec3(0.0);
+    for (int layer = 0; layer < 2; layer++) {
+      float n = layer == 0 ? 26.0 : 46.0;
+      vec3 p = rd * n;
+      vec3 id = floor(p);
+      vec3 f = p - id - 0.5;
+      float h = hash13(id + float(layer) * 11.0);
+      vec3 ofs = fract(vec3(h * 127.1, h * 311.7, h * 74.7)) - 0.5;
+      float d = length(f - ofs * 0.8);
+      float star = pow(smoothstep(0.5, 0.0, d), 14.0) * step(0.80 - float(layer) * 0.05, h);
+      float tw = 0.7 + 0.3 * sin(uTime * (1.0 + h * 3.0) + h * 40.0);
+      vec3 tint = mix(vec3(0.72, 0.80, 1.0), vec3(1.0, 0.86, 0.68), fract(h * 9.3));
+      col += star * tw * tint * (layer == 0 ? 1.0 : 0.5);
+    }
+    return col;
+  }
+
+  vec3 aces(vec3 x) {
+    return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+  }
+
+  void main() {
+    vec2 frag = gl_FragCoord.xy;
+    vec2 uv = (frag - 0.5 * uResolution) / uResolution.y;
+
+    // camera: slow orbit + breathing height, looking into the cluster
+    float ang = uTime * ${CONFIG.orbitSpeed.toFixed(4)};
+    vec3 ro = vec3(cos(ang), 0.0, sin(ang)) * ${CONFIG.camDist.toFixed(2)};
+    ro.y = 1.1 * sin(uTime * 0.043);
+    vec3 ta = vec3(0.0, 0.15 * sin(uTime * 0.03), 0.0);
+
+    vec3 fw = normalize(ta - ro);
+    vec3 rt = normalize(cross(fw, vec3(0.0, 1.0, 0.0)));
+    vec3 up = cross(rt, fw);
+    vec3 rd = normalize(fw * 1.8 + rt * uv.x + up * uv.y);
+
+    // -------------------- volumetric march --------------------
+    float stepL = (FAR - NEAR) / float(STEPS);
+    float jitter = hash12(frag + fract(uTime) * 61.7);
+
+    vec3 col = vec3(0.0);
+    float T = 1.0;
+
+    for (int i = 0; i < STEPS; i++) {
+      if (T < 0.015) break;
+      vec3 p = ro + rd * (NEAR + (float(i) + jitter) * stepL);
+
+      float d = density(p);
+      if (d > 0.004) {
+        float r = length(p);
+        // lit from the cluster centre + local knots compress crimson
+        float li = 1.9 / (1.0 + dot(p, p));
+        float knot = smoothstep(0.55, 0.88, fbm(p * 0.9 + 31.0)) * smoothstep(0.30, 0.8, d);
+        vec3 emis = palette(exp(-r * 0.30) * 1.6, knot);
+        // push chroma — the tonemap otherwise greys the midtones out
+        float lum = dot(emis, vec3(0.299, 0.587, 0.114));
+        emis = mix(vec3(lum), emis, 1.35);
+        col += T * d * stepL * emis * (0.09 + 2.0 * li);
+        T *= exp(-d * ${CONFIG.absorption.toFixed(2)} * stepL);
+      }
+    }
+
+    // newborn stars, with halos, hidden by the gas in front of them
+    for (int s = 0; s < NSTARS; s++) {
+      vec3 sp = starPos(s);
+      vec3 toS = sp - ro;
+      float proj = dot(toS, rd);
+      if (proj > 0.0) {
+        float off = length(toS - rd * proj);
+        // gas transmittance along the ray to the star (sampled coarsely)
+        float sT = 1.0;
+        for (int k = 1; k <= 6; k++) {
+          vec3 q = ro + rd * (proj * float(k) / 7.0);
+          sT *= exp(-density(q) * 0.85 * proj / 7.0);
+        }
+        vec3 sc = starCol(s) * sT;
+        col += sc * (exp(-off * off * 340.0) + exp(-off * 6.5) * 0.14);
+      }
+    }
+
+    // background stars through what is left of the transmittance
+    col += T * stars(rd) * 1.1;
+    col += T * vec3(0.010, 0.012, 0.020);
+
+    // -------------------- post --------------------
+    col *= ${CONFIG.exposure.toFixed(2)};
+    col = aces(col);
+    col = pow(col, vec3(0.4545));
+
+    vec2 q = frag / uResolution;
+    col *= 0.35 + 0.65 * pow(16.0 * q.x * q.y * (1.0 - q.x) * (1.0 - q.y), 0.28);
+    col += (hash12(frag + fract(uTime) * 100.0) - 0.5) * uGrain;
+
+    outColor = vec4(col, 1.0);
+  }`;
+
+  // -------------------- program --------------------
+  function compile(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      window.__err = gl.getShaderInfoLog(s);
+      console.error(window.__err);
+      return null;
+    }
+    return s;
+  }
+
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VERT));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FRAG));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.error(gl.getProgramInfoLog(prog));
+    document.getElementById('nogl').style.display = 'grid';
+    return;
+  }
+  gl.useProgram(prog);
+
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  const aPos = gl.getAttribLocation(prog, 'aPos');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+  const uResolution = gl.getUniformLocation(prog, 'uResolution');
+  const uTime = gl.getUniformLocation(prog, 'uTime');
+  const uGrain = gl.getUniformLocation(prog, 'uGrain');
+
+  // -------------------- sizing / adaptive quality --------------------
+  let scale = 0.8;
+  let ema = 16;
+
+  function resize() {
+    const dpr = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    const w = Math.max(2, Math.floor(window.innerWidth * dpr * scale));
+    const h = Math.max(2, Math.floor(window.innerHeight * dpr * scale));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+      gl.viewport(0, 0, w, h);
+    }
+  }
+  window.addEventListener('resize', resize, { passive: true });
+
+  // -------------------- loop --------------------
+  let last = performance.now();
+  let lastCheck = last;
+  let ready = false;
+
+  function frame(now) {
+    const dtMs = now - last;
+    last = now;
+    const time = now / 1000;
+
+    ema = ema * 0.94 + Math.min(dtMs, 100) * 0.06;
+    if (now - lastCheck > CONFIG.checkEveryMs) {
+      lastCheck = now;
+      if (ema > CONFIG.frameBudgetMs * 1.6 && scale > CONFIG.renderScaleMin) {
+        scale = Math.max(CONFIG.renderScaleMin, scale * CONFIG.scaleStep);
+        resize();
+      } else if (ema < CONFIG.frameBudgetMs * 0.62 && scale < CONFIG.renderScaleMax) {
+        scale = Math.min(CONFIG.renderScaleMax, scale / CONFIG.scaleStep);
+        resize();
+      }
+    }
+
+    gl.uniform2f(uResolution, canvas.width, canvas.height);
+    gl.uniform1f(uTime, time);
+    gl.uniform1f(uGrain, CONFIG.grain);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    if (!ready) {
+      ready = true;
+      document.body.classList.add('ready');
+    }
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

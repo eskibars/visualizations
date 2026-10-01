@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Haunted Hill</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0817; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 125% 100% at 50% 40%,
+        rgba(0,0,0,0) 40%, rgba(0,0,0,.38) 80%, rgba(0,0,0,.8) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(200, 180, 255, .28);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">all hallows' eve</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  HAUNTED HILL — a storm wheels over the house on the hill.
+  //  Lightning strikes on its own schedule: a double-flicker, a
+  //  jagged bolt with branches, and a sky wash that briefly
+  //  silhouettes everything. Bats commute. The pumpkins watch.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1.6,
+
+    hillY: 0.78,             // hill crest line
+    lightning: { minGap: 4.5, maxGap: 11, flickers: [2, 4] },
+    bats: 11,
+    cloudSpeed: 14,          // px/s base drift
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  // -------------------- clouds (two scrolling sheets) --------------------
+  function makeCloudSheet(w, h, tint, blobs) {
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const g = c.getContext('2d');
+    for (let i = 0; i < blobs; i++) {
+      const x = Math.random() * w;
+      const y = h * rand(0.15, 0.85);
+      const r = rand(h * 0.18, h * 0.5);
+      const grad = g.createRadialGradient(x, y, 0, x, y, r);
+      grad.addColorStop(0, `rgba(${tint}, ${rand(0.18, 0.38)})`);
+      grad.addColorStop(1, `rgba(${tint}, 0)`);
+      g.fillStyle = grad;
+      g.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    // feather the sheet edges so scrolling never shows a seam
+    const fade = g.createLinearGradient(0, 0, 0, h);
+    fade.addColorStop(0, 'rgba(0,0,0,1)');
+    fade.addColorStop(0.14, 'rgba(0,0,0,0)');
+    fade.addColorStop(0.80, 'rgba(0,0,0,0)');
+    fade.addColorStop(1, 'rgba(0,0,0,1)');
+    g.globalCompositeOperation = 'destination-out';
+    g.fillStyle = fade;
+    g.fillRect(0, 0, w, h);
+    return c;
+  }
+
+  let cloudA, cloudB;
+  let cloudAx = 0, cloudBx = 0;
+
+  // -------------------- mansion geometry --------------------
+  let mansion = null;
+
+  function buildMansion() {
+    const u = W / 1600;                    // design unit
+    const mx = W * 0.5;                    // house centre x
+    const my = H * CONFIG.hillY + 6 * u;   // ground line at the house
+    const s = u;
+    const parts = [];
+    const P = (x, y, w, h) => parts.push({ x: mx + x * s, y: my + y * s, w: w * s, h: h * s });
+
+    // main block
+    P(-150, -220, 300, 220);
+    // left wing
+    P(-260, -150, 110, 150);
+    // right wing
+    P(150, -135, 120, 135);
+    // tower
+    P(-40, -420, 96, 210);
+    // chimneys
+    P(-120, -268, 22, 55);
+    P(96, -250, 20, 40);
+
+    // roofs (triangles): [apexX, apexY, baseX0, baseX1, baseY]
+    const roofs = [
+      { ax: 0,   ay: -300, x0: -170, x1: 170, by: -220 },   // main gable
+      { ax: -205, ay: -215, x0: -272, x1: -138, by: -150 },// left wing roof
+      { ax: 210, ay: -195, x0: 138, x1: 282, by: -135 },   // right wing roof
+      { ax: 8,   ay: -520, x0: -52, x1: 68,  by: -420 },   // tower spire
+    ];
+
+    // windows: warm lit rectangles [x, y, w, h, flickerSpeed, phase]
+    const windows = [];
+    const addWin = (x, y, w, h) => windows.push({
+      x: mx + x * s, y: my + y * s, w: w * s, h: h * s,
+      tw: rand(1.5, 7), ph: rand(0, Math.PI * 2),
+      state: 1, stateT: rand(4, 20),
+    });
+    // tower tall windows
+    addWin(-22, -400, 20, 44);
+    addWin(16, -400, 20, 44);
+    addWin(-22, -330, 20, 44);
+    addWin(16, -330, 20, 44);
+    // main block rows
+    for (const yy of [-190, -120, -55]) {
+      for (const xx of [-120, -60, 44, 104]) addWin(xx, yy, 26, 38);
+    }
+    // attic round-ish
+    addWin(-14, -262, 24, 26);
+    // wings
+    addWin(-236, -120, 24, 34);
+    addWin(-196, -120, 24, 34);
+    addWin(178, -100, 24, 34);
+    addWin(224, -100, 24, 34);
+    // door
+    addWin(-16, -50, 28, 50);
+
+    mansion = { parts, roofs, windows, mx, my, u };
+  }
+
+  // -------------------- trees (recursive, pre-grown) --------------------
+  function growTree(x, y, len, ang, depth, sway) {
+    const segs = [];
+    (function branch(x, y, len, ang, depth) {
+      if (depth === 0 || len < 4) return;
+      const nx = x + Math.cos(ang) * len;
+      const ny = y + Math.sin(ang) * len;
+      segs.push([x, y, nx, ny, len]);
+      const n = depth > 3 ? 2 : (Math.random() < 0.85 ? 2 : 3);
+      for (let i = 0; i < n; i++) {
+        branch(nx, ny, len * rand(0.62, 0.8),
+               ang + rand(-0.55, 0.55) + (i - (n - 1) / 2) * 0.5, depth - 1);
+      }
+    })(x, y, len, ang, depth);
+    return { segs, x, sway };
+  }
+  let trees = [];
+
+  // -------------------- bats --------------------
+  let bats = [];
+
+  function spawnBat(fromLeft) {
+    return {
+      x: fromLeft ? -30 : W + 30,
+      y: rand(H * 0.10, H * 0.5),
+      vx: (fromLeft ? 1 : -1) * rand(60, 130),
+      wobA: rand(10, 46), wobW: rand(1.2, 3.2), ph: rand(0, Math.PI * 2),
+      flap: rand(6, 11), size: rand(9, 15) * (W / 1600),
+    };
+  }
+
+  // -------------------- lightning --------------------
+  const storm = {
+    nextStrike: rand(2, 5),
+    bolt: null, branch: null,
+    flickerLeft: 0, flickerT: 0, wash: 0,
+  };
+
+  function jaggedPath(x0, y0, x1, y1, displace) {
+    let pts = [{ x: x0, y: y0 }, { x: x1, y: y1 }];
+    for (let d = displace; d > 3; d *= 0.58) {
+      const next = [];
+      for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i], b = pts[i + 1];
+        next.push(a, {
+          x: (a.x + b.x) / 2 + (Math.random() - 0.5) * d,
+          y: (a.y + b.y) / 2 + (Math.random() - 0.5) * d * 0.4,
+        });
+      }
+      next.push(pts[pts.length - 1]);
+      pts = next;
+    }
+    return pts;
+  }
+
+  function strike() {
+    const x0 = rand(W * 0.08, W * 0.92);
+    const y0 = H * rand(0.04, 0.16);
+    const x1 = x0 + rand(-W * 0.12, W * 0.12);
+    const y1 = H * rand(0.55, 0.72);
+    storm.bolt = jaggedPath(x0, y0, x1, y1, W * 0.16);
+    // one branch
+    const bi = 3 + ((Math.random() * (storm.bolt.length - 8)) | 0);
+    const bp = storm.bolt[bi];
+    storm.branch = jaggedPath(bp.x, bp.y, bp.x + rand(-W * 0.14, W * 0.14), bp.y + rand(H * 0.1, H * 0.25), W * 0.05);
+    storm.flickerLeft = Math.round(rand(CONFIG.lightning.flickers[0], CONFIG.lightning.flickers[1]));
+    storm.flickerT = 0;
+    storm.wash = 0;
+  }
+
+  // -------------------- pumpkins --------------------
+  let pumpkins = [];
+
+  function buildPumpkins() {
+    pumpkins = [
+      { x: W * 0.335, y: H * (CONFIG.hillY + 0.015), r: W * 0.011, ph: 0 },
+      { x: W * 0.365, y: H * (CONFIG.hillY + 0.028), r: W * 0.008, ph: 2.1 },
+      { x: W * 0.655, y: H * (CONFIG.hillY + 0.02), r: W * 0.009, ph: 4.0 },
+    ];
+  }
+
+  // -------------------- resize / build --------------------
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    cloudA = makeCloudSheet(Math.ceil(W * 1.4), Math.ceil(H * 0.55), '72, 66, 112', 130);
+    cloudB = makeCloudSheet(Math.ceil(W * 1.4), Math.ceil(H * 0.4), '40, 34, 66', 100);
+
+    buildMansion();
+    buildPumpkins();
+
+    trees = [
+      growTree(W * 0.13, H * (CONFIG.hillY + 0.05), H * 0.085, -Math.PI / 2 - 0.12, 7),
+      growTree(W * 0.86, H * (CONFIG.hillY + 0.04), H * 0.095, -Math.PI / 2 + 0.15, 7),
+      growTree(W * 0.045, H * (CONFIG.hillY + 0.10), H * 0.07, -Math.PI / 2, 6),
+      growTree(W * 0.95, H * (CONFIG.hillY + 0.11), H * 0.075, -Math.PI / 2 + 0.05, 6),
+    ];
+
+    bats = [];
+    for (let i = 0; i < CONFIG.bats; i++) bats.push(spawnBat(Math.random() < 0.5));
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  // -------------------- draw --------------------
+  function drawSky(time, dt) {
+    const g = ctx.createLinearGradient(0, 0, 0, H * CONFIG.hillY);
+    g.addColorStop(0, '#0d0a1e');
+    g.addColorStop(0.5, '#1a1433');
+    g.addColorStop(0.85, '#2a1f4a');
+    g.addColorStop(1, '#3a2a55');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H * CONFIG.hillY + 4);
+
+    // pale moon, partly behind clouds
+    const mx = W * 0.76, my = H * 0.18, mr = W * 0.045;
+    ctx.save();
+    const mg = ctx.createRadialGradient(mx, my, 0, mx, my, mr * 3.2);
+    mg.addColorStop(0, 'rgba(210, 205, 235, 0.30)');
+    mg.addColorStop(1, 'rgba(210, 205, 235, 0)');
+    ctx.fillStyle = mg;
+    ctx.fillRect(mx - mr * 3.2, my - mr * 3.2, mr * 6.4, mr * 6.4);
+    ctx.fillStyle = '#d8d4ea';
+    ctx.beginPath();
+    ctx.arc(mx, my, mr, 0, Math.PI * 2);
+    ctx.fill();
+    // moon maria
+    ctx.fillStyle = 'rgba(150, 148, 175, 0.5)';
+    ctx.beginPath(); ctx.arc(mx - mr * 0.3, my - mr * 0.2, mr * 0.22, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(mx + mr * 0.25, my + mr * 0.3, mr * 0.16, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(mx + mr * 0.05, my - mr * 0.45, mr * 0.1, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+
+    // churning cloud sheets
+    const gust = 1 + 0.5 * Math.sin(time * 0.13) + storm.wash * 1.2;
+    cloudAx -= CONFIG.cloudSpeed * gust * dt;
+    cloudBx -= CONFIG.cloudSpeed * 1.9 * gust * dt;
+    const wA = cloudA.width, wB = cloudB.width;
+    let x = ((cloudAx % wA) + wA) % wA - wA;
+    ctx.globalAlpha = 0.9;
+    while (x < W) { ctx.drawImage(cloudA, x, -H * 0.06); x += wA; }
+    x = ((cloudBx % wB) + wB) % wB - wB;
+    ctx.globalAlpha = 0.85;
+    while (x < W) { ctx.drawImage(cloudB, x, H * 0.10); x += wB; }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawLightning(time, dt) {
+    storm.nextStrike -= dt;
+    if (storm.nextStrike <= 0 && storm.flickerLeft <= 0) {
+      strike();
+      storm.nextStrike = rand(CONFIG.lightning.minGap, CONFIG.lightning.maxGap);
+    }
+
+    if (storm.flickerLeft > 0) {
+      storm.flickerT += dt;
+      // each flicker: sharp attack, short decay
+      if (storm.flickerT > 0.16) {
+        storm.flickerT = 0;
+        storm.flickerLeft--;
+        if (storm.flickerLeft > 0) { storm.bolt = null; storm.branch = null; }
+        else if (storm.flickerLeft === 0) { storm.bolt = null; storm.branch = null; }
+      }
+      const env = Math.max(0, 1 - storm.flickerT / 0.16);
+      storm.wash = Math.max(storm.wash, env * 0.55);
+
+      if (storm.bolt && env > 0.05) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'screen';
+        // sky wash
+        ctx.fillStyle = `rgba(190, 200, 255, ${0.10 * env})`;
+        ctx.fillRect(0, 0, W, H);
+        // bolt glow
+        ctx.shadowColor = 'rgba(170, 190, 255, 0.9)';
+        ctx.shadowBlur = 22;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = `rgba(225, 232, 255, ${env})`;
+        ctx.lineWidth = 2.4 * (W / 1600);
+        ctx.beginPath();
+        ctx.moveTo(storm.bolt[0].x, storm.bolt[0].y);
+        for (const p of storm.bolt) ctx.lineTo(p.x, p.y);
+        ctx.stroke();
+        if (storm.branch) {
+          ctx.lineWidth = 1.3 * (W / 1600);
+          ctx.beginPath();
+          ctx.moveTo(storm.branch[0].x, storm.branch[0].y);
+          for (const p of storm.branch) ctx.lineTo(p.x, p.y);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+    } else {
+      storm.wash *= Math.pow(0.02, dt);
+    }
+  }
+
+  function drawHill() {
+    ctx.fillStyle = '#0c0a1a';
+    ctx.beginPath();
+    ctx.moveTo(-W * 0.05, H + 2);
+    ctx.lineTo(-W * 0.05, H * CONFIG.hillY);
+    ctx.quadraticCurveTo(W * 0.22, H * (CONFIG.hillY - 0.075), W * 0.5, H * (CONFIG.hillY - 0.03));
+    ctx.quadraticCurveTo(W * 0.78, H * (CONFIG.hillY + 0.005), W * 1.05, H * (CONFIG.hillY - 0.02));
+    ctx.lineTo(W * 1.05, H + 2);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawMansion(time) {
+    const m = mansion;
+    // silhouette
+    ctx.fillStyle = '#0a0814';
+    for (const p of m.parts) ctx.fillRect(p.x, p.y, p.w, p.h);
+    for (const r of m.roofs) {
+      ctx.beginPath();
+      ctx.moveTo(m.mx + r.ax * m.u, m.my + r.ay * m.u);
+      ctx.lineTo(m.mx + r.x0 * m.u, m.my + r.by * m.u);
+      ctx.lineTo(m.mx + r.x1 * m.u, m.my + r.by * m.u);
+      ctx.closePath();
+      ctx.fill();
+    }
+    // windows: warm, moody, occasionally one dies and relights
+    for (const w of m.windows) {
+      w.stateT -= 1 / 60;
+      if (w.stateT <= 0) {
+        w.state = Math.random() < 0.12 ? 0 : 1;   // mostly lit
+        w.stateT = w.state ? rand(6, 22) : rand(1.5, 5);
+      }
+      const buzz = 0.82 + 0.18 * Math.sin(time * w.tw + w.ph);
+      const a = (w.state ? 0.85 : 0.06) * buzz * (1 - storm.wash * 0.85);
+      if (a <= 0.02) continue;
+      ctx.fillStyle = `rgba(255, ${w.state ? 176 : 190}, ${w.state ? 96 : 130}, ${a})`;
+      ctx.fillRect(w.x, w.y, w.w, w.h);
+      // halo on strong lit
+      if (w.state && a > 0.4) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'screen';
+        const g = ctx.createRadialGradient(w.x + w.w / 2, w.y + w.h / 2, 0, w.x + w.w / 2, w.y + w.h / 2, w.w * 1.5);
+        g.addColorStop(0, `rgba(255, 170, 80, ${0.13 * a})`);
+        g.addColorStop(1, 'rgba(255, 170, 80, 0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(w.x - w.w * 1.5, w.y - w.w * 1.5, w.w * 4, w.h * 4);
+        ctx.restore();
+      }
+    }
+  }
+
+  function drawTrees(time) {
+    ctx.save();
+    ctx.strokeStyle = '#0a0814';
+    ctx.lineCap = 'round';
+    const t = time * 0.9;
+    for (const tr of trees) {
+      const sway = Math.sin(t + tr.x) * 0.012 + storm.wash * Math.sin(t * 7) * 0.02;
+      ctx.lineWidth = 5 * (W / 1600);
+      for (const [x0, y0, x1, y1, len] of tr.segs) {
+        // shear the whole tree slightly by height above its root
+        const k = sway * ((tr.x - x0) / W + 0.5);
+        ctx.lineWidth = Math.max(0.7, len * 0.10 * (W / 1600));
+        ctx.beginPath();
+        ctx.moveTo(x0 + (y0 - H * CONFIG.hillY) * -k, y0);
+        ctx.lineTo(x1 + (y1 - H * CONFIG.hillY) * -k, y1);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawBats(time, dt) {
+    ctx.fillStyle = '#0d0a18';
+    for (const b of bats) {
+      b.x += b.vx * dt;
+      b.y += Math.sin(time * b.wobW + b.ph) * 22 * dt;
+      if (b.x < -40 || b.x > W + 40) {
+        Object.assign(b, spawnBat(b.vx < 0 ? false : true));
+        b.y = rand(H * 0.08, H * 0.5);
+      }
+      const flap = Math.sin(time * b.flap + b.ph);
+      const s = b.size;
+      ctx.beginPath();
+      ctx.moveTo(b.x, b.y);
+      ctx.quadraticCurveTo(b.x - s, b.y - s * (0.4 + 0.6 * flap), b.x - s * 2, b.y - s * 0.2 * flap);
+      ctx.quadraticCurveTo(b.x - s, b.y + s * 0.25, b.x, b.y + s * 0.12);
+      ctx.quadraticCurveTo(b.x + s, b.y + s * 0.25, b.x + s * 2, b.y - s * 0.2 * flap);
+      ctx.quadraticCurveTo(b.x + s, b.y - s * (0.4 + 0.6 * flap), b.x, b.y);
+      ctx.fill();
+    }
+  }
+
+  function drawPumpkins(time) {
+    for (const p of pumpkins) {
+      const flick = 0.86 + 0.14 * Math.sin(time * 7 + p.ph) * Math.sin(time * 3.1 + p.ph * 2);
+      // glow
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r * 4);
+      g.addColorStop(0, `rgba(255, 150, 40, ${0.34 * flick})`);
+      g.addColorStop(1, 'rgba(255, 150, 40, 0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(p.x - p.r * 4, p.y - p.r * 4, p.r * 8, p.r * 8);
+      ctx.restore();
+      // body
+      ctx.fillStyle = '#c05a12';
+      ctx.beginPath();
+      ctx.ellipse(p.x, p.y, p.r, p.r * 0.82, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(90, 38, 6, 0.55)';
+      ctx.beginPath(); ctx.ellipse(p.x - p.r * 0.45, p.y, p.r * 0.28, p.r * 0.78, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(p.x + p.r * 0.45, p.y, p.r * 0.28, p.r * 0.78, 0, 0, Math.PI * 2); ctx.fill();
+      // stem
+      ctx.fillStyle = '#3d5226';
+      ctx.fillRect(p.x - p.r * 0.08, p.y - p.r * 1.12, p.r * 0.16, p.r * 0.36);
+      // carved face, glowing
+      ctx.fillStyle = `rgba(255, 210, 90, ${0.75 + 0.25 * flick})`;
+      const e = p.r * 0.2;
+      ctx.beginPath();
+      ctx.moveTo(p.x - p.r * 0.42, p.y - p.r * 0.18); ctx.lineTo(p.x - p.r * 0.12, p.y - p.r * 0.34); ctx.lineTo(p.x - p.r * 0.12, p.y - p.r * 0.08);
+      ctx.closePath(); ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(p.x + p.r * 0.42, p.y - p.r * 0.18); ctx.lineTo(p.x + p.r * 0.12, p.y - p.r * 0.34); ctx.lineTo(p.x + p.r * 0.12, p.y - p.r * 0.08);
+      ctx.closePath(); ctx.fill();
+      // grin
+      ctx.beginPath();
+      ctx.moveTo(p.x - p.r * 0.45, p.y + p.r * 0.22);
+      ctx.lineTo(p.x - p.r * 0.2, p.y + p.r * 0.38);
+      ctx.lineTo(p.x, p.y + p.r * 0.2);
+      ctx.lineTo(p.x + p.r * 0.2, p.y + p.r * 0.38);
+      ctx.lineTo(p.x + p.r * 0.45, p.y + p.r * 0.22);
+      ctx.lineTo(p.x + p.r * 0.3, p.y + p.r * 0.44);
+      ctx.lineTo(p.x, p.y + p.r * 0.30);
+      ctx.lineTo(p.x - p.r * 0.3, p.y + p.r * 0.44);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  function drawFog(time) {
+    ctx.save();
+    for (let i = 0; i < 2; i++) {
+      const y = H * (0.80 + i * 0.10);
+      const off = ((time * (8 + i * 6)) % (W * 1.6));
+      const g = ctx.createLinearGradient(0, y - H * 0.05, 0, y + H * 0.10);
+      g.addColorStop(0, 'rgba(90, 80, 130, 0)');
+      g.addColorStop(0.5, `rgba(90, 80, 130, ${0.10 - i * 0.03})`);
+      g.addColorStop(1, 'rgba(90, 80, 130, 0)');
+      ctx.fillStyle = g;
+      const bw = W * 0.8;
+      const bx = -((off % (bw * 2)) - bw);
+      ctx.fillRect(bx - W * 0.1, y - H * 0.05, bw * 2, H * 0.15);
+      ctx.fillRect(bx - W * 0.1 - bw * 2, y - H * 0.05, bw * 2, H * 0.15);
+    }
+    ctx.restore();
+  }
+
+  // -------------------- loop --------------------
+  let last = performance.now();
+  let ready = false;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    drawSky(time, dt);
+    drawLightning(time, dt);
+    drawBats(time, dt);
+    drawHill();
+    drawTrees(time);
+    drawMansion(time);
+    drawPumpkins(time);
+    drawFog(time);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Spiral Galaxy</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #01020a; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 130% 105% at 50% 45%,
+        rgba(0,0,0,0) 35%, rgba(0,0,0,.4) 78%, rgba(0,0,0,.85) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(200, 214, 255, .28);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">ngc 5194 · grand design</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  SPIRAL GALAXY — thirty thousand stars on density-wave arms,
+  //  each on its own orbit: the inner disc laps the outer, so the
+  //  grand-design spiral is a pattern the stars flow through,
+  //  not a shape they are glued to. Additive glow, slow tilt.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1.6,
+    stars: 30000,
+    brightStars: 1400,       // drawn as glow sprites
+    arms: 2,
+    winding: 2.35,           // radians of twist across the disc
+    armSpread: 0.32,         // gaussian width of an arm, radians-ish
+    coreFraction: 0.16,      // stars in the central bulge
+    squash: 0.42,            // vertical foreshortening
+    omegaScale: 0.055,       // rad/s at the very centre
+    precession: 0.021,       // slow wobble of the tilt axis, rad/s
+    radius: 0.44,            // galaxy radius, fraction of min(W,H)
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  // Box–Muller gaussian
+  let spare = null;
+  function gauss() {
+    if (spare !== null) { const v = spare; spare = null; return v; }
+    let u = 0, v = 0;
+    while (u === 0) u = Math.random();
+    while (v === 0) v = Math.random();
+    const m = Math.sqrt(-2 * Math.log(u));
+    spare = m * Math.sin(2 * Math.PI * v);
+    return m * Math.cos(2 * Math.PI * v);
+  }
+
+  // -------------------- star field --------------------
+  // arrays: r, theta0, omega, size, bright, hue tint
+  let S_r, S_t, S_o, S_s, S_b, S_h;
+  let bgStars = [];
+
+  function seedGalaxy() {
+    const N = CONFIG.stars;
+    S_r = new Float32Array(N);
+    S_t = new Float32Array(N);
+    S_o = new Float32Array(N);
+    S_s = new Float32Array(N);
+    S_b = new Float32Array(N);
+    S_h = new Float32Array(N);
+
+    for (let i = 0; i < N; i++) {
+      const inCore = Math.random() < CONFIG.coreFraction;
+      let r;
+      if (inCore) {
+        r = Math.pow(Math.random(), 1.6) * 0.24;          // bulge
+      } else {
+        r = 0.12 + Math.pow(Math.random(), 0.72) * 0.88;  // disc, denser inward
+        r *= 1.0;
+      }
+      let theta;
+      if (inCore) {
+        theta = Math.random() * Math.PI * 2;
+      } else {
+        const arm = ((Math.random() * CONFIG.arms) | 0) * (Math.PI * 2 / CONFIG.arms);
+        // density wave: arm position twists with radius
+        const armTheta = arm + r * CONFIG.winding * Math.PI;
+        theta = armTheta + gauss() * CONFIG.armSpread * (0.55 + r * 0.7);
+      }
+      S_r[i] = r;
+      S_t[i] = theta;
+      // flat-ish rotation curve
+      S_o[i] = CONFIG.omegaScale / (0.10 + r);
+
+      // size & brightness
+      S_s[i] = inCore ? rand(0.6, 1.4) : (Math.random() < 0.06 ? rand(1.3, 2.4) : rand(0.5, 1.2));
+      S_b[i] = inCore ? rand(0.25, 0.7) : rand(0.12, 0.75);
+
+      // colour: gold core -> white -> blue arms, with HII pink flecks
+      const hii = !inCore && Math.random() < 0.045;
+      if (hii) S_h[i] = 2;                       // pink star-forming region
+      else if (inCore) S_h[i] = Math.random() < 0.75 ? 0 : 1;   // warm / white
+      else S_h[i] = Math.random() < 0.72 ? 3 : 1;               // blue / white
+    }
+
+    bgStars = [];
+    for (let i = 0; i < 220; i++) {
+      bgStars.push({
+        x: Math.random(), y: Math.random(),
+        r: rand(0.4, 1.4),
+        tw: rand(0.3, 1.8), ph: rand(0, Math.PI * 2),
+        a: rand(0.15, 0.7),
+      });
+    }
+  }
+
+  const PALETTE = [
+    [255, 226, 180],   // warm core
+    [248, 246, 240],   // white
+    [255, 170, 195],   // HII pink
+    [168, 200, 255],   // blue arm
+  ];
+
+  // glow sprite for the bright stars + core
+  function makeSprite(size, stops) {
+    const c = document.createElement('canvas');
+    c.width = c.height = size;
+    const g = c.getContext('2d');
+    const grad = g.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    for (const [p, col] of stops) grad.addColorStop(p, col);
+    g.fillStyle = grad;
+    g.fillRect(0, 0, size, size);
+    return c;
+  }
+  let glowSprite, coreSprite, bgSprite;
+
+  // -------------------- resize --------------------
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    glowSprite = makeSprite(16, [
+      [0, 'rgba(255, 255, 255, 0.9)'],
+      [0.25, 'rgba(210, 225, 255, 0.35)'],
+      [1, 'rgba(190, 210, 255, 0)'],
+    ]);
+    coreSprite = makeSprite(256, [
+      [0, 'rgba(255, 238, 205, 0.95)'],
+      [0.12, 'rgba(255, 222, 175, 0.55)'],
+      [0.35, 'rgba(210, 180, 160, 0.16)'],
+      [1, 'rgba(160, 140, 160, 0)'],
+    ]);
+    bgSprite = makeSprite(8, [
+      [0, 'rgba(255,255,255,0.9)'],
+      [1, 'rgba(255,255,255,0)'],
+    ]);
+    seedGalaxy();
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  // pointer tilts the disc a touch
+  const tilt = { x: 0.42, y: 0, tx: 0.42, ty: 0 };
+  window.addEventListener('pointermove', (e) => {
+    tilt.ty = ((e.clientY / window.innerHeight) - 0.5) * 0.22;
+    tilt.tx = 0.42 + ((e.clientX / window.innerWidth) - 0.5) * 0.10;
+  }, { passive: true });
+
+  // -------------------- render --------------------
+  let last = performance.now();
+  let ready = false;
+
+  function frame(now) {
+    const time = now / 1000;
+
+    tilt.x += (tilt.tx - tilt.x) * 0.03;
+    tilt.y += (tilt.ty - tilt.y) * 0.03;
+
+    // deep space
+    ctx.fillStyle = '#01020a';
+    ctx.fillRect(0, 0, W, H);
+
+    // background starfield
+    ctx.save();
+    for (const s of bgStars) {
+      ctx.globalAlpha = s.a * (0.6 + 0.4 * Math.sin(time * s.tw + s.ph));
+      const r = s.r * DPR;
+      ctx.drawImage(bgSprite, s.x * W - r * 2, s.y * H - r * 2, r * 4, r * 4);
+    }
+    ctx.restore();
+
+    const cx = W / 2, cy = H / 2;
+    const R = Math.min(W, H) * CONFIG.radius;
+    const squash = tilt.x + tilt.y * 0.3;
+
+    // core glow
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const cg = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * 0.55);
+    cg.addColorStop(0, 'rgba(255, 232, 190, 0.32)');
+    cg.addColorStop(0.3, 'rgba(230, 195, 160, 0.10)');
+    cg.addColorStop(1, 'rgba(120, 110, 160, 0)');
+    ctx.fillStyle = cg;
+    ctx.fillRect(cx - R * 0.55, cy - R * 0.55 * squash - R * 0.1, R * 1.1, R * 1.1 * squash + R * 0.2);
+    ctx.restore();
+
+    // stars, additive
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const N = CONFIG.stars;
+    const precess = Math.sin(time * CONFIG.precession) * 0.10;
+
+    // dim stars: cheap rects
+    for (let i = 0; i < N; i++) {
+      const theta = S_t[i] + S_o[i] * time;
+      const r = S_r[i] * R;
+      const px = cx + Math.cos(theta + precess * S_r[i]) * r;
+      const py = cy + Math.sin(theta + precess * S_r[i]) * r * squash;
+      if (px < -4 || px > W + 4 || py < -4 || py > H + 4) continue;
+      const col = PALETTE[S_h[i]];
+      const tw = 0.82 + 0.18 * Math.sin(time * (1.5 + S_o[i] * 8) + S_t[i] * 7);
+      const a = S_b[i] * tw;
+      const s = S_s[i] * DPR;
+      ctx.fillStyle = `rgba(${col[0]},${col[1]},${col[2]},${a.toFixed(3)})`;
+      ctx.fillRect(px, py, s, s);
+    }
+
+    // bright stars: glow sprites
+    const BN = CONFIG.brightStars;
+    for (let i = 0; i < BN; i++) {
+      const j = (i * 7919) % N;                    // deterministic spread
+      const theta = S_t[j] + S_o[j] * time;
+      const r = S_r[j] * R;
+      const px = cx + Math.cos(theta + precess * S_r[j]) * r;
+      const py = cy + Math.sin(theta + precess * S_r[j]) * r * squash;
+      if (px < -8 || px > W + 8 || py < -8 || py > H + 8) continue;
+      const s = S_s[j] * 6 * DPR * (0.8 + 0.2 * Math.sin(time * 2 + S_t[j] * 11));
+      ctx.globalAlpha = 0.55 * S_b[j];
+      ctx.drawImage(glowSprite, px - s / 2, py - s / 2, s, s);
+    }
+    ctx.restore();
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Lantern Festival</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #070b1e; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 125% 100% at 50% 40%,
+        rgba(0,0,0,0) 42%, rgba(0,0,0,.32) 80%, rgba(0,0,0,.72) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(255, 210, 150, .30);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">pingxi · sky lanterns</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  LANTERN FESTIVAL — lanterns lift from two river villages and
+  //  drift up through the mountain dusk, flickering, thinning with
+  //  altitude, reflected in the water below. Mist slides between
+  //  the ridges. Runs forever; every night is different.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1.6,
+
+    waterY: 0.74,           // fraction of height
+    lanternMax: 240,
+    spawnPerSec: 5.5,
+
+    riseSpeed: [0.010, 0.022],   // of height per second
+    swayAmp: [0.004, 0.014],
+    flickerSpeed: [2.0, 6.0],
+    fadeTop: 0.03,               // fade out approaching the top
+
+    villages: [ { x: 0.30, spread: 0.10 }, { x: 0.68, spread: 0.08 } ],
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1;
+  let waterPx = 0;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  // -------------------- scenery: generated once per resize --------------------
+  let ridges = [];        // far-to-near mountain silhouette paths
+  let stars = [];
+  let mistLayers = [];    // offscreen soft strips
+  let waterStreaks = [];
+  let villageLights = [];
+
+  function makeRidge(baseY, amp, rough, color) {
+    const pts = [];
+    const n = 90;
+    let seed = Math.random() * 1000;
+    for (let i = 0; i <= n; i++) {
+      const x = i / n;
+      let y = baseY;
+      y -= amp * (0.55 + 0.45 * Math.sin(x * 5.2 + seed)) ;
+      y -= amp * rough * (Math.sin(x * 17.3 + seed * 2.0) * 0.5 + Math.sin(x * 31.7 + seed * 3.0) * 0.3);
+      pts.push({ x: x * 1.06 - 0.03, y });   // slight overscan
+    }
+    return { pts, color };
+  }
+
+  function makeMistBlobs(count) {
+    const blobs = [];
+    for (let i = 0; i < count; i++) {
+      blobs.push({
+        x: Math.random(), y: rand(0.2, 0.9),
+        r: rand(0.05, 0.14),
+        a: rand(0.5, 1.0),
+        drift: rand(0.4, 1.4),
+      });
+    }
+    return blobs;
+  }
+
+  function buildScene() {
+    // ridges: far (light, high) to near (dark, low)
+    ridges = [
+      makeRidge(0.585, 0.085, 0.5, '#232c52'),
+      makeRidge(0.645, 0.075, 0.7, '#1a2244'),
+      makeRidge(0.705, 0.060, 0.9, '#121a36'),
+      makeRidge(0.745, 0.035, 1.0, '#0c1228'),
+    ];
+
+    stars = [];
+    for (let i = 0; i < 130; i++) {
+      stars.push({
+        x: Math.random(), y: Math.random() * 0.5,
+        r: rand(0.4, 1.3),
+        tw: rand(0.5, 2.2), ph: rand(0, Math.PI * 2),
+        a: rand(0.25, 0.85),
+      });
+    }
+
+    mistLayers = [
+      { blobs: makeMistBlobs(9), y: 0.615, alpha: 0.10, speed: 0.004, scale: 1.6 },
+      { blobs: makeMistBlobs(8), y: 0.700, alpha: 0.085, speed: 0.007, scale: 1.25 },
+      { blobs: makeMistBlobs(7), y: 0.742, alpha: 0.07, speed: 0.011, scale: 1.0 },
+    ];
+
+    waterStreaks = [];
+    for (let i = 0; i < 46; i++) {
+      waterStreaks.push({
+        y: rand(0.005, 0.24),           // below waterline
+        x: Math.random(), len: rand(0.08, 0.30),
+        speed: rand(0.006, 0.02) * (Math.random() < 0.5 ? 1 : 1),
+        a: rand(0.03, 0.10),
+      });
+    }
+
+    // village window lights along each shore
+    villageLights = [];
+    for (const v of CONFIG.villages) {
+      const n = 26;
+      for (let i = 0; i < n; i++) {
+        villageLights.push({
+          x: v.x * W + rand(-v.spread, v.spread) * W,
+          y: waterPx - rand(2, 22) * (H / 900),
+          r: rand(0.8, 1.8) * (W / 1600),
+          ph: rand(0, Math.PI * 2),
+          tw: rand(0.6, 2.4),
+          warm: Math.random() < 0.85,
+        });
+      }
+    }
+  }
+
+  // -------------------- lantern sprite --------------------
+  const SPR = 96;
+  const lanternSprite = document.createElement('canvas');
+  lanternSprite.width = SPR; lanternSprite.height = SPR;
+  (function buildSprite() {
+    const g = lanternSprite.getContext('2d');
+    const cx = SPR / 2;
+    // outer glow
+    let grad = g.createRadialGradient(cx, cx, 0, cx, cx, SPR / 2);
+    grad.addColorStop(0, 'rgba(255, 205, 130, 0.95)');
+    grad.addColorStop(0.18, 'rgba(255, 175, 90, 0.55)');
+    grad.addColorStop(0.45, 'rgba(255, 150, 65, 0.18)');
+    grad.addColorStop(1, 'rgba(255, 130, 50, 0)');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, SPR, SPR);
+    // paper body (trapezoid lantern)
+    const wTop = SPR * 0.135, wBot = SPR * 0.165;
+    const h = SPR * 0.185;
+    const yTop = cx - h / 2, yBot = cx + h / 2;
+    grad = g.createLinearGradient(0, yTop, 0, yBot);
+    grad.addColorStop(0, '#ffd9a0');
+    grad.addColorStop(0.5, '#ffb866');
+    grad.addColorStop(1, '#f08c3e');
+    g.fillStyle = grad;
+    g.beginPath();
+    g.moveTo(cx - wTop, yTop);
+    g.lineTo(cx + wTop, yTop);
+    g.lineTo(cx + wBot, yBot);
+    g.lineTo(cx - wBot, yBot);
+    g.closePath();
+    g.fill();
+    // ribs
+    g.strokeStyle = 'rgba(150, 70, 20, 0.45)';
+    g.lineWidth = Math.max(1, SPR * 0.008);
+    for (let i = -1; i <= 1; i++) {
+      const t = (i + 1.5) / 3;
+      const x = cx + (i) * wTop * 0.55;
+      g.beginPath();
+      g.moveTo(x, yTop + 1);
+      g.lineTo(cx + i * wBot * 0.55, yBot - 1);
+      g.stroke();
+    }
+    // hot core at the flame
+    grad = g.createRadialGradient(cx, yBot - h * 0.18, 0, cx, yBot - h * 0.18, wBot);
+    grad.addColorStop(0, 'rgba(255, 252, 220, 0.95)');
+    grad.addColorStop(1, 'rgba(255, 200, 120, 0)');
+    g.fillStyle = grad;
+    g.beginPath();
+    g.arc(cx, yBot - h * 0.18, wBot, 0, Math.PI * 2);
+    g.fill();
+  })();
+
+  // -------------------- lanterns --------------------
+  const lanterns = [];
+
+  function spawnLantern() {
+    const v = CONFIG.villages[(Math.random() * CONFIG.villages.length) | 0];
+    lanterns.push({
+      x: v.x * W + rand(-v.spread, v.spread) * W + rand(-0.05, 0.05) * W,
+      y: waterPx - rand(0, 14),
+      vy: rand(CONFIG.riseSpeed[0], CONFIG.riseSpeed[1]),
+      sway: rand(CONFIG.swayAmp[0], CONFIG.swayAmp[1]),
+      swayW: rand(0.25, 0.75),
+      ph: rand(0, Math.PI * 2),
+      flickW: rand(CONFIG.flickerSpeed[0], CONFIG.flickerSpeed[1]),
+      size: rand(20, 44) * (W / 1600),      // sprite draw size
+      born: performance.now() / 1000,
+    });
+    if (lanterns.length > CONFIG.lanternMax) lanterns.shift();
+  }
+
+  // -------------------- resize --------------------
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    waterPx = Math.floor(H * CONFIG.waterY);
+    buildScene();
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  // -------------------- draw layers --------------------
+  function drawSky(time) {
+    const g = ctx.createLinearGradient(0, 0, 0, waterPx);
+    g.addColorStop(0, '#070b21');
+    g.addColorStop(0.42, '#101736');
+    g.addColorStop(0.72, '#25305c');
+    g.addColorStop(0.92, '#4b4470');
+    g.addColorStop(1, '#7c5a58');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, waterPx);
+
+    // stars
+    ctx.save();
+    for (const s of stars) {
+      const a = s.a * (0.55 + 0.45 * Math.sin(time * s.tw + s.ph));
+      ctx.globalAlpha = a * 0.9;
+      ctx.fillStyle = '#dfe6ff';
+      ctx.beginPath();
+      ctx.arc(s.x * W, s.y * H, s.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // warm glow over the villages, breathing slowly
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (const v of CONFIG.villages) {
+      const a = 0.16 + 0.05 * Math.sin(time * 0.21 + v.x * 7);
+      const r = W * 0.20;
+      const grad = ctx.createRadialGradient(v.x * W, waterPx, 0, v.x * W, waterPx, r);
+      grad.addColorStop(0, `rgba(255, 160, 80, ${a})`);
+      grad.addColorStop(1, 'rgba(255, 140, 60, 0)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(v.x * W - r, waterPx - r, r * 2, r * 2);
+    }
+    ctx.restore();
+  }
+
+  function drawRidges() {
+    for (const r of ridges) {
+      ctx.fillStyle = r.color;
+      ctx.beginPath();
+      ctx.moveTo(-W * 0.05, waterPx + 2);
+      for (const p of r.pts) ctx.lineTo(p.x * W, p.y * H);
+      ctx.lineTo(W * 1.05, waterPx + 2);
+      ctx.closePath();
+      ctx.fill();
+    }
+    // ground strip to the waterline
+    ctx.fillStyle = '#0a0f24';
+    ctx.fillRect(0, waterPx - H * 0.008, W, H * 0.008 + 2);
+  }
+
+  function drawVillages(time) {
+    ctx.save();
+    for (const l of villageLights) {
+      const a = 0.5 + 0.5 * Math.sin(time * l.tw + l.ph);
+      ctx.globalAlpha = 0.35 + 0.6 * a;
+      ctx.fillStyle = l.warm ? '#ffca7a' : '#bcd2ff';
+      ctx.beginPath();
+      ctx.arc(l.x, l.y, l.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawMist(time, dt) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (const m of mistLayers) {
+      m.off = (m.off ?? Math.random()) + m.speed * dt;
+      for (const b of m.blobs) {
+        const x = (((b.x + m.off * b.drift) % 1.24) - 0.12) * W;
+        const y = (m.y + (b.y - 0.5) * 0.06) * H;
+        const r = b.r * W * m.scale;
+        const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
+        grad.addColorStop(0, `rgba(150, 168, 205, ${m.alpha * b.a})`);
+        grad.addColorStop(1, 'rgba(150, 168, 205, 0)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(x - r, y - r, r * 2, r * 2);
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawLanterns(time) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (const l of lanterns) {
+      const swayX = Math.sin(time * l.swayW + l.ph) * l.sway * W;
+      const flick = 0.78 + 0.22 * Math.sin(time * l.flickW + l.ph * 3.1)
+                       * (0.6 + 0.4 * Math.sin(time * l.flickW * 0.37 + l.ph));
+      const alt = 1 - l.y / waterPx;                 // 0 at launch, ~1 high
+      const dim = Math.max(0.45, 1 - alt * 0.62);    // thin out with altitude
+      const alpha = Math.min(1, flick * dim * 1.5);
+      const s = l.size * (1 + alt * 0.5);            // lanterns swell as they rise
+      ctx.globalAlpha = alpha;
+      ctx.drawImage(lanternSprite, l.x + swayX - s / 2, l.y - s / 2, s, s);
+    }
+    ctx.restore();
+  }
+
+  function drawWater(time) {
+    const h = H - waterPx;
+    const g = ctx.createLinearGradient(0, waterPx, 0, H);
+    g.addColorStop(0, '#131b3a');
+    g.addColorStop(0.5, '#0c1229');
+    g.addColorStop(1, '#070b1c');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, waterPx, W, h);
+
+    // mirrored lantern reflections: smear below, wobbling
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (const l of lanterns) {
+      const depth = (l.y / waterPx);                 // 0 at waterline
+      if (depth > 1) continue;
+      const ry = waterPx + (waterPx - l.y) * 0.5 + 4;
+      const swayX = Math.sin(time * l.swayW + l.ph) * l.sway * W;
+      const wobble = Math.sin(time * 1.7 + l.ph * 5.0) * (2 + 6 * depth);
+      const flick = 0.5 + 0.5 * Math.sin(time * l.flickW + l.ph * 3.1);
+      const s = l.size * 0.9;
+      ctx.globalAlpha = 0.30 * flick * (1 - depth * 0.45);
+      ctx.drawImage(lanternSprite, l.x + swayX + wobble - s / 2, ry - s / 2, s, s * 1.4);
+    }
+    ctx.restore();
+
+    // depth: a soft gradient keeps the far water darker
+    const deep = ctx.createLinearGradient(0, waterPx, 0, H);
+    deep.addColorStop(0, 'rgba(6, 10, 26, 0)');
+    deep.addColorStop(1, 'rgba(6, 10, 26, 0.42)');
+    ctx.fillStyle = deep;
+    ctx.fillRect(0, waterPx, W, h);
+
+    // drifting streak highlights
+    ctx.save();
+    for (const st of waterStreaks) {
+      const x = ((st.x * W + time * st.speed * W * 0.08) % (W + st.len * W)) - st.len * W;
+      const y = waterPx + st.y * h;
+      ctx.globalAlpha = st.a;
+      ctx.fillStyle = '#8ea6d8';
+      ctx.fillRect(x, y, st.len * W, 1.2);
+    }
+    ctx.restore();
+
+    // shoreline light spill — radial, so no hard edges
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (const v of CONFIG.villages) {
+      const r = W * 0.17;
+      const grad = ctx.createRadialGradient(v.x * W, waterPx, 0, v.x * W, waterPx, r);
+      grad.addColorStop(0, 'rgba(255, 150, 70, 0.22)');
+      grad.addColorStop(0.55, 'rgba(255, 140, 60, 0.10)');
+      grad.addColorStop(1, 'rgba(255, 140, 60, 0)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(v.x * W - r, waterPx - r * 0.2, r * 2, r * 1.2);
+    }
+    ctx.restore();
+  }
+
+  // -------------------- loop --------------------
+  let last = performance.now();
+  let spawnDebt = 0;
+  let ready = false;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    // spawn
+    spawnDebt += dt * CONFIG.spawnPerSec;
+    while (spawnDebt >= 1) {
+      spawnLantern();
+      spawnDebt -= 1;
+    }
+
+    // rise
+    for (let i = lanterns.length - 1; i >= 0; i--) {
+      const l = lanterns[i];
+      l.y -= l.vy * H * dt;
+      l.x += Math.sin(time * l.swayW * 0.5 + l.ph) * 3.2 * dt;
+      if (l.y < H * CONFIG.fadeTop) lanterns.splice(i, 1);
+    }
+
+    drawSky(time);
+    drawRidges();
+    drawVillages(time);
+    drawWater(time);
+    drawMist(time, dt);
+    drawLanterns(time);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  // pre-populate the sky so the first paint is full festival
+  for (let i = 0; i < CONFIG.lanternMax * 0.8; i++) {
+    spawnLantern();
+    const l = lanterns[lanterns.length - 1];
+    l.y = rand(H * CONFIG.fadeTop, waterPx);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

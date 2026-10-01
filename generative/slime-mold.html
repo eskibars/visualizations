@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Slime Mold</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #04060d; }
+    canvas { display: block; width: 100vw; height: 100vh; image-rendering: auto; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 120% 100% at 50% 50%,
+        rgba(0,0,0,0) 42%, rgba(0,0,0,.38) 84%, rgba(0,0,0,.8) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(190, 230, 220, .28);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">physarum · 180 000 agents</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  SLIME MOLD — a Physarum colony: each agent senses the trail
+  //  ahead-left / ahead / ahead-right and steers toward the
+  //  strongest signal, depositing trail as it goes. The feedback
+  //  loop draws transport networks that never finish forming.
+  //
+  //  The sensory geometry drifts on slow sine cycles, so the
+  //  colony morphs between veins, coral, lattices and waves.
+  //  The pointer lays down food.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1,
+    simScale: 0.5,          // trail map is simScale × canvas
+    agentsStart: 180000,
+    agentsMin: 60000,
+    agentsMax: 320000,
+    frameBudgetMs: 15.0,
+    checkEveryMs: 1500,
+
+    deposit: 4.6,
+    decay: 0.955,           // trail multiplicative decay per frame-ish
+    diffuse: 0.42,          // blend toward the 3×3 mean
+
+    // sensory geometry — each drifts on its own slow sine
+    sensorAngleBase: 0.42,  sensorAngleAmp: 0.30,  sensorAngleW: 0.021,
+    turnBase: 0.34,         turnAmp: 0.30,         turnW: 0.013,
+    stepBase: 1.15,         stepAmp: 0.45,         stepW: 0.017,
+    sensorOffBase: 10.0,    sensorOffAmp: 4.0,     sensorOffW: 0.026,
+    paramPeriod: 0.055,     // global slowness of morphing
+
+    reshuffleEvery: 26,     // s — sprinkle fresh agents so it never freezes
+    reshuffleFrac: 0.06,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+
+  // -------------------- trail map --------------------
+  let W = 0, H = 0, trail = null, tmp = null;
+  let img = null, off = null, offCtx = null;
+  let dpr = 1, cw = 0, ch = 0;
+
+  function resize() {
+    dpr = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    cw = Math.max(2, Math.floor(window.innerWidth * dpr));
+    ch = Math.max(2, Math.floor(window.innerHeight * dpr));
+    canvas.width = cw;
+    canvas.height = ch;
+    const w = Math.max(64, Math.floor(cw * CONFIG.simScale));
+    const h = Math.max(64, Math.floor(ch * CONFIG.simScale));
+    if (w === W && h === H) return;
+    W = w; H = h;
+    trail = new Float32Array(W * H);
+    tmp = new Float32Array(W * H);
+    off = document.createElement('canvas');
+    off.width = W; off.height = H;
+    offCtx = off.getContext('2d');
+    img = offCtx.createImageData(W, H);
+    seedAgents();
+  }
+
+  // -------------------- agents --------------------
+  let agents = null;
+  let agentCount = 0;
+
+  function seedAgents() {
+    agents = new Float32Array(CONFIG.agentsMax * 3);
+    // most of the colony starts in a central blob so the first
+    // paint already reads as an organism; the rest are scattered
+    const cx = W / 2, cy = H / 2;
+    const r = Math.min(W, H) * 0.30;
+    for (let i = 0; i < CONFIG.agentsMax; i++) {
+      if (Math.random() < 0.86) {
+        const a = Math.random() * Math.PI * 2;
+        const rad = r * Math.sqrt(Math.random());
+        agents[i * 3] = cx + Math.cos(a) * rad;
+        agents[i * 3 + 1] = cy + Math.sin(a) * rad;
+      } else {
+        agents[i * 3] = Math.random() * W;
+        agents[i * 3 + 1] = Math.random() * H;
+      }
+      agents[i * 3 + 2] = Math.random() * Math.PI * 2;
+    }
+    agentCount = CONFIG.agentsStart;
+    for (let k = 0; k < W * H; k++) trail[k] = 0;
+  }
+
+  function scatter(frac) {
+    const n = Math.floor(agentCount * frac);
+    for (let k = 0; k < n; k++) {
+      const i = (Math.random() * agentCount) | 0;
+      agents[i * 3] = Math.random() * W;
+      agents[i * 3 + 1] = Math.random() * H;
+      agents[i * 3 + 2] = Math.random() * Math.PI * 2;
+    }
+  }
+
+  // -------------------- palette LUT --------------------
+  const LUT_N = 2048;
+  const lut = new Uint8Array(LUT_N * 3);
+  (function buildLut() {
+    // density -> deep water -> teal -> sea-glass -> pale gold
+    const stops = [
+      [0.00, [4, 7, 14]],
+      [0.16, [12, 34, 58]],
+      [0.38, [16, 88, 104]],
+      [0.60, [64, 170, 156]],
+      [0.80, [172, 226, 186]],
+      [1.00, [248, 246, 214]],
+    ];
+    for (let i = 0; i < LUT_N; i++) {
+      const t = i / (LUT_N - 1);
+      let a = stops[0], b = stops[stops.length - 1];
+      for (let s = 0; s < stops.length - 1; s++) {
+        if (t >= stops[s][0] && t <= stops[s + 1][0]) {
+          a = stops[s]; b = stops[s + 1];
+          break;
+        }
+      }
+      const f = (t - a[0]) / Math.max(1e-6, b[0] - a[0]);
+      lut[i * 3] = a[1][0] + (b[1][0] - a[1][0]) * f;
+      lut[i * 3 + 1] = a[1][1] + (b[1][1] - a[1][1]) * f;
+      lut[i * 3 + 2] = a[1][2] + (b[1][2] - a[1][2]) * f;
+    }
+  })();
+
+  // -------------------- pointer as food --------------------
+  const ptr = { x: -1, y: -1, down: false };
+  window.addEventListener('pointermove', (e) => {
+    ptr.x = e.clientX / window.innerWidth * W;
+    ptr.y = e.clientY / window.innerHeight * H;
+  }, { passive: true });
+  window.addEventListener('pointerleave', () => { ptr.x = -1; }, { passive: true });
+
+  // -------------------- simulation --------------------
+  let simFrame = 0;
+
+  function simulate(dt, time) {
+    // drifting sensory geometry — the colony keeps changing its mind
+    const ph = time * CONFIG.paramPeriod;
+    const sensorAngle = CONFIG.sensorAngleBase + CONFIG.sensorAngleAmp * Math.sin(ph * CONFIG.sensorAngleW * 120);
+    const turnAngle = CONFIG.turnBase + CONFIG.turnAmp * Math.sin(ph * CONFIG.turnW * 120 + 2.1);
+    const stepSize = CONFIG.stepBase + CONFIG.stepAmp * Math.sin(ph * CONFIG.stepW * 120 + 4.0);
+    const sensorOff = CONFIG.sensorOffBase + CONFIG.sensorOffAmp * Math.sin(ph * CONFIG.sensorOffW * 120 + 1.0);
+
+    const sa = sensorAngle, ta = turnAngle, ss = stepSize, so = sensorOff;
+    const dep = CONFIG.deposit;
+
+    // pointer food blob
+    if (ptr.x >= 0) {
+      const r = 12;
+      for (let dy = -r; dy <= r; dy++) {
+        const yy = (ptr.y + dy) | 0;
+        if (yy < 0 || yy >= H) continue;
+        for (let dx = -r; dx <= r; dx++) {
+          const xx = (ptr.x + dx) | 0;
+          if (xx < 0 || xx >= W) continue;
+          const d2 = dx * dx + dy * dy;
+          if (d2 <= r * r) trail[yy * W + xx] += 2.4 * (1 - d2 / (r * r));
+        }
+      }
+    }
+
+    for (let i = 0; i < agentCount; i++) {
+      const bx = i * 3;
+      let x = agents[bx], y = agents[bx + 1], a = agents[bx + 2];
+
+      // three sensors
+      const f = sense(x, y, a, so);
+      const fl = sense(x, y, a - sa, so);
+      const fr = sense(x, y, a + sa, so);
+
+      if (f > fl && f > fr) {
+        // straight
+      } else if (fl > fr) {
+        a -= ta * (0.6 + 0.8 * Math.random());
+      } else if (fr > fl) {
+        a += ta * (0.6 + 0.8 * Math.random());
+      } else {
+        a += (Math.random() - 0.5) * ta;
+      }
+
+      x += Math.cos(a) * ss;
+      y += Math.sin(a) * ss;
+
+      // wrap
+      if (x < 0) x += W; else if (x >= W) x -= W;
+      if (y < 0) y += H; else if (y >= H) y -= H;
+
+      agents[bx] = x;
+      agents[bx + 1] = y;
+      agents[bx + 2] = a;
+
+      const xi = x | 0, yi = y | 0;
+      trail[yi * W + xi] += dep;
+    }
+
+    // diffuse (3×3 mean, blended) + decay
+    const blur = CONFIG.diffuse;
+    const decay = Math.pow(CONFIG.decay, dt * 60);
+    for (let y = 0; y < H; y++) {
+      const y0 = (y === 0 ? H - 1 : y - 1) * W;
+      const y1 = y * W;
+      const y2 = (y === H - 1 ? 0 : y + 1) * W;
+      for (let x = 0; x < W; x++) {
+        const x0 = x === 0 ? W - 1 : x - 1;
+        const x2 = x === W - 1 ? 0 : x + 1;
+        const m = (trail[y0 + x0] + trail[y0 + x] + trail[y0 + x2] +
+                   trail[y1 + x0] + trail[y1 + x] + trail[y1 + x2] +
+                   trail[y2 + x0] + trail[y2 + x] + trail[y2 + x2]) / 9;
+        tmp[y1 + x] = (trail[y1 + x] + (m - trail[y1 + x]) * blur) * decay;
+      }
+    }
+    trail.set(tmp);
+  }
+
+  function sense(x, y, a, off) {
+    const sx = (x + Math.cos(a) * off + W) % W;
+    const sy = (y + Math.sin(a) * off + H) % H;
+    return trail[(sy | 0) * W + (sx | 0)];
+  }
+
+  // -------------------- render --------------------
+  function render() {
+    const d = img.data;
+    for (let i = 0, n = W * H; i < n; i++) {
+      let v = trail[i] / 26;
+      v = v / (1 + v);                    // soft knee
+      let li = (v * (LUT_N - 1)) | 0;
+      if (li > LUT_N - 1) li = LUT_N - 1;
+      const o = i * 4, l = li * 3;
+      d[o] = lut[l];
+      d[o + 1] = lut[l + 1];
+      d[o + 2] = lut[l + 2];
+      d[o + 3] = 255;
+    }
+    offCtx.putImageData(img, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(off, 0, 0, cw, ch);
+  }
+
+  // -------------------- adaptive agent count --------------------
+  let ema = 16;
+  let lastCheck = 0;
+
+  function adapt(now) {
+    if (now - lastCheck < CONFIG.checkEveryMs) return;
+    lastCheck = now;
+    if (ema > CONFIG.frameBudgetMs * 1.5 && agentCount > CONFIG.agentsMin) {
+      agentCount = Math.max(CONFIG.agentsMin, Math.floor(agentCount * 0.8));
+    } else if (ema < CONFIG.frameBudgetMs * 0.7 && agentCount < CONFIG.agentsMax) {
+      agentCount = Math.min(CONFIG.agentsMax, Math.floor(agentCount * 1.12));
+    }
+  }
+
+  // -------------------- loop --------------------
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  let last = performance.now();
+  let lastShuffle = last;
+  let ready = false;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    ema = ema * 0.94 + Math.min(dt * 1000, 100) * 0.06;
+    adapt(now);
+
+    simulate(dt, time);
+
+    if (now - lastShuffle > CONFIG.reshuffleEvery * 1000) {
+      lastShuffle = now;
+      scatter(CONFIG.reshuffleFrac);
+    }
+
+    render();
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  // short warm-up: enough trail for the first paint to have veins
+  for (let i = 0; i < 45; i++) simulate(1 / 60, i / 60);
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
