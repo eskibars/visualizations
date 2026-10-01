@@ -615,27 +615,29 @@
 
         <!-- Ship schematic (inspired by your image: bright cyan, right-heavy saucer) -->
         <g class="glow" id="shipGroup">
-          <!-- Nacelles (top/bottom bars) -->
+          <!-- Nacelles (top/bottom bars). They start clear of the left label
+               column (x 55..365) so the hull never sits over the readouts. -->
           <g>
-            <rect x="120" y="108" width="550" height="34" rx="16" fill="rgba(86,236,252,.06)" stroke="rgba(86,236,252,.85)" stroke-width="4"/>
-            <rect x="120" y="438" width="550" height="34" rx="16" fill="rgba(86,236,252,.06)" stroke="rgba(86,236,252,.85)" stroke-width="4"/>
-            <line x1="150" y1="125" x2="640" y2="125" class="sweepLine"/>
-            <line x1="150" y1="455" x2="640" y2="455" class="sweepLine"/>
+            <rect x="420" y="108" width="280" height="34" rx="17" fill="rgba(86,236,252,.06)" stroke="rgba(86,236,252,.85)" stroke-width="4"/>
+            <rect x="420" y="438" width="280" height="34" rx="17" fill="rgba(86,236,252,.06)" stroke="rgba(86,236,252,.85)" stroke-width="4"/>
+            <line x1="442" y1="125" x2="640" y2="125" class="sweepLine"/>
+            <line x1="442" y1="455" x2="640" y2="455" class="sweepLine"/>
           </g>
 
           <!-- Pylons / struts -->
-          <path d="M 420 125 C 500 170, 560 205, 615 240" fill="none" class="strokeCyan med"/>
-          <path d="M 420 455 C 500 410, 560 375, 615 340" fill="none" class="strokeCyan med"/>
-          <path d="M 475 160 C 540 205, 590 235, 640 260" fill="none" class="strokeCyan thin dash"/>
-          <path d="M 475 420 C 540 375, 590 345, 640 320" fill="none" class="strokeCyan thin dash"/>
+          <path d="M 565 125 C 600 162, 632 202, 662 242" fill="none" class="strokeCyan med"/>
+          <path d="M 565 455 C 600 418, 632 378, 662 338" fill="none" class="strokeCyan med"/>
+          <path d="M 590 162 C 622 200, 650 232, 678 260" fill="none" class="strokeCyan thin dash"/>
+          <path d="M 590 418 C 622 380, 650 348, 678 320" fill="none" class="strokeCyan thin dash"/>
 
-          <!-- Neck + secondary hull -->
-          <path d="M 600 260
-                   C 545 270, 520 290, 505 315
-                   C 492 338, 500 360, 530 378
-                   C 575 405, 630 392, 665 358
-                   C 695 330, 705 295, 695 272
-                   C 682 242, 640 246, 600 260 Z"
+          <!-- Neck + secondary hull (tucked into the saucer so it does not
+               cross the label stack) -->
+          <path d="M 610 265
+                   C 588 274, 574 288, 566 306
+                   C 558 324, 564 340, 582 352
+                   C 608 369, 642 360, 664 342
+                   C 682 326, 690 304, 684 288
+                   C 676 268, 646 258, 610 265 Z"
                 fill="none" stroke="rgba(86,236,252,.85)" stroke-width="5"/>
 
           <path d="M 545 316 C 585 300, 635 300, 675 316" fill="none" class="strokeCyan2 thin"/>
@@ -849,9 +851,9 @@
         [720, 120], [860, 150], [920, 270], [900, 410], [760, 480], [610, 450], [540, 310], [600, 170],
         // Neck/hull
         [615, 290], [650, 330], [585, 350],
-        // Nacelles
-        [220, 125], [390, 125], [580, 125],
-        [220, 455], [390, 455], [580, 455],
+        // Nacelles (inside the shortened bars, clear of the label column)
+        [460, 125], [545, 125], [630, 125],
+        [460, 455], [545, 455], [630, 455],
       ];
 
       const nodes = [];
