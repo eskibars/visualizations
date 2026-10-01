@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Murmuration</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #101022; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 130% 105% at 50% 42%,
+        rgba(0,0,0,0) 42%, rgba(0,0,0,.30) 82%, rgba(0,0,0,.72) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(230, 200, 190, .28);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">starlings · before roost</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  MURMURATION — two thousand starlings on boid rules: separate,
+  //  align, cohere, and chase a roost thought that never sits
+  //  still. Every so often the flock is startled: a hawk-shaped
+  //  gap punches through and the ring closes again.
+  //
+  //  The shimmer is real banking — each bird catches the dusk on
+  //  its wingbeat, so waves of light travel across the flock.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1.25,
+    birdsStart: 1200,
+    birdsMin: 700,
+    birdsMax: 3600,
+    frameBudgetMs: 14.0,
+    checkEveryMs: 1500,
+
+    perception: 18,          // px at 1600w, scaled
+    separationR: 11,
+    wAlign: 1.5,
+    wCohere: 0.75,
+    wSeparate: 5.5,
+    wAttract: 0.55,
+    speedMin: 62,
+    speedMax: 165,
+
+    attractWander: 0.32,     // rad/s-ish on the sines
+    startleMin: 7,           // s between startles
+    startleMax: 16,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, S = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  // -------------------- birds --------------------
+  // flat arrays: x, y, vx, vy, phase (bank), size
+  let bx, by, bvxl, bvy, bph, bs;
+  let N = 0;
+  const MAXN = 3600;
+
+  function seedBirds() {
+    bx = new Float32Array(MAXN);
+    by = new Float32Array(MAXN);
+    bvxl = new Float32Array(MAXN);
+    bvy = new Float32Array(MAXN);
+    bph = new Float32Array(MAXN);
+    bs = new Float32Array(MAXN);
+    N = CONFIG.birdsStart;
+    const cx = W * 0.5, cy = H * 0.42;
+    const a0 = rand(0, Math.PI * 2);
+    for (let i = 0; i < MAXN; i++) {
+      // gaussian disc — a flock, not a box
+      const rr = 0.03 + Math.sqrt(-2 * Math.log(Math.max(1e-6, Math.random()))) * 0.075;
+      const aa = a0 + rand(-1, 1) * 1.5;
+      bx[i] = cx + Math.cos(aa) * rr * W;
+      by[i] = cy + Math.sin(aa) * rr * H * 0.8;
+      const a = rand(0, Math.PI * 2);
+      const sp = rand(70, 130) * S;
+      bvxl[i] = Math.cos(a) * sp;
+      bvy[i] = Math.sin(a) * sp;
+      bph[i] = rand(0, Math.PI * 2);
+      bs[i] = rand(0.75, 1.25);
+    }
+  }
+
+  // -------------------- roost thought (attractor) --------------------
+  const attractor = { x: 0, y: 0, ph: rand(0, 9), ph2: rand(0, 9), jumpT: 6 };
+  function moveAttractor(dt, time) {
+    attractor.jumpT -= dt;
+    if (attractor.jumpT <= 0) {
+      attractor.jumpT = rand(9, 17);
+      attractor.ph = rand(0, 9);      // new sines → the thought moves elsewhere
+      attractor.ph2 = rand(0, 9);
+    }
+    const mx = W * 0.30, my = H * 0.22;
+    attractor.x = W * 0.5 + Math.sin(time * CONFIG.attractWander + attractor.ph) * mx
+                      + Math.sin(time * CONFIG.attractWander * 2.7 + attractor.ph2) * mx * 0.4;
+    attractor.y = H * 0.42 + Math.cos(time * CONFIG.attractWander * 0.8 + attractor.ph2) * my
+                          + Math.sin(time * CONFIG.attractWander * 1.9 + attractor.ph) * my * 0.35;
+  }
+
+  // -------------------- startle (hawk gap) --------------------
+  const startle = { x: 0, y: 0, t: 0, next: rand(4, 9) };
+
+  // -------------------- spatial hash --------------------
+  let cellSize = 40, cols = 0, rows = 0;
+  let gridHeads = null, gridNext = null;
+
+  function rebuildGrid() {
+    cellSize = CONFIG.perception * S;
+    cols = Math.max(1, Math.ceil(W / cellSize));
+    rows = Math.max(1, Math.ceil(H / cellSize));
+    const cells = cols * rows;
+    if (!gridHeads || gridHeads.length !== cells) {
+      gridHeads = new Int32Array(cells);
+      gridNext = new Int32Array(MAXN);
+    }
+    gridHeads.fill(-1);
+    for (let i = 0; i < N; i++) {
+      let cx = (bx[i] / cellSize) | 0;
+      let cy = (by[i] / cellSize) | 0;
+      if (cx < 0) cx = 0; else if (cx >= cols) cx = cols - 1;
+      if (cy < 0) cy = 0; else if (cy >= rows) cy = rows - 1;
+      const c = cy * cols + cx;
+      gridNext[i] = gridHeads[c];
+      gridHeads[c] = i;
+    }
+  }
+
+  function updateBirds(dt, time) {
+    rebuildGrid();
+    const per = CONFIG.perception * S;
+    const per2 = per * per;
+    const sepR = CONFIG.separationR * S;
+    const sepR2 = sepR * sepR;
+    const margin = W * 0.06;
+
+    for (let i = 0; i < N; i++) {
+      let ax = 0, ay = 0;
+      let alx = 0, aly = 0, cox = 0, coy = 0, cnt = 0;
+      let sx = 0, sy = 0;
+
+      const gx = (bx[i] / cellSize) | 0;
+      const gy = (by[i] / cellSize) | 0;
+      for (let oy = -1; oy <= 1; oy++) {
+        const yy = gy + oy;
+        if (yy < 0 || yy >= rows) continue;
+        for (let ox = -1; ox <= 1; ox++) {
+          const xx = gx + ox;
+          if (xx < 0 || xx >= cols) continue;
+          for (let j = gridHeads[yy * cols + xx]; j !== -1; j = gridNext[j]) {
+            if (j === i) continue;
+            const dx = bx[j] - bx[i], dy = by[j] - by[i];
+            const d2 = dx * dx + dy * dy;
+            if (d2 > per2) continue;
+            alx += bvxl[j]; aly += bvy[j];
+            cox += dx; coy += dy;
+            cnt++;
+            if (cnt >= 14) break;   // cap work; more neighbours rarely help
+            if (d2 < sepR2 && d2 > 0.01) {
+              const inv = 1 / d2;
+              sx -= dx * inv; sy -= dy * inv;
+            }
+          }
+        }
+      }
+
+      if (cnt > 0) {
+        ax += (alx / cnt - bvxl[i]) * CONFIG.wAlign;
+        ay += (aly / cnt - bvy[i]) * CONFIG.wAlign;
+        ax += cox * CONFIG.wCohere / cnt;
+        ay += coy * CONFIG.wCohere / cnt;
+      }
+      ax += sx * CONFIG.wSeparate * 60 * S;
+      ay += sy * CONFIG.wSeparate * 60 * S;
+
+      // chase the roost thought
+      ax += (attractor.x - bx[i]) * CONFIG.wAttract * 0.01;
+      ay += (attractor.y - by[i]) * CONFIG.wAttract * 0.01;
+
+      // soft walls
+      if (bx[i] < margin) ax += (1 - bx[i] / margin) * 260 * S;
+      if (bx[i] > W - margin) ax -= (1 - (W - bx[i]) / margin) * 260 * S;
+      const topM = H * 0.06, botM = H * 0.86;
+      if (by[i] < topM) ay += (1 - by[i] / topM) * 260 * S;
+      if (by[i] > botM) ay -= (1 - (by[i] - topM) / (botM - topM)) * 260 * S;
+
+      // startle: hawks punch through; nearby birds bolt
+      if (startle.t > 0) {
+        const dx = bx[i] - startle.x, dy = by[i] - startle.y;
+        const d2 = dx * dx + dy * dy;
+        const R = W * 0.22;
+        if (d2 < R * R) {
+          const d = Math.sqrt(d2) || 1;
+          const f = (1 - d / R) * 620 * S;
+          ax += (dx / d) * f;
+          ay += (dy / d) * f;
+        }
+      }
+
+      // integrate
+      bvxl[i] += ax * dt;
+      bvy[i] += ay * dt;
+      const spd = Math.hypot(bvxl[i], bvy[i]) || 1;
+      const lo = CONFIG.speedMin * S, hi = CONFIG.speedMax * S;
+      const k = spd < lo ? lo / spd : (spd > hi ? hi / spd : 1);
+      bvxl[i] *= k; bvy[i] *= k;
+      bx[i] += bvxl[i] * dt;
+      by[i] += bvy[i] * dt;
+
+      // bank phase drifts with speed & neighbours
+      bph[i] += dt * (6 + spd * 0.03 / S) * 0.55;
+    }
+  }
+
+  // -------------------- bird sprites --------------------
+  // 6 flap frames, each in "lit" and "dark" variant, pointing +x
+  const FLAP = 6;
+  const SPR = 22;
+  let spritesDark = [], spritesLit = [];
+
+  function makeBird(lit) {
+    const c = document.createElement('canvas');
+    c.width = c.height = SPR;
+    const g = c.getContext('2d');
+    const body = lit ? '#6f6c92' : '#141320';
+    const edge = lit ? 'rgba(255, 214, 170, 0.85)' : 'rgba(60, 55, 90, 0.6)';
+    // body
+    g.fillStyle = body;
+    g.beginPath();
+    g.ellipse(SPR / 2, SPR / 2, 7, 2.4, 0, 0, Math.PI * 2);
+    g.fill();
+    // head + tail
+    g.beginPath(); g.ellipse(SPR / 2 + 6.4, SPR / 2, 2.2, 1.6, 0, 0, Math.PI * 2); g.fill();
+    g.beginPath();
+    g.moveTo(SPR / 2 - 6, SPR / 2);
+    g.lineTo(SPR / 2 - 10.5, SPR / 2 - 1.6);
+    g.lineTo(SPR / 2 - 10.5, SPR / 2 + 1.6);
+    g.closePath(); g.fill();
+    return { c, body, edge };
+  }
+
+  function makeFrame(f, lit) {
+    // f in 0..1: wings sweep from up to down
+    const c = document.createElement('canvas');
+    c.width = c.height = SPR;
+    const g = c.getContext('2d');
+    const base = makeBird(lit);
+    const wingY = Math.sin(f * Math.PI);
+    const span = 10.2;
+    const up = f < 0.5 ? -1 : 1;
+    for (const side of [-1, 1]) {
+      const wy = SPR / 2 - up * wingY * 6.5 * side * -1;   // mirror both wings
+      g.fillStyle = base.body;
+      g.beginPath();
+      g.moveTo(SPR / 2 + 1, SPR / 2);
+      g.quadraticCurveTo(
+        SPR / 2 - 1, wy - up * 2.4 * (wingY),
+        SPR / 2 - 2 + 0, wy - up * wingY * 1.2);
+      g.lineTo(SPR / 2 - span * 0.9, wy + up * wingY * 0.6);
+      g.quadraticCurveTo(
+        SPR / 2 - 3, SPR / 2 + up * 1.2,
+        SPR / 2 - 1, SPR / 2);
+      g.closePath();
+      g.fill();
+      if (lit) {
+        g.strokeStyle = base.edge;
+        g.lineWidth = 1.1;
+        g.beginPath();
+        g.moveTo(SPR / 2, SPR / 2 - 0.5);
+        g.lineTo(SPR / 2 - span * 0.9, wy + up * wingY * 0.6);
+        g.stroke();
+      }
+    }
+    // body on top
+    g.drawImage(base.c, 0, 0);
+    return c;
+  }
+
+  function buildSprites() {
+    spritesDark = []; spritesLit = [];
+    for (let f = 0; f < FLAP; f++) {
+      spritesDark.push(makeFrame(f / FLAP, false));
+      spritesLit.push(makeFrame(f / FLAP, true));
+    }
+  }
+
+  // -------------------- scenery --------------------
+  let stars = [];
+
+  function drawSky(time) {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#131433');
+    g.addColorStop(0.42, '#2b2450');
+    g.addColorStop(0.68, '#5c3a58');
+    g.addColorStop(0.86, '#96524e');
+    g.addColorStop(1, '#c47a4a');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    for (const s of stars) {
+      const a = s.a * (0.5 + 0.5 * Math.sin(time * s.tw + s.ph)) * 0.8;
+      ctx.globalAlpha = a;
+      ctx.fillStyle = '#e8e2ff';
+      ctx.beginPath();
+      ctx.arc(s.x * W, s.y * H, s.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawGround() {
+    // distant ridge, then dark water/land strip
+    ctx.fillStyle = '#241a38';
+    ctx.beginPath();
+    ctx.moveTo(-4, H + 2);
+    ctx.lineTo(-4, H * 0.9);
+    ctx.quadraticCurveTo(W * 0.25, H * 0.855, W * 0.55, H * 0.9);
+    ctx.quadraticCurveTo(W * 0.8, H * 0.93, W + 4, H * 0.885);
+    ctx.lineTo(W + 4, H + 2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#120d22';
+    ctx.beginPath();
+    ctx.moveTo(-4, H + 2);
+    ctx.lineTo(-4, H * 0.945);
+    ctx.quadraticCurveTo(W * 0.4, H * 0.915, W * 0.75, H * 0.95);
+    ctx.quadraticCurveTo(W * 0.9, H * 0.965, W + 4, H * 0.94);
+    ctx.lineTo(W + 4, H + 2);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawFlock(time) {
+    const frame = (time * 10) % FLAP;
+    const i0 = frame | 0;
+    const fi = (frame - i0) < 0.5 ? i0 : (i0 + 1) % FLAP;
+    ctx.save();
+    for (let i = 0; i < N; i++) {
+      // shimmer: birds flash lit as they bank through the dusk light
+      const lit = Math.sin(bph[i]) > 0.78;
+      const spr = lit ? spritesLit[fi] : spritesDark[fi];
+      const k = bs[i] * 0.85 * S * 0.46;
+      const ang = Math.atan2(bvy[i], bvxl[i]);
+      const ca = Math.cos(ang) * k, sa = Math.sin(ang) * k;
+      ctx.setTransform(DPR * ca, DPR * sa, -DPR * sa, DPR * ca, DPR * bx[i], DPR * by[i]);
+      ctx.drawImage(spr, -SPR / 2, -SPR / 2);
+    }
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.restore();
+  }
+
+  // -------------------- resize --------------------
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    S = W / 1600;
+    buildSprites();
+    if (!bx) seedBirds();
+    stars = [];
+    for (let i = 0; i < 90; i++) {
+      stars.push({
+        x: Math.random(), y: Math.random() * 0.4,
+        r: rand(0.4, 1.2) * S,
+        tw: rand(0.4, 2), ph: rand(0, Math.PI * 2),
+        a: rand(0.2, 0.8),
+      });
+    }
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  // pointer nudges the roost thought
+  window.addEventListener('pointermove', (e) => {
+    attractor.x += (e.clientX - attractor.x) * 0.04;
+    attractor.y += (e.clientY - attractor.y) * 0.04;
+  }, { passive: true });
+
+  // -------------------- adaptive + loop --------------------
+  let ema = 16, lastCheck = 0;
+
+  function adapt(now) {
+    if (now - lastCheck < CONFIG.checkEveryMs) return;
+    lastCheck = now;
+    if (ema > CONFIG.frameBudgetMs * 1.5 && N > CONFIG.birdsMin) {
+      N = Math.max(CONFIG.birdsMin, (N * 0.82) | 0);
+    } else if (ema < CONFIG.frameBudgetMs * 0.65 && N < CONFIG.birdsMax) {
+      N = Math.min(CONFIG.birdsMax, (N * 1.14) | 0);
+    }
+  }
+
+  let last = performance.now();
+  let ready = false;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    ema = ema * 0.94 + Math.min(dt * 1000, 100) * 0.06;
+    adapt(now);
+
+    moveAttractor(dt, time);
+    startle.next -= dt;
+    if (startle.next <= 0) {
+      startle.next = rand(CONFIG.startleMin, CONFIG.startleMax);
+      startle.x = rand(W * 0.2, W * 0.8);
+      startle.y = rand(H * 0.2, H * 0.6);
+      startle.t = 0.35;
+    }
+    if (startle.t > 0) startle.t -= dt;
+
+    updateBirds(dt, time);
+
+    drawSky(time);
+    drawFlock(time);
+    drawGround();
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  // warm-up: let the boids cohere so the first paint is a flock,
+  // not a scatter
+  for (let i = 0; i < 40; i++) {
+    moveAttractor(1 / 30, i / 30);
+    updateBirds(1 / 30, i / 30);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

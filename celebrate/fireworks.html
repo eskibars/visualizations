@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Fireworks</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #05070f; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 130% 105% at 50% 40%,
+        rgba(0,0,0,0) 42%, rgba(0,0,0,.32) 82%, rgba(0,0,0,.75) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(255, 220, 180, .28);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">hanabi · over the bay</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  FIREWORKS — shells lift from the waterfront and break over
+  //  the bay: peonies, rings, willows, crossettes and crackle,
+  //  with strobe stars and falling embers. The bursts reflect in
+  //  the water, wobbling with the waves.
+  //
+  //  The show composes itself: single shells, pairs, and every
+  //  so often a full volley.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1.5,
+
+    waterY: 0.78,
+
+    launchEvery: [1.6, 4.2],     // s between single launches
+    volleyEvery: [26, 42],       // s between volleys
+    volleyCount: [5, 8],
+
+    gravity: 380,                // px/s²  at 1600w — apogee in ~1.5s
+    drag: 0.985,                 // per frame-ish on burst particles
+    emberRate: 26,               // embers per second per burst
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, S = 1;
+  let waterY = 0;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  // -------------------- palettes --------------------
+  const PALETTES = [
+    { name: 'gold',    core: [255, 240, 200], mid: [255, 200, 90],  edge: [200, 130, 30] },
+    { name: 'crimson', core: [255, 220, 210], mid: [255, 90, 70],   edge: [170, 30, 40] },
+    { name: 'jade',    core: [220, 255, 230], mid: [90, 230, 150],  edge: [20, 140, 90] },
+    { name: 'sapphire',core: [220, 235, 255], mid: [110, 160, 255], edge: [40, 60, 180] },
+    { name: 'violet',  core: [245, 225, 255], mid: [190, 120, 255], edge: [100, 40, 160] },
+    { name: 'silver',  core: [255, 255, 255], mid: [220, 228, 245], edge: [150, 160, 190] },
+  ];
+
+  // burst types
+  // peony: even sphere. ring: flat circle. willow: slow gold droop.
+  // crossette: particles split once. strobe: flashing dots.
+  const TYPES = ['peony', 'peony', 'ring', 'willow', 'crossette', 'strobe'];
+
+  // -------------------- state --------------------
+  const shells = [];     // rising rockets
+  const sparks = [];     // burst particles {x,y,vx,vy,life,maxLife,pal,r,split,strobe}
+  const embers = [];     // tiny drifting fallout
+  const flashes = [];    // sky wash from a break {t, x, y, c}
+  let nextLaunch = 1.2;
+  let nextVolley = 14;
+
+  // -------------------- city skyline (pre-rendered) --------------------
+  let skyline = null;
+  function buildSkyline() {
+    const c = document.createElement('canvas');
+    c.width = Math.ceil(W); c.height = Math.ceil(H - waterY * H + 2);
+    const g = c.getContext('2d');
+    const h = c.height;
+    let x = -20;
+    while (x < W + 20) {
+      const bw = rand(40, 120) * S;
+      const bh = rand(h * 0.30, h * 0.85);
+      const y = h - bh;
+      g.fillStyle = '#070912';
+      g.fillRect(x, y, bw, bh);
+      // windows: sparse warm lights, a few cool
+      const cols = Math.max(1, Math.floor(bw / (10 * S)));
+      const rows = Math.max(1, Math.floor(bh / (14 * S)));
+      for (let i = 0; i < cols; i++) {
+        for (let j = 0; j < rows; j++) {
+          if (Math.random() < 0.38) {
+            const wx = x + 4 * S + i * (bw - 8 * S) / cols;
+            const wy = y + 5 * S + j * (bh - 9 * S) / rows;
+            g.fillStyle = Math.random() < 0.8 ? 'rgba(255, 200, 118, 0.9)' : 'rgba(160, 195, 255, 0.75)';
+            g.fillRect(wx, wy, 3.4 * S, 4.6 * S);
+          }
+        }
+      }
+      // antenna on some
+      if (Math.random() < 0.3) {
+        g.strokeStyle = '#0b0e1c';
+        g.lineWidth = 2 * S;
+        g.beginPath();
+        g.moveTo(x + bw / 2, y);
+        g.lineTo(x + bw / 2, y - rand(14, 40) * S);
+        g.stroke();
+      }
+      x += bw + rand(-4, 6);
+    }
+    skyline = c;
+  }
+
+  // -------------------- launches --------------------
+  function launch(x) {
+    if (x === undefined) x = rand(W * 0.15, W * 0.85);
+    const type = TYPES[(Math.random() * TYPES.length) | 0];
+    shells.push({
+      x, y: waterY - 4,
+      vx: rand(-14, 14) * S,
+      vy: -rand(H * 0.42, H * 0.62),
+      type,
+      pal: PALETTES[(Math.random() * PALETTES.length) | 0],
+      trail: [],
+    });
+  }
+
+  function burst(x, y, type, pal) {
+    flashes.push({ t: 0, x, y, c: pal.mid });
+    const count = type === 'ring' ? 64 : (type === 'willow' ? 90 : 120);
+    const baseSp = (type === 'willow' ? 0.16 : 0.24) * W;
+
+    for (let i = 0; i < count; i++) {
+      let ang, sp;
+      if (type === 'ring') {
+        ang = (i / count) * Math.PI * 2 + rand(-0.02, 0.02);
+        sp = baseSp * rand(0.96, 1.04);
+      } else {
+        // fibonacci-ish sphere bias toward the shell's surface
+        ang = rand(0, Math.PI * 2);
+        sp = baseSp * (0.35 + 0.65 * Math.sqrt(Math.random()));
+        if (type !== 'peony' || Math.random() < 0.85) sp = baseSp * rand(0.82, 1.02) * (0.7 + 0.3 * Math.random());
+      }
+      const life = type === 'willow' ? rand(2.6, 3.6) : rand(1.2, 2.0);
+      sparks.push({
+        x, y,
+        vx: Math.cos(ang) * sp,
+        vy: Math.sin(ang) * sp * (type === 'ring' ? 0.35 : 1),
+        life, maxLife: life,
+        pal, type,
+        r: (type === 'willow' ? 1.4 : 2.0) * rand(0.7, 1.3) * S,
+        split: type === 'crossette' ? 1 : 0,
+        strobe: type === 'strobe' ? rand(0, Math.PI * 2) : -1,
+        px: x, py: y,
+      });
+    }
+  }
+
+  function crossetteSplit(s) {
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2 + rand(-0.3, 0.3);
+      const sp = 0.055 * W;
+      sparks.push({
+        x: s.x, y: s.y,
+        vx: s.vx * 0.25 + Math.cos(a) * sp,
+        vy: s.vy * 0.25 + Math.sin(a) * sp,
+        life: rand(0.5, 0.8), maxLife: 0.8,
+        pal: s.pal, type: 'peony',
+        r: s.r * 0.8, split: 0, strobe: -1,
+        px: s.x, py: s.y,
+      });
+    }
+  }
+
+  // -------------------- update --------------------
+  function update(dt) {
+    // shells rise, slow, and break near apogee
+    for (let i = shells.length - 1; i >= 0; i--) {
+      const s = shells[i];
+      s.vy += CONFIG.gravity * S * dt;
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      s.trail.push({ x: s.x, y: s.y });
+      if (s.trail.length > 14) s.trail.shift();
+      if (s.vy > -H * 0.06) {
+        burst(s.x, s.y, s.type, s.pal);
+        shells.splice(i, 1);
+      }
+    }
+
+    // sparks
+    for (let i = sparks.length - 1; i >= 0; i--) {
+      const p = sparks[i];
+      p.px = p.x; p.py = p.y;
+      const dragK = Math.pow(p.type === 'willow' ? 0.97 : CONFIG.drag, dt * 60);
+      p.vx *= dragK;
+      p.vy *= dragK;
+      p.vy += CONFIG.gravity * S * (p.type === 'willow' ? 0.9 : 0.55) * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.life -= dt;
+
+      if (p.split && p.life < p.maxLife * 0.55) {
+        p.split = 0;
+        crossetteSplit(p);
+        p.life = 0;
+      }
+      // embers drift off bright sparks
+      if (p.life > 0.3 && Math.random() < CONFIG.emberRate * dt * 0.08) {
+        embers.push({
+          x: p.x, y: p.y,
+          vx: p.vx * 0.2 + rand(-8, 8) * S,
+          vy: p.vy * 0.2 + rand(-8, 8) * S,
+          life: rand(0.8, 1.6), maxLife: 1.6,
+          c: p.pal.mid, r: rand(0.6, 1.2) * S,
+        });
+      }
+      if (p.life <= 0) sparks.splice(i, 1);
+    }
+
+    for (let i = embers.length - 1; i >= 0; i--) {
+      const e = embers[i];
+      e.vy += CONFIG.gravity * S * 0.4 * dt;
+      e.x += e.vx * dt;
+      e.y += e.vy * dt;
+      e.life -= dt;
+      if (e.life <= 0) embers.splice(i, 1);
+    }
+
+    for (let i = flashes.length - 1; i >= 0; i--) {
+      flashes[i].t += dt;
+      if (flashes[i].t > 0.4) flashes.splice(i, 1);
+    }
+
+    // show schedule
+    nextLaunch -= dt;
+    if (nextLaunch <= 0) {
+      launch();
+      nextLaunch = rand(CONFIG.launchEvery[0], CONFIG.launchEvery[1]);
+      // occasionally a quick double
+      if (Math.random() < 0.3) {
+        setTimeout(() => launch(), 350);
+      }
+    }
+    nextVolley -= dt;
+    if (nextVolley <= 0) {
+      nextVolley = rand(CONFIG.volleyEvery[0], CONFIG.volleyEvery[1]);
+      const n = Math.round(rand(CONFIG.volleyCount[0], CONFIG.volleyCount[1]));
+      for (let i = 0; i < n; i++) {
+        setTimeout(() => launch(), i * rand(220, 420));
+      }
+    }
+  }
+
+  // -------------------- render --------------------
+  function sparkColor(p, alpha) {
+    const t = 1 - p.life / p.maxLife;
+    const c = t < 0.18 ? p.pal.core : (t < 0.55 ? p.pal.mid : p.pal.edge);
+    return `rgba(${c[0]},${c[1]},${c[2]},${alpha.toFixed(3)})`;
+  }
+
+  function drawSky() {
+    const g = ctx.createLinearGradient(0, 0, 0, waterY);
+    g.addColorStop(0, '#04060f');
+    g.addColorStop(0.6, '#0a1024');
+    g.addColorStop(1, '#18244a');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, waterY + 2);
+
+    // stars
+    ctx.fillStyle = 'rgba(210, 220, 255, 0.5)';
+    for (const s of stars) {
+      ctx.globalAlpha = s.a;
+      ctx.fillRect(s.x * W, s.y * H * 0.7, s.r, s.r);
+    }
+    ctx.globalAlpha = 1;
+
+    // break flashes wash the sky locally
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (const f of flashes) {
+      const a = Math.max(0, 1 - f.t / 0.4) * 0.22;
+      const r = W * 0.3;
+      const grad = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, r);
+      grad.addColorStop(0, `rgba(${f.c[0]},${f.c[1]},${f.c[2]},${a})`);
+      grad.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(f.x - r, f.y - r, r * 2, r * 2);
+    }
+    ctx.restore();
+  }
+
+  let stars = [];
+
+  function drawSparks() {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    // shells with trails
+    for (const s of shells) {
+      for (let i = 1; i < s.trail.length; i++) {
+        const a = i / s.trail.length;
+        ctx.strokeStyle = `rgba(255, 214, 150, ${a * 0.5})`;
+        ctx.lineWidth = 2.2 * S * a;
+        ctx.beginPath();
+        ctx.moveTo(s.trail[i - 1].x, s.trail[i - 1].y);
+        ctx.lineTo(s.trail[i].x, s.trail[i].y);
+        ctx.stroke();
+      }
+      ctx.fillStyle = 'rgba(255, 240, 210, 0.95)';
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, 2.4 * S, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // burst sparks with short motion-blur trails
+    for (const p of sparks) {
+      const t = 1 - p.life / p.maxLife;
+      let a = p.life / p.maxLife;
+      if (p.strobe >= 0) a *= (Math.sin(p.strobe + p.life * 26) > 0 ? 1 : 0.12);
+      a = Math.min(1, a * 1.4);
+      const col = sparkColor(p, a);
+      ctx.strokeStyle = col;
+      ctx.lineWidth = p.r * (1 - t * 0.55);
+      ctx.beginPath();
+      ctx.moveTo(p.px, p.py);
+      ctx.lineTo(p.x, p.y);
+      ctx.stroke();
+      if (t < 0.25) {
+        ctx.fillStyle = `rgba(${p.pal.core[0]},${p.pal.core[1]},${p.pal.core[2]},${a * 0.9})`;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r * 0.9, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // embers
+    for (const e of embers) {
+      const a = (e.life / e.maxLife) * 0.7;
+      ctx.fillStyle = `rgba(${e.c[0]},${e.c[1]},${e.c[2]},${a.toFixed(3)})`;
+      ctx.fillRect(e.x, e.y, e.r, e.r);
+    }
+    ctx.restore();
+  }
+
+  function drawCity() {
+    ctx.drawImage(skyline, 0, waterY * H - skyline.height + 2);
+  }
+
+  function drawWater(time) {
+    const h = H - waterY;
+    const g = ctx.createLinearGradient(0, waterY, 0, H);
+    g.addColorStop(0, '#0b1326');
+    g.addColorStop(1, '#05080f');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, waterY, W, h);
+
+    // city light columns
+    ctx.save();
+    ctx.globalAlpha = 0.28;
+    ctx.drawImage(skyline, 0, waterY - 6, W, h * 0.9);
+    ctx.globalAlpha = 0.10;
+    ctx.drawImage(skyline, 0, waterY - 6 + h * 0.15, W, h * 0.7);
+    ctx.restore();
+
+    // burst reflections: mirrored sparks, compressed and wobbling
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (const p of sparks) {
+      const depth = p.y / waterY;
+      if (depth > 1.05) continue;
+      const ry = waterY + (waterY - p.y) * 0.42;
+      const wob = Math.sin(time * 2.2 + p.x * 0.02) * (2 + 5 * (1 - depth)) * S;
+      const t = 1 - p.life / p.maxLife;
+      let a = (p.life / p.maxLife) * 0.34 * (0.6 + 0.4 * Math.sin(time * 3 + p.x * 0.05));
+      if (p.strobe >= 0) a *= (Math.sin(p.strobe + p.life * 26) > 0 ? 1 : 0.1);
+      const col = sparkColor(p, a);
+      ctx.strokeStyle = col;
+      ctx.lineWidth = p.r * (1 - t * 0.5);
+      ctx.beginPath();
+      ctx.ellipse(p.x + wob, ry, Math.abs(p.x - p.px) * 0.5 + 1.2 * S, 2 * S, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    for (const e of embers) {
+      const ry = waterY + (waterY - e.y) * 0.42;
+      ctx.fillStyle = `rgba(${e.c[0]},${e.c[1]},${e.c[2]},${(e.life / e.maxLife) * 0.2})`;
+      ctx.fillRect(e.x, ry, e.r, e.r * 0.7);
+    }
+    ctx.restore();
+
+    // wave streaks
+    ctx.save();
+    for (const st of waves) {
+      const y = waterY + st.y * h;
+      const x = ((st.x * W + time * st.sp * W * 0.02) % (W + st.len * W)) - st.len * W;
+      ctx.globalAlpha = st.a;
+      ctx.fillStyle = '#7d94c8';
+      ctx.fillRect(x, y, st.len * W, 1.1 * S);
+    }
+    ctx.restore();
+  }
+
+  let waves = [];
+
+  // -------------------- resize --------------------
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    S = W / 1600;
+    waterY = Math.floor(H * CONFIG.waterY);
+    buildSkyline();
+    stars = [];
+    for (let i = 0; i < 130; i++) {
+      stars.push({ x: Math.random(), y: Math.random(), r: rand(1, 1.9) * S, a: rand(0.2, 0.8) });
+    }
+    waves = [];
+    for (let i = 0; i < 40; i++) {
+      waves.push({
+        y: rand(0.02, 0.95), x: Math.random(), len: rand(0.06, 0.22),
+        sp: rand(0.5, 2.2), a: rand(0.03, 0.10),
+      });
+    }
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  // -------------------- loop --------------------
+  let last = performance.now();
+  let ready = false;
+  const fast = new URLSearchParams(location.search).has('fast') ? 4 : 1;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000) * fast;
+    last = now;
+    const time = now / 1000;
+
+    update(dt);
+    drawSky();
+    drawSparks();
+    drawCity();
+    drawWater(time);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  // opening flourish so the first paint is alive
+  for (let i = 0; i < 3; i++) {
+    setTimeout(() => launch(), 300 + i * 500);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
