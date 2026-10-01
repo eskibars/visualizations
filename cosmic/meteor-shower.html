@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Meteor Shower</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #02040c; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 130% 105% at 50% 38%,
+        rgba(0,0,0,0) 40%, rgba(0,0,0,.32) 82%, rgba(0,0,0,.72) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(190, 214, 255, .28);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">orionids · past midnight</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  METEOR SHOWER — the Orionids over a ridge, with a tent and a
+  //  campfire far below. Trains linger: each meteor writes its
+  //  afterglow into a slowly-fading buffer, so the sky remembers
+  //  where the night has been busy.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1.5,
+
+    ridgeY: 0.78,
+    lakeY: 0.88,
+
+    meteorEvery: [1.1, 2.8],
+    burstEvery: [9, 20],
+    bolideEvery: [40, 90],
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, S = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  // -------------------- state --------------------
+  let meteors = [];      // live streaks
+  let trains = null, tctx = null;   // persistent afterglow buffer (sky only)
+  let stars = [], milky = null;
+  let nextMeteor = 1, nextBurst = 8, nextBolide = 25;
+  let fireP = 0;
+
+  // -------------------- sky furniture --------------------
+  function buildStars() {
+    stars = [];
+    for (let i = 0; i < 320; i++) {
+      stars.push({
+        x: Math.random(), y: Math.random(),
+        r: rand(0.4, 1.5) * S,
+        tw: rand(0.3, 2.2), ph: rand(0, Math.PI * 2),
+        a: rand(0.25, 0.95),
+      });
+    }
+  }
+
+  function buildMilky() {
+    const c = document.createElement('canvas');
+    c.width = Math.ceil(W * 0.9); c.height = Math.ceil(H * 0.9);
+    const g = c.getContext('2d');
+    const blobs = 90;
+    for (let i = 0; i < blobs; i++) {
+      // a diagonal band across the canvas
+      const t = Math.random();
+      const bx = c.width * 0.08 + t * c.width * 0.84;
+      const by = c.height * (0.75 - 0.5 * t) + rand(-c.height * 0.10, c.height * 0.10);
+      const r = rand(c.height * 0.05, c.height * 0.16);
+      const grad = g.createRadialGradient(bx, by, 0, bx, by, r);
+      const warm = Math.random() < 0.3;
+      grad.addColorStop(0, warm ? 'rgba(215, 190, 175, 0.05)' : 'rgba(170, 190, 230, 0.05)');
+      grad.addColorStop(1, 'rgba(170, 190, 230, 0)');
+      g.fillStyle = grad;
+      g.fillRect(bx - r, by - r, r * 2, r * 2);
+    }
+    // dark dust lanes
+    for (let i = 0; i < 26; i++) {
+      const t = Math.random();
+      const bx = c.width * 0.10 + t * c.width * 0.80;
+      const by = c.height * (0.75 - 0.5 * t) + rand(-c.height * 0.05, c.height * 0.05);
+      const r = rand(c.height * 0.03, c.height * 0.09);
+      const grad = g.createRadialGradient(bx, by, 0, bx, by, r);
+      grad.addColorStop(0, 'rgba(4, 7, 18, 0.35)');
+      grad.addColorStop(1, 'rgba(4, 7, 18, 0)');
+      g.fillStyle = grad;
+      g.fillRect(bx - r, by - r, r * 2, r * 2);
+    }
+    // feather the edges so the sheet never shows a seam
+    g.globalCompositeOperation = 'destination-out';
+    for (const [x0, x1] of [[0, 0.10], [0.94, 1.0]]) {
+      const fg = g.createLinearGradient(c.width * x0, 0, c.width * x1, 0);
+      fg.addColorStop(0, 'rgba(0,0,0,1)');
+      fg.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = fg;
+      g.fillRect(0, 0, c.width, c.height);
+    }
+    milky = c;
+  }
+
+  // -------------------- meteors --------------------
+  function spawnMeteor(bolide) {
+    // radiant: upper-left region, streaking down-right
+    const x0 = rand(-0.05, 0.55) * W;
+    const y0 = rand(-0.05, 0.30) * H;
+    const ang = rand(0.42, 0.72);              // radians below horizontal
+    const sp = (bolide ? rand(1500, 2000) : rand(900, 1500)) * S;
+    const len = bolide ? rand(160, 240) * S : rand(60, 150) * S;
+    meteors.push({
+      x: x0, y: y0,
+      vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp,
+      len, life: rand(0.5, 0.9), maxLife: 1,
+      w: (bolide ? rand(2.6, 3.6) : rand(1.1, 2.2)) * S,
+      bolide: !!bolide,
+      px: x0, py: y0,
+    });
+    if (bolide) skyFlash = 0.9;
+  }
+
+  let skyFlash = 0;
+
+  function updateMeteors(dt) {
+    for (let i = meteors.length - 1; i >= 0; i--) {
+      const m = meteors[i];
+      m.px = m.x; m.py = m.y;
+      m.x += m.vx * dt;
+      m.y += m.vy * dt;
+      m.life -= dt;
+
+      // write the afterglow trail into the persistent buffer
+      tctx.save();
+      tctx.globalCompositeOperation = 'lighter';
+      const fade = Math.max(0, Math.min(1, m.life / m.maxLife));
+      const grd = tctx.createLinearGradient(m.px, m.py, m.x, m.y);
+      const c1 = m.bolide ? 'rgba(255, 235, 200, ' : 'rgba(200, 225, 255, ';
+      grd.addColorStop(0, c1 + (0.55 * fade).toFixed(3) + ')');
+      grd.addColorStop(1, c1 + '0)');
+      tctx.strokeStyle = grd;
+      tctx.lineWidth = m.w * 2.4;
+      tctx.lineCap = 'round';
+      tctx.beginPath();
+      tctx.moveTo(m.px, m.py);
+      tctx.lineTo(m.x, m.y);
+      tctx.stroke();
+      tctx.restore();
+
+      if (m.life <= 0 || m.y > CONFIG.ridgeY * H * 0.98) meteors.splice(i, 1);
+    }
+
+    // schedule
+    nextMeteor -= dt;
+    if (nextMeteor <= 0) {
+      spawnMeteor(false);
+      nextMeteor = rand(CONFIG.meteorEvery[0], CONFIG.meteorEvery[1]);
+    }
+    nextBurst -= dt;
+    if (nextBurst <= 0) {
+      nextBurst = rand(CONFIG.burstEvery[0], CONFIG.burstEvery[1]);
+      const n = 2 + (Math.random() * 4) | 0;
+      for (let i = 0; i < n; i++) setTimeout(() => spawnMeteor(false), i * rand(160, 380));
+    }
+    nextBolide -= dt;
+    if (nextBolide <= 0) {
+      nextBolide = rand(CONFIG.bolideEvery[0], CONFIG.bolideEvery[1]);
+      spawnMeteor(true);
+    }
+    skyFlash = Math.max(0, skyFlash - dt * 1.6);
+  }
+
+  // -------------------- landscape --------------------
+  let ridge1 = null, ridge2 = null;
+
+  function buildRidges() {
+    function make(yBase, amp, color, seed) {
+      const c = document.createElement('canvas');
+      c.width = Math.ceil(W); c.height = Math.ceil(H - yBase * H + 30);
+      const g = c.getContext('2d');
+      const h = c.height;
+      g.fillStyle = color;
+      g.beginPath();
+      g.moveTo(-4, h + 4);
+      let y = h * 0.35;
+      g.lineTo(-4, y);
+      for (let x = 0; x <= W + 8; x += 14) {
+        y = h * 0.32
+          + Math.sin(x * 0.004 / S + seed) * amp * 0.55
+          + Math.sin(x * 0.011 / S + seed * 2.7) * amp * 0.30
+          + Math.sin(x * 0.027 / S + seed * 5.1) * amp * 0.15;
+        g.lineTo(x, y);
+      }
+      g.lineTo(W + 4, h + 4);
+      g.closePath();
+      g.fill();
+      return c;
+    }
+    ridge1 = make(CONFIG.ridgeY - 0.05, H * 0.055, '#0d1730', 1.7);
+    ridge2 = make(CONFIG.ridgeY, H * 0.04, '#0a1226', 4.3);
+  }
+
+  // campsite: tent silhouette + campfire, on the near ridge shoulder
+  function drawCamp(time) {
+    const cx = W * 0.68;
+    const groundY = CONFIG.ridgeY * H + 14 * S;
+    // tent
+    ctx.fillStyle = '#04070f';
+    ctx.beginPath();
+    ctx.moveTo(cx - 30 * S, groundY);
+    ctx.lineTo(cx, groundY - 34 * S);
+    ctx.lineTo(cx + 30 * S, groundY);
+    ctx.closePath();
+    ctx.fill();
+    // warm doorway
+    const flick = 0.7 + 0.3 * Math.sin(time * 6.3) * Math.sin(time * 4.1);
+    ctx.fillStyle = `rgba(255, 176, 88, ${0.75 * flick})`;
+    ctx.beginPath();
+    ctx.moveTo(cx - 9 * S, groundY);
+    ctx.lineTo(cx, groundY - 20 * S);
+    ctx.lineTo(cx + 9 * S, groundY);
+    ctx.closePath();
+    ctx.fill();
+    // campfire to the right
+    const fx = cx + 52 * S, fy = groundY - 2 * S;
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    const fg = ctx.createRadialGradient(fx, fy, 0, fx, fy, 42 * S * (0.8 + 0.2 * flick));
+    fg.addColorStop(0, `rgba(255, 170, 70, ${0.30 * flick})`);
+    fg.addColorStop(1, 'rgba(255, 120, 40, 0)');
+    ctx.fillStyle = fg;
+    ctx.fillRect(fx - 60 * S, fy - 60 * S, 120 * S, 120 * S);
+    ctx.restore();
+    ctx.fillStyle = '#ffca6a';
+    ctx.beginPath();
+    ctx.ellipse(fx, fy - 3 * S * flick, 3.4 * S, 5.5 * S * flick, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // sparks
+    if (Math.random() < 0.3) {
+      sparks.push({
+        x: fx + rand(-3, 3) * S, y: fy,
+        vx: rand(-9, 9) * S, vy: -rand(22, 52) * S,
+        life: rand(0.6, 1.4),
+      });
+    }
+    for (let i = sparks.length - 1; i >= 0; i--) {
+      const s = sparks[i];
+      s.x += s.vx * dtG + Math.sin(time * 7 + s.y * 0.1) * 8 * S * dtG;
+      s.y += s.vy * dtG;
+      s.vy += 12 * S * dtG;
+      s.life -= dtG;
+      if (s.life <= 0) { sparks.splice(i, 1); continue; }
+      ctx.fillStyle = `rgba(255, ${180 + ((s.life * 60) | 0)}, 90, ${Math.min(1, s.life).toFixed(2)})`;
+      ctx.fillRect(s.x, s.y, 1.6 * S, 1.6 * S);
+    }
+  }
+  const sparks = [];
+
+  // -------------------- render --------------------
+  function draw(time, dt) {
+    // sky
+    const g = ctx.createLinearGradient(0, 0, 0, CONFIG.ridgeY * H);
+    g.addColorStop(0, '#020410');
+    g.addColorStop(0.55, '#061028');
+    g.addColorStop(1, '#0b1a38');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, CONFIG.ridgeY * H + 90 * S);
+
+    // stars
+    for (const s of stars) {
+      const a = s.a * (0.55 + 0.45 * Math.sin(time * s.tw + s.ph));
+      ctx.globalAlpha = a;
+      ctx.fillStyle = '#dfe6ff';
+      ctx.beginPath();
+      ctx.arc(s.x * W, s.y * H * 0.92, s.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // milky way
+    ctx.globalAlpha = 0.85;
+    ctx.drawImage(milky, W * 0.05, -H * 0.05);
+    ctx.globalAlpha = 1;
+
+    // persistent trains + flash wash
+    ctx.drawImage(trains, 0, 0);
+    if (skyFlash > 0) {
+      ctx.fillStyle = `rgba(190, 210, 255, ${skyFlash * 0.12})`;
+      ctx.fillRect(0, 0, W, CONFIG.ridgeY * H);
+    }
+
+    // meteor heads
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const m of meteors) {
+      const fade = Math.max(0, Math.min(1, m.life / m.maxLife));
+      const grd = ctx.createLinearGradient(m.x - m.vx * 0.05, m.y - m.vy * 0.05, m.x, m.y);
+      grd.addColorStop(0, 'rgba(160, 200, 255, 0)');
+      grd.addColorStop(1, m.bolide ? `rgba(255, 245, 220, ${fade})` : `rgba(230, 240, 255, ${fade})`);
+      ctx.strokeStyle = grd;
+      ctx.lineWidth = m.w;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(m.x - m.vx * 0.05, m.y - m.vy * 0.05);
+      ctx.lineTo(m.x, m.y);
+      ctx.stroke();
+      const hr = m.w * 2.2;
+      const hg = ctx.createRadialGradient(m.x, m.y, 0, m.x, m.y, hr * 3);
+      hg.addColorStop(0, `rgba(255, 255, 255, ${0.9 * fade})`);
+      hg.addColorStop(0.4, `rgba(200, 220, 255, ${0.35 * fade})`);
+      hg.addColorStop(1, 'rgba(160, 200, 255, 0)');
+      ctx.fillStyle = hg;
+      ctx.fillRect(m.x - hr * 3, m.y - hr * 3, hr * 6, hr * 6);
+    }
+    ctx.restore();
+
+    // ridges
+    ctx.drawImage(ridge1, 0, CONFIG.ridgeY * H - 0.045 * H);
+    drawCamp(time);
+    ctx.drawImage(ridge2, 0, CONFIG.ridgeY * H);
+
+    // lake strip with soft reflection of the trains
+    const ly = CONFIG.lakeY * H;
+    const lh = H - ly;
+    const wg = ctx.createLinearGradient(0, ly, 0, H);
+    wg.addColorStop(0, '#081226');
+    wg.addColorStop(1, '#040916');
+    ctx.fillStyle = wg;
+    ctx.fillRect(0, ly, W, lh);
+    ctx.save();
+    ctx.globalAlpha = 0.30;
+    ctx.translate(0, ly * 2);
+    ctx.scale(1, -1);
+    ctx.beginPath();
+    ctx.rect(0, 0, W, ly);
+    ctx.clip();
+    ctx.drawImage(trains, 0, 0);
+    ctx.restore();
+    // shimmer lines
+    ctx.strokeStyle = 'rgba(150, 180, 230, 0.10)';
+    ctx.lineWidth = 1 * S;
+    for (let i = 0; i < 5; i++) {
+      const y = ly + lh * (0.15 + i * 0.19);
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(W, y);
+      ctx.stroke();
+    }
+  }
+
+  // -------------------- resize --------------------
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    S = W / 1600;
+    trains = document.createElement('canvas');
+    trains.width = Math.ceil(W * DPR);
+    trains.height = Math.ceil(H * DPR);
+    tctx = trains.getContext('2d');
+    tctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    buildStars();
+    buildMilky();
+    buildRidges();
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  // -------------------- loop --------------------
+  let last = performance.now();
+  let ready = false;
+  let dtG = 1 / 60;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+    dtG = dt;
+
+    updateMeteors(dt);
+
+    // fade the persistent afterglow buffer
+    tctx.save();
+    tctx.globalCompositeOperation = 'destination-out';
+    tctx.fillStyle = 'rgba(0, 0, 0, 0.035)';
+    tctx.fillRect(0, 0, W, H);
+    tctx.restore();
+
+    draw(time, dt);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  // opening volley so the first paint already has trains
+  for (let i = 0; i < 5; i++) spawnMeteor(false);
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

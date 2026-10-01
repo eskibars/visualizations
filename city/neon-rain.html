@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Neon Rain</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #05060d; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 125% 100% at 50% 45%,
+        rgba(0,0,0,0) 40%, rgba(0,0,0,.36) 82%, rgba(0,0,0,.78) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(255, 120, 190, .30);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">monsoon district · open all night</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  NEON RAIN — a side street that never dries. Signs buzz and
+  //  occasionally die; their light smears down the wet asphalt.
+  //  Cars sweep through with headlights and tail-lights; the rain
+  //  never quite decides to stop.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1.5,
+    vpY: 0.52,               // vanishing point height
+
+    signsPerSide: 4,
+    carEvery: [5, 13],
+    rainLayers: [
+      { n: 70, speed: 900, len: 26, angle: 0.16, alpha: 0.30, w: 1.1 },
+      { n: 60, speed: 520, len: 16, angle: 0.12, alpha: 0.18, w: 1.0 },
+      { n: 45, speed: 300, len: 10, angle: 0.09, alpha: 0.10, w: 1.0 },
+    ],
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, S = 1;
+  let vp = { x: 0, y: 0 };
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  const pick = (arr) => arr[(Math.random() * arr.length) | 0];
+
+  const NEON = ['#ff2d95', '#00e5ff', '#b44dff', '#ff8c1a', '#26ff8a', '#ff4d4d'];
+
+  // -------------------- glyph signs (pre-rendered) --------------------
+  function makeGlyphChar(g, x, y, size, color) {
+    // pseudo-CJK: a handful of strokes in a square cell
+    const cells = [];
+    const n = 3 + (Math.random() * 3) | 0;
+    for (let i = 0; i < n; i++) {
+      cells.push({
+        x1: rand(0, 0.9), y1: rand(0, 0.9),
+        x2: rand(0, 0.9), y2: rand(0, 0.9),
+        h: Math.random() < 0.4,
+      });
+    }
+    g.strokeStyle = color;
+    g.lineWidth = size * 0.10;
+    g.lineCap = 'round';
+    for (const st of cells) {
+      g.beginPath();
+      if (st.h) {
+        g.moveTo(x + st.x1 * size, y + st.y1 * size * 0.9 + size * 0.05);
+        g.lineTo(x + st.x2 * size * 0.9 + size * 0.05, y + st.y1 * size * 0.9 + size * 0.05);
+      } else {
+        g.moveTo(x + st.x1 * size * 0.9 + size * 0.05, y + st.y1 * size);
+        g.lineTo(x + st.x2 * size * 0.9 + size * 0.05, y + st.y2 * size);
+      }
+      g.stroke();
+    }
+  }
+
+  function makeSignSprite(color, chars, vertical) {
+    const cw = 54, pad = 12;
+    const w = vertical ? cw + pad * 2 : cw * chars + pad * 2;
+    const h = vertical ? cw * chars + pad * 2 : cw + pad * 2;
+    const c = document.createElement('canvas');
+    c.width = w + 40; c.height = h + 40;
+    const g = c.getContext('2d');
+    g.translate(20, 20);
+    // dark backing board
+    g.fillStyle = 'rgba(8, 10, 20, 0.92)';
+    g.fillRect(0, 0, w, h);
+    g.strokeStyle = 'rgba(255,255,255,0.08)';
+    g.lineWidth = 2;
+    g.strokeRect(2, 2, w - 4, h - 4);
+    // glyphs with glow
+    g.save();
+    g.shadowColor = color;
+    g.shadowBlur = 16;
+    for (let i = 0; i < chars; i++) {
+      const x = vertical ? pad : pad + i * cw;
+      const y = vertical ? pad + i * cw : pad;
+      makeGlyphChar(g, x, y, cw - 6, color);
+    }
+    g.restore();
+    return { c, w, h };
+  }
+
+  // -------------------- scene build --------------------
+  let signs = [];           // { spr, x, y, scale, side, flickT, dead, deadT, col }
+  let wallCanvas = null;
+  let raindrops = [];
+  let car = null, carTimer = 4;
+
+  function buildWalls() {
+    wallCanvas = document.createElement('canvas');
+    wallCanvas.width = Math.ceil(W); wallCanvas.height = Math.ceil(vp.y + 4);
+    const g = wallCanvas.getContext('2d');
+    // sky above the street canyon
+    const sky = g.createLinearGradient(0, 0, 0, vp.y);
+    sky.addColorStop(0, '#05060d');
+    sky.addColorStop(1, '#141628');
+    g.fillStyle = sky;
+    g.fillRect(0, 0, W, vp.y);
+
+    // far haze at the vanishing point
+    const hz = g.createRadialGradient(vp.x, vp.y, 0, vp.x, vp.y, W * 0.2);
+    hz.addColorStop(0, 'rgba(120, 90, 160, 0.20)');
+    hz.addColorStop(1, 'rgba(120, 90, 160, 0)');
+    g.fillStyle = hz;
+    g.fillRect(vp.x - W * 0.2, 0, W * 0.4, vp.y);
+
+    // buildings: two converging walls made of overlapping slabs
+    for (const side of [-1, 1]) {
+      const n = 9;
+      for (let i = n; i >= 1; i--) {
+        const t = i / n;                        // 1 far, 0 near
+        const depth = Math.pow(t, 1.6);
+        const innerX = vp.x + side * lerp(10, W * 0.30, depth);
+        const outerX = vp.x + side * lerp(40, W * 0.62, depth);
+        const topY = lerp(vp.y * 0.86, 0, depth);
+        const botY = vp.y;
+        const shadeK = 0.55 + 0.45 * (1 - depth);
+        g.fillStyle = `rgb(${Math.round(10 * shadeK + 6)}, ${Math.round(12 * shadeK + 7)}, ${Math.round(24 * shadeK + 12)})`;
+        g.beginPath();
+        g.moveTo(innerX, topY);
+        g.lineTo(outerX, topY - depth * H * 0.06);
+        g.lineTo(outerX, botY);
+        g.lineTo(innerX, botY);
+        g.closePath();
+        g.fill();
+        // sparse windows
+        const cols = Math.max(1, Math.floor((outerX - innerX) / (16 * S)));
+        const rows = Math.max(1, Math.floor((botY - topY) / (20 * S)));
+        for (let a = 0; a < cols; a++) {
+          for (let b = 0; b < rows; b++) {
+            if (Math.random() > 0.16) continue;
+            const wx = innerX + (a + 0.5) * (outerX - innerX) / cols;
+            const wy = topY + (b + 0.5) * (botY - topY) / rows;
+            g.fillStyle = Math.random() < 0.75 ? 'rgba(255, 200, 120, 0.55)' : 'rgba(140, 190, 255, 0.45)';
+            const ww = 3.4 * S * (1 - depth * 0.6);
+            g.fillRect(wx - ww / 2, wy - ww / 2, ww, ww * 1.4);
+          }
+        }
+      }
+      // rooftop cable
+      g.strokeStyle = 'rgba(0,0,0,0.55)';
+      g.lineWidth = 1.5 * S;
+      g.beginPath();
+      g.moveTo(side < 0 ? 0 : W, H * 0.10);
+      g.quadraticCurveTo(vp.x + side * W * 0.18, H * 0.30, vp.x, vp.y * 0.92);
+      g.stroke();
+    }
+  }
+
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  function buildSigns() {
+    signs = [];
+    for (const side of [-1, 1]) {
+      for (let i = 0; i < CONFIG.signsPerSide; i++) {
+        const depth = 0.25 + (i / CONFIG.signsPerSide) * 0.7 + rand(-0.04, 0.04);
+        const scale = lerp(1.15, 0.34, depth);
+        const color = NEON[(i + (side > 0 ? 2 : 0)) % NEON.length];
+        const vertical = Math.random() < 0.5;
+        const spr = makeSignSprite(color, 2 + (Math.random() * 2) | 0, vertical);
+        const x = vp.x + side * lerp(W * 0.16, W * 0.315, depth);
+        const y = lerp(vp.y * 0.90, H * 0.26, depth) + rand(-16, 16) * S;
+        signs.push({
+          spr, x, y, scale, side, vertical, color,
+          flickT: rand(0, 10), dead: false, deadT: rand(12, 40),
+          buzz: rand(0, Math.PI * 2),
+        });
+      }
+    }
+  }
+
+  // -------------------- rain --------------------
+  function buildRain() {
+    raindrops = [];
+    for (const layer of CONFIG.rainLayers) {
+      for (let i = 0; i < layer.n; i++) {
+        raindrops.push({
+          layer,
+          x: Math.random() * W,
+          y: Math.random() * H,
+        });
+      }
+    }
+  }
+
+  // -------------------- cars --------------------
+  function spawnCar() {
+    const toward = Math.random() < 0.5;
+    car = {
+      toward,
+      t: 0,                       // 0 far → 1 near
+      speed: rand(0.22, 0.4),
+      hue: toward ? 'head' : 'tail',
+    };
+  }
+
+  function drawCar(dt) {
+    if (!car) {
+      carTimer -= dt;
+      if (carTimer <= 0) { spawnCar(); carTimer = rand(CONFIG.carEvery[0], CONFIG.carEvery[1]); }
+      return;
+    }
+    car.t += car.speed * dt;
+    const t = car.toward ? car.t : 1 - car.t;
+    if (car.t >= 1) { car = null; return; }
+
+    // street position: from the vanishing point toward the bottom
+    const depth = Math.pow(1 - t, 1.5);
+    const cx = vp.x + (t < 0.5 ? -1 : 1) * 0 * W + (car.toward ? -W * 0.06 : W * 0.10) * (1 - depth * 0.3);
+    const y = lerp(vp.y, H * 1.02, Math.pow(t, 1.35));
+    const sc = lerp(0.12, 1.0, Math.pow(t, 1.3));
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    // street light cone in front of the car
+    if (car.toward) {
+      const cone = ctx.createRadialGradient(cx, y, 0, cx, y, 260 * S * sc);
+      cone.addColorStop(0, `rgba(255, 240, 200, ${0.30 * sc})`);
+      cone.addColorStop(1, 'rgba(255, 240, 200, 0)');
+      ctx.fillStyle = cone;
+      ctx.beginPath();
+      ctx.moveTo(cx, y);
+      const spread = 200 * S * sc;
+      ctx.lineTo(cx - spread, Math.min(H, y + 340 * S * sc));
+      ctx.lineTo(cx + spread, Math.min(H, y + 340 * S * sc));
+      ctx.closePath();
+      ctx.fill();
+    }
+    // lights
+    const lx = 26 * S * sc;
+    for (const side of [-1, 1]) {
+      const col = car.toward ? 'rgba(255, 250, 230, 0.95)' : 'rgba(255, 60, 50, 0.95)';
+      const px = cx + side * lx;
+      const r = (car.toward ? 5 : 3.4) * S * sc;
+      const gr = ctx.createRadialGradient(px, y, 0, px, y, r * 4);
+      gr.addColorStop(0, col);
+      gr.addColorStop(0.3, col.replace('0.95', '0.4'));
+      gr.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = gr;
+      ctx.fillRect(px - r * 4, y - r * 4, r * 8, r * 8);
+    }
+    ctx.restore();
+
+    // dark body between the lights
+    ctx.fillStyle = 'rgba(6, 8, 14, 0.9)';
+    ctx.fillRect(cx - lx * 0.85, y - 8 * S * sc, lx * 1.7, 14 * S * sc);
+  }
+
+  // -------------------- render --------------------
+  function drawScene(time, dt) {
+    ctx.drawImage(wallCanvas, 0, 0);
+
+    // wet asphalt
+    const wy = vp.y;
+    const g = ctx.createLinearGradient(0, wy, 0, H);
+    g.addColorStop(0, '#0c0e1a');
+    g.addColorStop(0.25, '#0a0c16');
+    g.addColorStop(1, '#11131f');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, wy, W, H - wy);
+
+    // centre line shrinking to the VP
+    ctx.strokeStyle = 'rgba(200, 200, 210, 0.10)';
+    ctx.lineWidth = 2 * S;
+    ctx.setLineDash([26 * S, 30 * S]);
+    ctx.lineDashOffset = -time * 30 * S;
+    ctx.beginPath();
+    ctx.moveTo(vp.x, wy);
+    ctx.lineTo(W * 0.5, H);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // signs: glow sprite above, smeared reflection below
+    for (const s of signs) {
+      s.flickT += dt;
+      s.deadT -= dt;
+      if (s.deadT <= 0) {
+        s.dead = !s.dead;
+        s.deadT = s.dead ? rand(0.8, 3.2) : rand(14, 40);
+      }
+      let a = 1;
+      if (s.dead) a = 0.12;
+      else {
+        // fluorescent buzz
+        a = 0.86 + 0.14 * Math.sin(time * 40 + s.buzz) * Math.sin(time * 7.3 + s.buzz * 2);
+        if (Math.random() < 0.003) a *= 0.2;    // blink
+      }
+      const sw = s.spr.w * s.scale * S;
+      const sh = s.spr.h * s.scale * S;
+      const x = s.x - sw / 2;
+      const y = s.y - sh / 2;
+
+      ctx.globalAlpha = a;
+      ctx.drawImage(s.spr.c, x, y, sw, sh);
+      // halo
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+      const hg = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, sw * 1.1);
+      const cc = s.color;
+      hg.addColorStop(0, hexA(cc, 0.22 * a));
+      hg.addColorStop(1, hexA(cc, 0));
+      ctx.fillStyle = hg;
+      ctx.fillRect(s.x - sw * 1.1, s.y - sh * 1.1, sw * 2.2, sh * 2.2);
+      ctx.restore();
+
+      // reflection in the asphalt
+      if (s.y < wy) {
+        const ry = wy + (wy - s.y) * 0.5;
+        ctx.save();
+        ctx.globalCompositeOperation = 'screen';
+        ctx.globalAlpha = 0.34 * a;
+        ctx.translate(s.x + Math.sin(time * 1.7 + s.buzz) * 2 * S, ry);
+        ctx.scale(1, -2.8);
+        ctx.drawImage(s.spr.c, -sw / 2, -sh / 2, sw, sh);
+        ctx.restore();
+        // pool of coloured light under the sign
+        ctx.save();
+        ctx.globalCompositeOperation = 'screen';
+        const pool = ctx.createLinearGradient(0, ry - sh, 0, Math.min(H, ry + sh * 3));
+        pool.addColorStop(0, hexA(s.color, 0.10 * a));
+        pool.addColorStop(1, hexA(s.color, 0));
+        ctx.fillStyle = pool;
+        ctx.fillRect(s.x - sw * 0.8, ry - sh, sw * 1.6, sh * 4);
+        ctx.restore();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // rain
+    ctx.save();
+    ctx.strokeStyle = 'rgba(180, 200, 235, 1)';
+    ctx.lineCap = 'round';
+    for (const d of raindrops) {
+      const L = d.layer;
+      d.y += L.speed * S * dt;
+      d.x += L.speed * S * L.angle * dt;
+      if (d.y > H) { d.y = -L.len; d.x = Math.random() * W; }
+      if (d.x > W + 20) d.x -= W + 40;
+      ctx.globalAlpha = L.alpha;
+      ctx.lineWidth = L.w * S;
+      ctx.beginPath();
+      ctx.moveTo(d.x, d.y);
+      ctx.lineTo(d.x - L.len * S * L.angle, d.y - L.len * S);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    drawCar(dt);
+  }
+
+  function hexA(hex, a) {
+    const n = parseInt(hex.slice(1), 16);
+    return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a.toFixed(3)})`;
+  }
+
+  // -------------------- resize --------------------
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    S = W / 1600;
+    vp = { x: W * 0.5, y: H * CONFIG.vpY };
+    buildWalls();
+    buildSigns();
+    buildRain();
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  // -------------------- loop --------------------
+  let last = performance.now();
+  let ready = false;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    drawScene(time, dt);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

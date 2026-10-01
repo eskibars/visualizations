@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Falling Leaves</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #241a10; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 130% 105% at 50% 40%,
+        rgba(0,0,0,0) 42%, rgba(0,0,0,.30) 82%, rgba(0,0,0,.68) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(255, 214, 150, .30);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">october · gold fall</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  FALLING LEAVES — a stream through October. Maple leaves let
+  //  go in gusts, spiral down through the light, and where they
+  //  land they float off downstream in rings. Mist slides between
+  //  the gold trees; the sun never quite climbs over the ridge.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1.6,
+
+    waterY: 0.74,
+    leavesAir: 140,          // leaves airborne at once
+    gustEvery: [5, 11],      // s — wind gust releases a batch
+
+    treeGold: ['#c9541e', '#d97b2a', '#e0a13c', '#b8401f', '#e8c04a', '#a63a1a'],
+    leafGold: ['#d97b2a', '#e0a13c', '#c9541e', '#e8c04a', '#b8401f'],
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, S = 1;
+  let waterY = 0;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  const pick = (arr) => arr[(Math.random() * arr.length) | 0];
+
+  // -------------------- leaf sprites --------------------
+  const LEAF = 6;
+  let leafSprites = [];
+
+  function makeLeafSprite(color) {
+    const s = 26;
+    const c = document.createElement('canvas');
+    c.width = c.height = s;
+    const g = c.getContext('2d');
+    g.translate(s / 2, s / 2);
+    // maple-ish: five lobes
+    g.fillStyle = color;
+    g.beginPath();
+    const R = s * 0.42;
+    for (let i = 0; i < 5; i++) {
+      const a = -Math.PI / 2 + (i / 5) * Math.PI * 2;
+      const mid = a + Math.PI / 5;
+      g.quadraticCurveTo(
+        Math.cos(a - 0.28) * R * 0.55, Math.sin(a - 0.28) * R * 0.55,
+        Math.cos(a) * R, Math.sin(a) * R);
+      g.quadraticCurveTo(
+        Math.cos(mid + 0.16) * R * 0.5, Math.sin(mid + 0.16) * R * 0.5,
+        Math.cos(mid) * R * 0.18, Math.sin(mid) * R * 0.18);
+    }
+    g.closePath();
+    g.fill();
+    // stem
+    g.strokeStyle = 'rgba(70, 40, 15, 0.8)';
+    g.lineWidth = 1.2;
+    g.beginPath();
+    g.moveTo(0, R * 0.1);
+    g.lineTo(0, R * 0.95);
+    g.stroke();
+    return c;
+  }
+
+  function buildLeafSprites() {
+    leafSprites = CONFIG.leafGold.map(makeLeafSprite);
+  }
+
+  // -------------------- trees --------------------
+  // pre-rendered canopy blobs + trunk skeletons, three depth layers
+  let treeLayers = [];
+
+  function makeTreeLayer(count, yBase, scale, blurP, dark, trunksOnly) {
+    const c = document.createElement('canvas');
+    c.width = Math.ceil(W); c.height = Math.ceil(yBase + 8);
+    const g = c.getContext('2d');
+    for (let i = 0; i < count; i++) {
+      const tx = rand(-0.02, 1.02) * W;
+      const th = rand(0.34, 0.62) * scale * H;
+      const tw = th * rand(0.055, 0.085);
+      // trunk
+      g.fillStyle = dark ? '#241207' : '#3a2210';
+      g.beginPath();
+      g.moveTo(tx - tw / 2, yBase);
+      g.quadraticCurveTo(tx - tw * 0.3, yBase - th * 0.5, tx - tw * 0.12, yBase - th);
+      g.lineTo(tx + tw * 0.12, yBase - th);
+      g.quadraticCurveTo(tx + tw * 0.3, yBase - th * 0.5, tx + tw / 2, yBase);
+      g.closePath();
+      g.fill();
+      // branches
+      g.strokeStyle = g.fillStyle;
+      g.lineWidth = tw * 0.32;
+      for (let b = 0; b < 4; b++) {
+        const by = yBase - th * rand(0.55, 0.9);
+        const side = b % 2 ? 1 : -1;
+        g.beginPath();
+        g.moveTo(tx, by);
+        g.quadraticCurveTo(tx + side * tw * 2, by - th * 0.08, tx + side * tw * rand(2.6, 4), by - th * rand(0.1, 0.22));
+        g.stroke();
+      }
+      if (trunksOnly) continue;
+      // canopy: clustered blobs in golds
+      const blobs = 9 + (Math.random() * 8) | 0;
+      for (let b = 0; b < blobs; b++) {
+        const r = rand(th * 0.08, th * 0.17);
+        const bx = tx + rand(-tw * 3.6, tw * 3.6);
+        const byy = yBase - th - rand(-th * 0.16, th * 0.30);
+        const col = pick(CONFIG.treeGold);
+        const grad = g.createRadialGradient(bx, byy, 0, bx, byy, r);
+        if (dark) {
+          grad.addColorStop(0, col);
+          grad.addColorStop(1, '#241207');
+        } else {
+          grad.addColorStop(0, shade(col, 1.25));
+          grad.addColorStop(1, shade(col, 0.72));
+        }
+        g.fillStyle = grad;
+        g.beginPath();
+        g.arc(bx, byy, r, 0, Math.PI * 2);
+        g.fill();
+      }
+    }
+    return c;
+  }
+
+  function shade(hex, k) {
+    const n = parseInt(hex.slice(1), 16);
+    const f = (v) => Math.max(0, Math.min(255, Math.round(v * k)));
+    return `rgb(${f(n >> 16)},${f((n >> 8) & 255)},${f(n & 255)})`;
+  }
+
+  let farTrees, midTrees, nearTrunks;
+
+  function buildTrees() {
+    farTrees = makeTreeLayer(8, H * 0.70, 0.42, 3, false, false);
+    midTrees = makeTreeLayer(5, H * 0.82, 0.62, 1, false, false);
+    nearTrunks = makeTreeLayer(3, H * 1.02, 1.15, 0, true, true);
+  }
+
+  // -------------------- leaves --------------------
+  const airLeaves = [];   // falling
+  const floatLeaves = []; // on the water
+  let gustT = 3;
+
+  function spawnAirLeaf(batch) {
+    airLeaves.push({
+      x: rand(-0.05, 1.05) * W,
+      y: batch === 'gust' ? rand(0.05, 0.55) * H : rand(-0.25, 0.05) * H,
+      vy: rand(18, 44) * S,
+      swayA: rand(14, 42) * S,
+      swayW: rand(0.8, 2.2),
+      ph: rand(0, Math.PI * 2),
+      rot: rand(0, Math.PI * 2),
+      vr: rand(-2.4, 2.4),
+      size: rand(0.7, 1.5) * 22 * S,
+      spr: (Math.random() * leafSprites.length) | 0,
+      flutter: rand(2.5, 6),
+    });
+  }
+
+  function updateLeaves(dt, time, wind) {
+    for (let i = airLeaves.length - 1; i >= 0; i--) {
+      const l = airLeaves[i];
+      l.y += l.vy * dt * (0.75 + 0.5 * Math.abs(Math.sin(time * l.flutter + l.ph)));
+      l.x += (Math.sin(time * l.swayW + l.ph) * l.swayA * 0.55 + wind * (30 + l.size)) * dt;
+      l.rot += (l.vr + wind * 0.55) * dt;
+      if (l.y >= waterY - 4) {
+        airLeaves.splice(i, 1);
+        if (Math.random() < 0.75) {
+          floatLeaves.push({
+            x: l.x, y: waterY + rand(2, H * 0.20),
+            spr: l.spr, size: l.size,
+            rot: l.rot,
+            drift: rand(9, 26) * S,
+            ph: rand(0, Math.PI * 2),
+            fade: 1,
+          });
+          addRipple(l.x, waterY + 4, 0.5);
+        }
+        continue;
+      }
+      if (l.x > W + 60) { l.x = -50; }
+      if (l.x < -80) { l.x = W + 40; }
+    }
+
+    for (let i = floatLeaves.length - 1; i >= 0; i--) {
+      const f = floatLeaves[i];
+      f.x -= f.drift * dt * (0.8 + 0.3 * Math.sin(time * 0.7 + f.ph));
+      f.y += Math.sin(time * 0.9 + f.ph) * 3 * S * dt;
+      f.rot += 0.25 * dt;
+      if (f.x < -40) f.x = W + 30;
+    }
+  }
+
+  // -------------------- ripples on the stream --------------------
+  const ripples = [];
+
+  function addRipple(x, y, strength) {
+    ripples.push({ x, y, r: 2, v: 40 * S, a: 0.35 * strength });
+    if (ripples.length > 26) ripples.shift();
+  }
+
+  // -------------------- mist --------------------
+  let mistBlobs = [];
+
+  function buildMist() {
+    mistBlobs = [];
+    for (let i = 0; i < 7; i++) {
+      mistBlobs.push({
+        x: Math.random(), y: rand(0.42, 0.66),
+        r: rand(0.08, 0.15),
+        a: rand(0.04, 0.08),
+        drift: rand(0.004, 0.014) * (Math.random() < 0.5 ? 1 : -1),
+        ph: rand(0, Math.PI * 2),
+      });
+    }
+  }
+
+  // -------------------- draw --------------------
+  function drawSky(time) {
+    const g = ctx.createLinearGradient(0, 0, 0, waterY);
+    g.addColorStop(0, '#4a2c14');
+    g.addColorStop(0.45, '#8a5222');
+    g.addColorStop(0.75, '#c98a3a');
+    g.addColorStop(1, '#e8b45e');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, waterY);
+
+    // low sun glow behind the far ridge
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, W, waterY);
+    ctx.clip();
+    ctx.globalCompositeOperation = 'screen';
+    const sx = W * 0.72, sy = H * 0.62;
+    const sg = ctx.createRadialGradient(sx, sy, 0, sx, sy, W * 0.35);
+    const a = 0.20 + 0.03 * Math.sin(time * 0.2);
+    sg.addColorStop(0, `rgba(255, 220, 140, ${a})`);
+    sg.addColorStop(1, 'rgba(255, 200, 120, 0)');
+    ctx.fillStyle = sg;
+    ctx.fillRect(sx - W * 0.35, sy - W * 0.35, W * 0.7, W * 0.7);
+    ctx.restore();
+  }
+
+  function drawTrees() {
+    // far layer sits behind mist, mid above it
+    ctx.drawImage(farTrees, 0, 0);
+  }
+
+  function drawMidTrees() {
+    ctx.drawImage(midTrees, 0, 0);
+  }
+
+  function drawStream(time) {
+    const wy = waterY;
+    const h = H - wy;
+    const g = ctx.createLinearGradient(0, wy, 0, H);
+    g.addColorStop(0, '#b0742e');
+    g.addColorStop(0.25, '#6b4520');
+    g.addColorStop(1, '#31200e');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, wy, W, h);
+
+    // mirrored far trees, rippled and faint
+    ctx.save();
+    ctx.globalAlpha = 0.16;
+    ctx.translate(0, waterY * 2);
+    ctx.scale(1, -1);
+    ctx.drawImage(farTrees, 0, 0);
+    ctx.restore();
+
+    // sun streak on the water
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    const sg = ctx.createLinearGradient(W * 0.55, 0, W * 0.9, 0);
+    sg.addColorStop(0, 'rgba(255, 190, 100, 0)');
+    sg.addColorStop(0.5, `rgba(255, 190, 100, ${0.18 + 0.04 * Math.sin(time * 0.3)})`);
+    sg.addColorStop(1, 'rgba(255, 190, 100, 0)');
+    ctx.fillStyle = sg;
+    ctx.fillRect(0, wy, W, h * 0.6);
+    ctx.restore();
+
+    // drifting ripple lines
+    ctx.save();
+    ctx.strokeStyle = 'rgba(232, 180, 94, 0.16)';
+    ctx.lineWidth = 1.2 * S;
+    for (let i = 0; i < 7; i++) {
+      const y = wy + h * (0.12 + i * 0.13);
+      const off = ((time * (14 + i * 5) * S) % (W + 200)) - 100;
+      ctx.beginPath();
+      for (let x = -20; x < W + 20; x += 26) {
+        const yy = y + Math.sin(x * 0.02 + time * 0.8 + i) * 2.4 * S;
+        if (x === -20) ctx.moveTo(x + off - W * 0.1, yy);
+        else ctx.lineTo(x + off - W * 0.1, yy);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // expanding ripples
+    ctx.save();
+    for (let i = ripples.length - 1; i >= 0; i--) {
+      const r = ripples[i];
+      r.r += r.v * dtG;
+      r.a -= 0.25 * dtG;
+      if (r.a <= 0.01) { ripples.splice(i, 1); continue; }
+      ctx.strokeStyle = `rgba(240, 200, 120, ${r.a})`;
+      ctx.lineWidth = 1.4 * S;
+      ctx.beginPath();
+      ctx.ellipse(r.x, r.y, r.r, r.r * 0.3, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawMist(time, dt) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (const m of mistBlobs) {
+      m.x += m.drift * dt;
+      if (m.x > 1.2) m.x = -0.2;
+      if (m.x < -0.2) m.x = 1.2;
+      const x = m.x * W + Math.sin(time * 0.3 + m.ph) * 10 * S;
+      const y = m.y * H;
+      const r = m.r * W;
+      const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
+      grad.addColorStop(0, `rgba(240, 205, 150, ${m.a})`);
+      grad.addColorStop(1, 'rgba(240, 205, 150, 0)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    ctx.restore();
+  }
+
+  function drawAirLeaves(time) {
+    for (const l of airLeaves) {
+      const sway = Math.sin(time * l.swayW + l.ph) * l.swayA * 0.5;
+      ctx.save();
+      ctx.translate(l.x + sway, l.y);
+      ctx.rotate(l.rot);
+      const flip = Math.sin(time * l.flutter + l.ph);
+      ctx.scale(1, 0.35 + 0.65 * Math.abs(flip));   // leaf turning in the air
+      ctx.drawImage(leafSprites[l.spr], -l.size / 2, -l.size / 2, l.size, l.size);
+      ctx.restore();
+    }
+  }
+
+  function drawFloatLeaves(time) {
+    for (const f of floatLeaves) {
+      ctx.save();
+      ctx.translate(f.x, f.y);
+      ctx.rotate(f.rot);
+      ctx.scale(1, 0.5);
+      ctx.globalAlpha = 0.92;
+      ctx.drawImage(leafSprites[f.spr], -f.size / 2, -f.size / 2, f.size, f.size);
+      ctx.restore();
+    }
+  }
+
+  function drawNearTrunks() {
+    ctx.drawImage(nearTrunks, 0, 0);
+  }
+
+  // -------------------- resize --------------------
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    S = W / 1600;
+    waterY = H * CONFIG.waterY;
+    buildLeafSprites();
+    buildTrees();
+    buildMist();
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  // pre-fill: some leaves already falling, some floating
+  for (let i = 0; i < CONFIG.leavesAir; i++) spawnAirLeaf('gust');
+  for (let i = 0; i < 26; i++) {
+    const l = airLeaves[i];
+    floatLeaves.push({
+      x: rand(0, W), y: waterY + rand(2, H * 0.20),
+      spr: (Math.random() * leafSprites.length) | 0,
+      size: rand(0.7, 1.5) * 22 * S,
+      rot: rand(0, Math.PI * 2),
+      drift: rand(9, 26) * S,
+      ph: rand(0, Math.PI * 2),
+      fade: 1,
+    });
+  }
+
+  // -------------------- loop --------------------
+  let last = performance.now();
+  let ready = false;
+  let dtG = 1 / 60;
+  let wind = 0;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+    dtG = dt;
+
+    // wind: slow breathing + gusts that shed leaves
+    gustT -= dt;
+    let gust = 0;
+    if (gustT <= 0) {
+      gustT = rand(CONFIG.gustEvery[0], CONFIG.gustEvery[1]);
+      gust = rand(0.8, 2.2) * (Math.random() < 0.5 ? 1 : 1); // always downstream-ish
+      const n = 6 + (Math.random() * 8) | 0;
+      for (let i = 0; i < n; i++) spawnAirLeaf('gust');
+    }
+    wind = Math.sin(time * 0.4) * 0.6 + gust;
+
+    while (airLeaves.length < CONFIG.leavesAir) spawnAirLeaf('top');
+
+    updateLeaves(dt, time, wind);
+
+    drawSky(time);
+    drawTrees();
+    drawMist(time, dt);
+    drawMidTrees();
+    drawStream(time);
+    drawFloatLeaves(time);
+    drawAirLeaves(time);
+    drawNearTrunks();
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
