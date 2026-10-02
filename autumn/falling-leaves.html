@@ -231,7 +231,7 @@
   function makeTreeLayer(count, yBase, scale, distant, bands, res) {
     const LR = res;
     const c = document.createElement('canvas');
-    c.cssH = Math.ceil(yBase + 8);
+    c.cssH = Math.ceil(yBase + 16);   // margin below the base, so a root is never clipped
     c.width = Math.ceil(W * LR);
     c.height = Math.ceil(c.cssH * LR);
     const g = c.getContext('2d');
@@ -240,8 +240,14 @@
 
     // Shuffle the back-to-front slots first, so planting order does not follow
     // the draw order (which would put the far half of every clump behind the
-    // near half). Nearer trees stand a little lower on the bank and are drawn
-    // last, so their trunks pass in front of the canopies behind them.
+    // near half). Nearer trees are drawn last, so their trunks pass in front of
+    // the canopies behind them.
+    //
+    // Bases sit on the waterline, with only a little downward variation so the
+    // roots do not all land on one identical line. Trees are never lifted
+    // *above* the waterline: depth is carried by height, colour and draw order,
+    // and a trunk raised even ten pixels above the ground reads as hanging in
+    // the air, because the eye finds the gap long before it finds the canopy.
     const slots = [];
     for (let i = 0; i < count; i++) {
       const depth = (i + Math.random()) / count;
@@ -249,6 +255,7 @@
       slots.push({
         depth,
         x: rand(band[0], band[1]) * W,
+        y: yBase + Math.random() * scale * H * 0.006,
         height: rand(0.30, 0.58) * scale * H * (0.85 + 0.3 * depth),
         dark: distant || Math.random() < 0.35,
       });
@@ -256,8 +263,7 @@
     slots.sort((a, b) => a.depth - b.depth);
 
     for (const t of slots) {
-      const y = yBase - Math.pow(t.depth, 1.6) * scale * H * 0.03;
-      drawTree(g, t.x, y, t.height, t.dark ? '#2c1709' : color, t.dark);
+      drawTree(g, t.x, t.y, t.height, t.dark ? '#2c1709' : color, t.dark);
     }
     return c;
   }
@@ -271,14 +277,14 @@
   }
 
   function buildTrees() {
-    // Every tree stands on the far bank, just above the stream: the waterline is
-    // the horizon, and the water (drawn after the trees) covers the last few
-    // pixels of each trunk so the roots sit behind it instead of hovering over
-    // the surface. Depth comes from scale, from how dark the foliage is, and
-    // from drawing order: far band first, the big near trees last.
-    farTrees = makeTreeLayer(16, waterY - 3, 0.34, true, null, RES.far);
-    midTrees = makeTreeLayer(8, waterY - 1, 0.62, false, null, RES.mid);
-    nearTrees = makeTreeLayer(2, waterY + 3, 1.10, false, [[0.02, 0.26], [0.74, 0.98]], RES.near);
+    // Every tree is planted at or *below* the waterline, never above it. A trunk
+    // that stops a few pixels short of the water is a trunk hanging in the air,
+    // which is the whole "floating tree" look; the water is drawn afterwards and
+    // swallows the extra, so the roots sit behind the surface and each trunk
+    // meets the ground in a shadowed line rather than a cut-off edge.
+    farTrees = makeTreeLayer(16, waterY + 2, 0.34, true, null, RES.far);
+    midTrees = makeTreeLayer(8, waterY + 5, 0.62, false, null, RES.mid);
+    nearTrees = makeTreeLayer(2, waterY + 9, 1.10, false, [[0.02, 0.26], [0.74, 0.98]], RES.near);
   }
 
   // -------------------- leaves --------------------
@@ -370,6 +376,9 @@
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, W, waterY);
 
+    // the bank, before any tree is drawn on top of it
+    drawFarBank();
+
     // low sun glow behind the far trees
     ctx.save();
     ctx.beginPath();
@@ -386,22 +395,25 @@
     ctx.restore();
   }
 
-  // The far bank the trees stand on, as a soft shadowed strip right at the
-  // waterline. Without it the trunks would end in a line of hard cut-offs
-  // against the sky; with it they stand on land that the water then laps.
+  // The far bank the trees stand on: a soft shadowed strip at the waterline,
+  // painted *before* the trees so it reads as ground behind them.
+  //
+  // It must not be painted over the trees. A translucent scrim across their
+  // bases washes out the last few pixels of every trunk, which is exactly what
+  // makes a tree look like it is hovering just above the ground rather than
+  // standing on it.
   function drawFarBank() {
-    const h = H * 0.018;
+    const h = H * 0.03;
     const g = ctx.createLinearGradient(0, waterY - h, 0, waterY);
-    g.addColorStop(0, 'rgba(48,28,10,0)');
-    g.addColorStop(0.55, 'rgba(42,24,8,0.55)');
-    g.addColorStop(1, 'rgba(30,17,5,0.9)');
+    g.addColorStop(0, 'rgba(52,31,11,0)');
+    g.addColorStop(0.6, 'rgba(44,25,9,0.7)');
+    g.addColorStop(1, 'rgba(30,17,5,0.95)');
     ctx.fillStyle = g;
     ctx.fillRect(0, waterY - h, W, h);
   }
 
   function drawTrees() {
     drawLayer(farTrees);
-    drawFarBank();
   }
 
   function drawMidTrees() {
