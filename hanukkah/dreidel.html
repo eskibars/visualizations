@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Dreidels</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0710; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 124% 100% at 44% 46%,
+        rgba(0,0,0,0) 40%, rgba(0,0,0,.38) 82%, rgba(0,0,0,.8) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(255, 216, 150, .28);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">nes gadol haya sham</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  DREIDELS — three tops on a candlelit table, spinning
+  //  themselves down and kicking off again, out of step. Each is
+  //  a little orthographic 3-D cube whirling on its point: the
+  //  letters נ ג ה ש ride the four sides, the body leans and
+  //  precesses as the spin decays, and the settle is a decaying
+  //  wobble that lands on one letter, glows, and waits.
+  //
+  //  Construction notes
+  //  ------------------
+  //  No physics engine: the spin is an exponential decay, the
+  //  precession radius grows as the spin slows, and the settle
+  //  is a damped oscillation toward the chosen face. Rendering
+  //  is the eight vertices of a box rotated about its axis and
+  //  projected with a fixed camera tilt; each visible side face
+  //  paints its letter through a transform that maps the unit
+  //  square onto the face's parallelogram, so the letters turn
+  //  and foreshorten with the wood. The menorah in the
+  //  background is nine out-of-focus flames — bokeh, not
+  //  geometry.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1.6,
+
+    dreidels: [
+      { x: 0.36, y: 0.80, s: 0.042, hue: 'wood',  phase: 0 },
+      { x: 0.60, y: 0.87, s: 0.030, hue: 'blue',  phase: 3.5 },
+      { x: 0.78, y: 0.78, s: 0.024, hue: 'wood',  phase: 7 },
+    ],
+
+    candle: { x: 0.16, y: 0.30 },   // the light everything borrows
+  };
+
+  const LETTERS = ['נ', 'ג', 'ה', 'ש'];
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  function noise1(x) {
+    const i = Math.floor(x), f = x - i;
+    const h = (n) => {
+      const s = Math.sin(n * 127.1 + 311.7) * 43758.5453;
+      return s - Math.floor(s);
+    };
+    const u = f * f * f * (f * (f * 6 - 15) + 10);
+    return h(i) * (1 - u) + h(i + 1) * u;
+  }
+  const fbm1 = (x) => 0.6 * noise1(x) + 0.4 * noise1(x * 2.13 + 7.7);
+
+  // -------------------- sprites --------------------
+  function makeGlow(r, g, b) {
+    const s = 128, c = document.createElement('canvas');
+    c.width = c.height = s;
+    const g2 = c.getContext('2d');
+    const grad = g2.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    grad.addColorStop(0, `rgba(${r},${g},${b},1)`);
+    grad.addColorStop(0.25, `rgba(${r},${g},${b},.55)`);
+    grad.addColorStop(0.6, `rgba(${r},${g},${b},.16)`);
+    grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    g2.fillStyle = grad;
+    g2.fillRect(0, 0, s, s);
+    return c;
+  }
+  const glowFlame = makeGlow(255, 196, 110);
+  const glowBokeh = makeGlow(255, 176, 96);
+  const glowLetter = makeGlow(255, 226, 150);
+
+  function stamp(sprite, x, y, size, alpha) {
+    if (alpha <= 0.004) return;
+    ctx.globalAlpha = Math.min(1, alpha);
+    ctx.drawImage(sprite, x - size / 2, y - size / 2, size, size);
+    ctx.globalAlpha = 1;
+  }
+
+  // -------------------- table & background --------------------
+  let tableLayer, bokehLayer;
+
+  function paintTable() {
+    tableLayer = document.createElement('canvas');
+    tableLayer.width = Math.floor(W * DPR); tableLayer.height = Math.floor(H * DPR);
+    const g = tableLayer.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    const grad = g.createLinearGradient(0, H * 0.52, 0, H);
+    grad.addColorStop(0, '#241610');
+    grad.addColorStop(0.5, '#1c110c');
+    grad.addColorStop(1, '#120a07');
+    g.fillStyle = grad;
+    g.fillRect(0, H * 0.52, W, H * 0.48);
+
+    // plank seams, faint
+    g.strokeStyle = 'rgba(8, 4, 2, .5)';
+    g.lineWidth = 1.4 * U;
+    for (let i = 0; i < 4; i++) {
+      const y = H * (0.60 + i * 0.11);
+      g.beginPath();
+      g.moveTo(0, y);
+      g.quadraticCurveTo(W * 0.5, y + 4 * U, W, y - 3 * U);
+      g.stroke();
+    }
+    // grain flecks
+    for (let i = 0; i < 220; i++) {
+      const y = H * rand(0.53, 1);
+      g.strokeStyle = `rgba(${Math.random() < 0.5 ? '46, 30, 18' : '12, 7, 4'}, ${rand(0.1, 0.3).toFixed(2)})`;
+      g.lineWidth = 1 * U;
+      const x = Math.random() * W;
+      g.beginPath();
+      g.moveTo(x, y);
+      g.lineTo(x + rand(20, 90) * U, y + rand(-2, 2) * U);
+      g.stroke();
+    }
+
+    // gelt scattered by the dreidels: gold discs catching the light
+    for (let i = 0; i < 7; i++) {
+      const gx = W * [[0.47, 0.9], [0.52, 0.95], [0.69, 0.93], [0.73, 0.85], [0.3, 0.94], [0.44, 0.99], [0.66, 0.99]][i][0];
+      const gy = H * [[0.47, 0.9], [0.52, 0.95], [0.69, 0.93], [0.73, 0.85], [0.3, 0.94], [0.44, 0.99], [0.66, 0.99]][i][1];
+      const gr2 = W * rand(0.0075, 0.011);
+      const gold = g.createLinearGradient(gx - gr2, gy - gr2 * 0.4, gx + gr2, gy + gr2 * 0.4);
+      gold.addColorStop(0, '#f4d98c');
+      gold.addColorStop(0.5, '#c89a3e');
+      gold.addColorStop(1, '#8a6420');
+      g.fillStyle = gold;
+      g.beginPath();
+      g.ellipse(gx, gy, gr2, gr2 * 0.42, rand(-0.2, 0.2), 0, Math.PI * 2);
+      g.fill();
+      g.strokeStyle = 'rgba(70, 46, 12, .8)';
+      g.lineWidth = Math.max(1, gr2 * 0.09);
+      g.stroke();
+      // rim catch-light
+      g.strokeStyle = 'rgba(255, 236, 170, .5)';
+      g.lineWidth = Math.max(1, gr2 * 0.07);
+      g.beginPath();
+      g.ellipse(gx, gy, gr2 * 0.82, gr2 * 0.32, 0, Math.PI * 1.1, Math.PI * 1.7);
+      g.stroke();
+    }
+
+    // pool of candlelight on the wood
+    const cx = W * 0.34, cy = H * 0.8;
+    const pool = g.createRadialGradient(cx, cy, 0, cx, cy, W * 0.52);
+    pool.addColorStop(0, 'rgba(255, 170, 80, .16)');
+    pool.addColorStop(0.55, 'rgba(220, 130, 55, .06)');
+    pool.addColorStop(1, 'rgba(220, 130, 55, 0)');
+    g.fillStyle = pool;
+    g.fillRect(0, H * 0.52, W, H * 0.48);
+  }
+
+  //  The menorah across the room, way out of focus: nine warm
+  //  discs in its shape, drifting a breath with the flames.
+  function paintBokeh() {
+    bokehLayer = document.createElement('canvas');
+    bokehLayer.width = Math.floor(W * DPR); bokehLayer.height = Math.floor(H * DPR);
+    const g = bokehLayer.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    const cx = W * 0.15, cy = H * 0.36, s = H * 0.0016;
+    // nine flames across the room: two rows of four with the
+    // shamash raised above the middle — only bokeh discs, no
+    // stand, so the eye reads "lights over there"
+    const flames = [];
+    for (let i = 0; i < 8; i++) {
+      flames.push([(i - 3.5) * 44, (i % 2 ? 3 : -3)]);
+    }
+    flames.push([0, -52]);
+    for (const [dx, dy] of flames) {
+      const fr = (11 + Math.random() * 5) * s * 2.4;
+      const fg = g.createRadialGradient(cx + dx * s, cy + dy * s, 0, cx + dx * s, cy + dy * s, fr);
+      fg.addColorStop(0, 'rgba(255, 202, 118, .55)');
+      fg.addColorStop(0.55, 'rgba(255, 168, 80, .22)');
+      fg.addColorStop(1, 'rgba(255, 160, 70, 0)');
+      g.fillStyle = fg;
+      g.beginPath();
+      g.arc(cx + dx * s, cy + dy * s, fr, 0, Math.PI * 2);
+      g.fill();
+    }
+  }
+
+  // -------------------- dreidel physics --------------------
+  function makeDreidel(cfg, i) {
+    return {
+      cfg,
+      theta: rand(0, Math.PI * 2),
+      omega: 0,
+      lean: 0, leanV: 0,
+      prec: rand(0, Math.PI * 2),
+      state: 'spin',
+      t: cfg.phase,
+      settleFace: 0,
+      restFor: 0,
+      glow: 0,
+      id: i,
+    };
+  }
+  let dreidels = [];
+
+  const WOOD_A = { body: [122, 82, 44], edge: [86, 56, 28], letter: [42, 26, 12] };
+  const WOOD_B = { body: [104, 70, 40], edge: [72, 47, 24], letter: [38, 24, 12] };
+  const BLUE = { body: [42, 74, 138], edge: [26, 48, 96], letter: [232, 190, 92] };
+
+  function stepDreidel(d, time, dt) {
+    d.t += dt;
+    switch (d.state) {
+      case 'spin': {
+        // exponential friction decay
+        d.omega *= Math.exp(-0.16 * dt);
+        d.theta += d.omega * dt;
+        // precession: the circle of the point widens as it slows
+        d.prec += (0.6 + 40 / Math.max(2, d.omega)) * dt;
+        const target = Math.min(0.16, 2.4 / Math.max(3, d.omega));
+        // lean spring toward the precession lean
+        const leanNow = target * Math.sin(d.prec);
+        d.leanV += (leanNow - d.lean) * 60 * dt;
+        d.leanV *= Math.exp(-7 * dt);
+        d.lean += d.leanV * dt;
+        if (d.omega < 1.15) {
+          d.state = 'settle';
+          d.t = 0;
+          // land on whichever face is nearest front, biased randomly
+          d.settleFace = (Math.random() < 0.5)
+            ? (Math.round(d.theta / (Math.PI / 2)) % 4 + 4) % 4
+            : (Math.random() * 4) | 0;
+          d.leanV += rand(-0.5, 0.5);
+        }
+        break;
+      }
+      case 'settle': {
+        // ease theta onto the chosen face
+        const want = d.settleFace * (Math.PI / 2) + Math.round((d.theta - d.settleFace * (Math.PI / 2)) / (Math.PI * 2)) * Math.PI * 2;
+        d.theta += (want - d.theta) * Math.min(1, 5 * dt);
+        // damped wobble like a top finding its rest
+        const k = Math.exp(-2.1 * d.t);
+        d.lean = 0.22 * k * Math.sin(15 * d.t + 0.7);
+        if (d.t > 2.4) {
+          d.state = 'rest';
+          d.t = 0;
+          d.restFor = rand(1.8, 4.2);
+          d.glow = 1;
+        }
+        break;
+      }
+      case 'rest': {
+        d.lean *= Math.exp(-4 * dt);
+        d.glow = Math.max(0, d.glow - dt / 1.4);
+        if (d.t > d.restFor) {
+          // the flick that starts it again
+          d.state = 'spin';
+          d.omega = rand(12, 17);
+          d.leanV += rand(-1.2, 1.2);
+        }
+        break;
+      }
+    }
+  }
+
+  // -------------------- dreidel rendering --------------------
+  const CAM_TILT = 0.30;   // camera just above the table plane
+
+  function drawDreidel(d, time) {
+    const s = d.cfg.s * W;                    // half-width of the body
+    const cx = d.cfg.x * W;
+    const contactY = d.cfg.y * H;
+
+    // fast spin adds a positional orbit from the precession
+    const orbit = (d.state === 'spin')
+      ? Math.min(0.35, 2.0 / Math.max(3, d.omega)) * s * Math.sin(d.prec * 1.0)
+      : 0;
+    const x = cx + orbit;
+
+    const flicker = 0.86 + 0.14 * fbm1(time * 6 + d.id * 9.3);
+
+    // shadow under the top
+    ctx.fillStyle = `rgba(6, 3, 2, ${0.5 * flicker})`;
+    ctx.beginPath();
+    ctx.ellipse(x - d.lean * s * 3, contactY + 2 * U, s * (1.25 + Math.abs(d.lean) * 2), s * 0.3, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.save();
+    ctx.translate(x, contactY);
+    ctx.rotate(d.lean * 0.55);
+
+    const h = s * 1.75;          // body height
+    const tipL = s * 0.9;        // point length
+    const y0 = -tipL - h;        // body top
+
+    // ---- tip ----
+    const tipG = ctx.createLinearGradient(-s * 0.3, -tipL, s * 0.3, 0);
+    tipG.addColorStop(0, 'rgba(210, 168, 100, .95)');
+    tipG.addColorStop(1, 'rgba(120, 80, 40, .95)');
+    ctx.fillStyle = tipG;
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.5, -tipL * 0.18);
+    ctx.lineTo(0, 0);
+    ctx.lineTo(s * 0.5, -tipL * 0.18);
+    ctx.lineTo(s * 0.3, -tipL);
+    ctx.lineTo(-s * 0.3, -tipL);
+    ctx.closePath();
+    ctx.fill();
+
+    // ---- the box: rotate about the vertical axis ----
+    const cosT = Math.cos(d.theta), sinT = Math.sin(d.theta);
+    const a = s * 0.85;          // half-width
+    const hh = h * 0.5;
+    const cy0 = y0 + hh;         // body centre y (in this local frame)
+    const ct = Math.cos(CAM_TILT), st = Math.sin(CAM_TILT);
+
+    // local 3-D point -> screen
+    function P(bx, by, bz) {
+      const X = bx * cosT - bz * sinT;
+      const Z = bx * sinT + bz * cosT;
+      return { x: X, y: cy0 + by * ct - Z * st, z: Z * ct + by * st };
+    }
+
+    const pal = d.cfg.hue === 'blue' ? BLUE : (d.id === 0 ? WOOD_A : WOOD_B);
+    const lightX = -0.66, lightZ = -0.5;   // from the candles, left and behind-ish
+
+    // collect faces with depth, draw back-to-front
+    const faces = [];
+    for (let i = 0; i < 4; i++) {
+      const a0 = i * Math.PI / 2 + Math.PI / 4;
+      const nAng = a0 + Math.PI / 4 - d.theta;          // normal in world frame
+      const nx = Math.sin(nAng), nz = Math.cos(nAng);
+      const q = [
+        P(Math.sin(a0) * a, -hh, Math.cos(a0) * a),
+        P(Math.sin(a0 + Math.PI / 2) * a, -hh, Math.cos(a0 + Math.PI / 2) * a),
+        P(Math.sin(a0 + Math.PI / 2) * a, hh, Math.cos(a0 + Math.PI / 2) * a),
+        P(Math.sin(a0) * a, hh, Math.cos(a0) * a),
+      ];
+      faces.push({ i, q, nx, nz, depth: (q[0].z + q[1].z + q[2].z + q[3].z) / 4 });
+    }
+    faces.sort((f1, f2) => f1.depth - f2.depth);
+
+    for (const f of faces) {
+      // visible if the face normal points toward the camera
+      // camera looks along +z with tilt; facing ≈ nz > 0
+      if (f.nz <= 0.02) continue;
+      const lit = 0.5 + 0.5 * Math.max(0, f.nx * lightX + f.nz * lightZ);
+      const [p0, p1, p2, p3] = f.q;
+      ctx.beginPath();
+      ctx.moveTo(p0.x, p0.y);
+      ctx.lineTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+      ctx.lineTo(p3.x, p3.y);
+      ctx.closePath();
+      const br = (0.42 + 0.58 * lit) * flicker;
+      ctx.fillStyle = `rgb(${(pal.body[0] * br) | 0}, ${(pal.body[1] * br) | 0}, ${(pal.body[2] * br) | 0})`;
+      ctx.fill();
+      // edge shading on the darker side
+      if (lit < 0.45) {
+        ctx.strokeStyle = `rgba(${pal.edge[0]}, ${pal.edge[1]}, ${pal.edge[2]}, .8)`;
+        ctx.lineWidth = Math.max(1, s * 0.03);
+        ctx.stroke();
+      }
+      // letter, mapped onto the face parallelogram
+      const lit2 = Math.max(0.12, lit);
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(p0.x, p0.y);
+      ctx.lineTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+      ctx.lineTo(p3.x, p3.y);
+      ctx.closePath();
+      ctx.clip();
+      ctx.transform(
+        (p1.x - p0.x) / 1, (p1.y - p0.y) / 1,
+        (p3.x - p0.x) / 1, (p3.y - p0.y) / 1,
+        p0.x, p0.y
+      );
+      // the quad spans one face: u = edge0 (width), v = edge1 (height)
+      ctx.font = `600 ${0.8}px serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = `rgb(${(pal.letter[0] * Math.min(1, lit2 + 0.25)) | 0}, ${(pal.letter[1] * Math.min(1, lit2 + 0.25)) | 0}, ${(pal.letter[2] * Math.min(1, lit2 + 0.25)) | 0})`;
+      ctx.fillText(LETTERS[(4 - f.i) % 4], 0.5, 0.55);
+      ctx.restore();
+
+      // face glow when freshly settled on the front
+      if (d.glow > 0.02 && f.nz > 0.7 && d.state !== 'spin') {
+        const fx = (p0.x + p2.x) / 2, fy = (p0.y + p2.y) / 2;
+        stamp(glowLetter, fx, fy, s * 5, 0.3 * d.glow);
+      }
+    }
+
+    const R = a * Math.SQRT1_2;
+
+    // ---- bottom face: fills the diamond between the point and
+    // the side faces' lower edges ----
+    const b0 = P(-R, hh, -R), b1 = P(R, hh, -R), b2 = P(R, hh, R), b3 = P(-R, hh, R);
+    ctx.beginPath();
+    ctx.moveTo(b0.x, b0.y); ctx.lineTo(b1.x, b1.y); ctx.lineTo(b2.x, b2.y); ctx.lineTo(b3.x, b3.y);
+    ctx.closePath();
+    ctx.fillStyle = `rgb(${(pal.edge[0] * 0.72) | 0}, ${(pal.edge[1] * 0.72) | 0}, ${(pal.edge[2] * 0.72) | 0})`;
+    ctx.fill();
+
+    // ---- top face: same corners the side faces meet at ----
+    const q0 = P(-R, -hh, -R), q1 = P(R, -hh, -R), q2 = P(R, -hh, R), q3 = P(-R, -hh, R);
+    ctx.beginPath();
+    ctx.moveTo(q0.x, q0.y); ctx.lineTo(q1.x, q1.y); ctx.lineTo(q2.x, q2.y); ctx.lineTo(q3.x, q3.y);
+    ctx.closePath();
+    ctx.fillStyle = `rgb(${(pal.edge[0] * 1.15) | 0}, ${(pal.edge[1] * 1.15) | 0}, ${(pal.edge[2] * 1.15) | 0})`;
+    ctx.fill();
+    // little knob on top
+    ctx.strokeStyle = `rgb(${(pal.body[0] * 0.7) | 0}, ${(pal.body[1] * 0.7) | 0}, ${(pal.body[2] * 0.7) | 0})`;
+    ctx.lineWidth = Math.max(1.5, s * 0.09);
+    ctx.beginPath();
+    const kx = P(0, -hh, 0).x, ky = P(0, -hh, 0).y;
+    ctx.moveTo(kx, ky);
+    ctx.lineTo(kx, ky - s * 0.22);
+    ctx.stroke();
+
+    ctx.restore();
+
+    // motion glint while whirling fast
+    if (d.state === 'spin' && d.omega > 7) {
+      const gl = (d.omega - 7) / 10;
+      stamp(glowFlame, x, contactY - tipL - h * 0.5, s * 3, 0.1 * gl);
+    }
+  }
+
+  // -------------------- resize / build --------------------
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    U = W / 1600;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    paintTable();
+    paintBokeh();
+    dreidels = CONFIG.dreidels.map((c2, i) => makeDreidel(c2, i));
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  // -------------------- loop --------------------
+  let last = performance.now();
+  let ready = false;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    // room
+    ctx.fillStyle = '#0b0712';
+    ctx.fillRect(0, 0, W, H);
+    ctx.drawImage(bokehLayer, 0, 0, W, H);
+
+    // candle flame glow bleeding from the left edge
+    const fl = 0.85 + 0.15 * fbm1(time * 3.3);
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    stamp(glowFlame, W * CONFIG.candle.x, H * CONFIG.candle.y, W * 0.4, 0.2 * fl);
+    ctx.restore();
+
+    ctx.drawImage(tableLayer, 0, 0, W, H);
+
+    for (const d of dreidels) {
+      stepDreidel(d, time, dt);
+      drawDreidel(d, time);
+    }
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
