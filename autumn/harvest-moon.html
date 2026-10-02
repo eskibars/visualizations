@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Harvest Moon</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #131022; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 128% 102% at 50% 42%,
+        rgba(0,0,0,0) 42%, rgba(0,0,0,.32) 82%, rgba(0,0,0,.76) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(255, 214, 160, .28);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">the harvest moon keeps the field lit</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  HARVEST MOON — dusk that refuses to end. A vast amber moon
+  //  hangs just off the ridge and thin stratus slides across it;
+  //  the hills go on in four layers of blue; and every little
+  //  while a skein of geese crosses, high and unhurried, on its
+  //  way to wherever geese spend October.
+  //
+  //  Construction notes
+  //  ------------------
+  //  Sky, moon and all four hill layers are painted once per
+  //  resize; the frame is three blits, two cloud sheets and a
+  //  handful of geese. The cloud sheets bake their vertical
+  //  feather into each blob's alpha and wrap every blob across
+  //  the sheet edges, so the tiling never shows a seam and no
+  //  erase pass is needed. The geese are formation slots along
+  //  two arms of a V with individual flap phase and lag, drawn
+  //  as two arcs per bird — silhouette is all a backlit goose
+  //  needs at this size.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1.6,
+
+    moon: { x: 0.615, y: 0.435, r: 0.155 },   // r as fraction of H
+
+    cloudSpeed: 7,
+    skeinGap: [26, 52],       // s between goose formations
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  function noise1(x) {
+    const i = Math.floor(x), f = x - i;
+    const h = (n) => {
+      const s = Math.sin(n * 127.1 + 311.7) * 43758.5453;
+      return s - Math.floor(s);
+    };
+    const u = f * f * f * (f * (f * 6 - 15) + 10);
+    return h(i) * (1 - u) + h(i + 1) * u;
+  }
+  const fbm1 = (x) => 0.6 * noise1(x) + 0.4 * noise1(x * 2.13 + 7.7);
+
+  // -------------------- static scenery --------------------
+  let skyLayer, hillsFar, hillsMid, hillsNear, groundLayer;
+
+  function paintSky() {
+    skyLayer = document.createElement('canvas');
+    skyLayer.width = Math.floor(W * DPR); skyLayer.height = Math.floor(H * DPR);
+    const g = skyLayer.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    // dusk: indigo falling into amber at the ridge
+    const grad = g.createLinearGradient(0, 0, 0, H * 0.78);
+    grad.addColorStop(0, '#191430');
+    grad.addColorStop(0.45, '#2c1f3e');
+    grad.addColorStop(0.72, '#5c3242');
+    grad.addColorStop(0.9, '#8a4a38');
+    grad.addColorStop(1, '#a8613c');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, W, H);
+
+    // stars fade in toward the top
+    for (let i = 0; i < 120; i++) {
+      const y = Math.pow(Math.random(), 1.7) * H * 0.5;
+      const x = Math.random() * W;
+      const a = rand(0.08, 0.5) * (1 - y / (H * 0.6));
+      g.fillStyle = `rgba(235, 228, 255, ${a.toFixed(3)})`;
+      g.fillRect(x, y, Math.random() < 0.12 ? 1.6 * U : 1 * U, 1 * U);
+    }
+
+    // ---- the moon: vast, amber, just clear of the ridge ----
+    const mx = W * CONFIG.moon.x, my = H * CONFIG.moon.y, mr = H * CONFIG.moon.r;
+    const halo = g.createRadialGradient(mx, my, mr * 0.85, mx, my, mr * 2.1);
+    halo.addColorStop(0, 'rgba(255, 176, 96, .35)');
+    halo.addColorStop(0.5, 'rgba(255, 156, 80, .12)');
+    halo.addColorStop(1, 'rgba(255, 150, 80, 0)');
+    g.fillStyle = halo;
+    g.fillRect(mx - mr * 2.1, my - mr * 2.1, mr * 4.2, mr * 4.2);
+
+    const disc = g.createRadialGradient(mx - mr * 0.22, my - mr * 0.26, mr * 0.1, mx, my, mr);
+    disc.addColorStop(0, '#ffe7bd');
+    disc.addColorStop(0.5, '#fdd194');
+    disc.addColorStop(0.82, '#f2ac66');
+    disc.addColorStop(1, '#dd8850');
+    g.fillStyle = disc;
+    g.beginPath();
+    g.arc(mx, my, mr, 0, Math.PI * 2);
+    g.fill();
+
+    // maria: broad soft blotches, denser toward the lower limb
+    g.save();
+    g.beginPath(); g.arc(mx, my, mr, 0, Math.PI * 2); g.clip();
+    const mare = [
+      [-0.28, -0.32, 0.30, 0.24, -0.5, .08], [0.24, -0.10, 0.28, 0.20, 0.4, .075],
+      [-0.04, 0.24, 0.34, 0.24, 0, .085], [0.44, 0.32, 0.16, 0.13, 0, .07],
+      [-0.52, 0.12, 0.15, 0.11, 0, .065], [0.06, -0.55, 0.17, 0.10, 0.2, .06],
+      [-0.20, 0.52, 0.22, 0.12, 0, .07],
+    ];
+    for (const [dx, dy, rx, ry, rot, a] of mare) {
+      g.fillStyle = `rgba(196, 118, 58, ${a})`;
+      g.beginPath();
+      g.ellipse(mx + dx * mr, my + dy * mr, rx * mr, ry * mr, rot, 0, Math.PI * 2);
+      g.fill();
+    }
+    // limb darkening
+    const limb = g.createRadialGradient(mx, my, mr * 0.72, mx, my, mr);
+    limb.addColorStop(0, 'rgba(140, 62, 26, 0)');
+    limb.addColorStop(1, 'rgba(140, 62, 26, .32)');
+    g.fillStyle = limb;
+    g.fillRect(mx - mr, my - mr, mr * 2, mr * 2);
+    g.restore();
+  }
+
+  function ridge(g, baseY, amp, seed, col) {
+    g.fillStyle = col;
+    g.beginPath();
+    g.moveTo(-2, H + 2);
+    for (let x = -2; x <= W + 2; x += 7) {
+      const t = x / W;
+      g.lineTo(x, baseY
+        - Math.abs(Math.sin(t * 4.7 + seed)) * amp * 0.7
+        - Math.abs(Math.sin(t * 11.3 + seed * 1.7)) * amp * 0.3
+        - noise1(t * 3.1 + seed) * amp * 0.6);
+    }
+    g.lineTo(W + 2, H + 2);
+    g.closePath();
+    g.fill();
+  }
+
+  function paintHills() {
+    hillsFar = document.createElement('canvas');
+    hillsFar.width = Math.floor(W * DPR); hillsFar.height = Math.floor(H * DPR);
+    let g = hillsFar.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ridge(g, H * 0.585, H * 0.05, 2.3, '#4a2c3e');
+    // the far ridge catches moonlight along its crest
+    g.globalCompositeOperation = 'source-atop';
+    const rim = g.createLinearGradient(0, H * 0.53, 0, H * 0.63);
+    rim.addColorStop(0, 'rgba(255, 178, 110, .16)');
+    rim.addColorStop(1, 'rgba(255, 178, 110, 0)');
+    g.fillStyle = rim;
+    g.fillRect(0, 0, W, H);
+    g.globalCompositeOperation = 'source-over';
+
+    hillsMid = document.createElement('canvas');
+    hillsMid.width = Math.floor(W * DPR); hillsMid.height = Math.floor(H * DPR);
+    g = hillsMid.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ridge(g, H * 0.665, H * 0.045, 6.1, '#31203a');
+
+    hillsNear = document.createElement('canvas');
+    hillsNear.width = Math.floor(W * DPR); hillsNear.height = Math.floor(H * DPR);
+    g = hillsNear.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ridge(g, H * 0.745, H * 0.035, 9.8, '#20162b');
+
+    // foreground field with a fence line
+    groundLayer = document.createElement('canvas');
+    groundLayer.width = Math.floor(W * DPR); groundLayer.height = Math.floor(H * DPR);
+    g = groundLayer.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+    const gr = g.createLinearGradient(0, H * 0.78, 0, H);
+    gr.addColorStop(0, '#170f20');
+    gr.addColorStop(1, '#0b0710');
+    g.fillStyle = gr;
+    g.fillRect(0, H * 0.78, W, H * 0.22);
+
+    // fence: posts + two rails, smaller toward the left (recedes)
+    const fy0 = H * 0.845, fy1 = H * 0.965;
+    g.strokeStyle = '#0a0611';
+    g.lineCap = 'round';
+    for (let i = 0; i < 9; i++) {
+      const t = i / 8;
+      const x = W * (0.03 + 0.94 * Math.pow(t, 0.85));
+      const y = fy0 + (fy1 - fy0) * t;
+      const ph = H * (0.055 + 0.035 * t);
+      g.lineWidth = Math.max(2, (2.4 + 3.4 * t) * U);
+      g.beginPath();
+      g.moveTo(x, y);
+      g.lineTo(x + ph * 0.04, y - ph);
+      g.stroke();
+    }
+    for (const rr of [0.32, 0.62]) {
+      g.lineWidth = Math.max(1.5, 2.6 * U);
+      g.beginPath();
+      g.moveTo(W * 0.028, fy0 + (fy1 - fy0) * 0.02 + (fy1 - fy0) * rr * 0.55);
+      g.quadraticCurveTo(W * 0.45, fy0 + (fy1 - fy0) * (0.42 + rr * 0.35), W * 0.975, fy1 - (fy1 - fy0) * (1 - rr) * 0.2);
+      g.stroke();
+    }
+
+    // sparse stubble catching moonlight
+    for (let i = 0; i < 130; i++) {
+      const y = H * rand(0.8, 1);
+      const x = Math.random() * W;
+      const k = Math.max(0, 1 - Math.abs(x - W * CONFIG.moon.x) / (W * 0.7));
+      g.strokeStyle = `rgba(214, 160, 120, ${(0.03 + 0.09 * k * Math.random()).toFixed(3)})`;
+      g.lineWidth = 1 * U;
+      g.beginPath();
+      g.moveTo(x, y);
+      g.lineTo(x + rand(-3, 3) * U, y - rand(3, 9) * U);
+      g.stroke();
+    }
+  }
+
+  // -------------------- clouds --------------------
+  //  Feather baked into blob alpha; blobs wrap across the edges;
+  //  no erase pass anywhere (swiftshader-safe).
+  function makeCloudSheet(w, h, tint, blobs) {
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const g = c.getContext('2d');
+    for (let i = 0; i < blobs; i++) {
+      const x = Math.random() * w;
+      const y = h * rand(0.3, 0.7);
+      const rx = rand(h * 0.7, h * 1.9);
+      const ry = rand(h * 0.10, h * 0.22);
+      const a = rand(0.22, 0.42) * Math.min(1, Math.min(y, h - y) / (h * 0.2));
+      const grad = g.createRadialGradient(x, y, 0, x, y, rx);
+      grad.addColorStop(0, `rgba(${tint}, ${a.toFixed(3)})`);
+      grad.addColorStop(1, `rgba(${tint}, 0)`);
+      g.save();
+      g.translate(x, y);
+      g.scale(1, ry / rx);
+      g.translate(-x, -y);
+      g.fillStyle = grad;
+      for (const ox of [-w, 0, w]) g.fillRect(x - rx + ox, y - rx, rx * 2, rx * 2);
+      g.restore();
+    }
+    return c;
+  }
+  let cloudA, cloudB, cloudAx = 0, cloudBx = 0;
+
+  // -------------------- geese --------------------
+  let skeins = [];
+  function makeSkein() {
+    const dir = Math.random() < 0.5 ? 1 : -1;
+    const n = 5 + (Math.random() * 5 | 0);
+    const y = H * rand(0.16, 0.42);
+    const depth = Math.random();               // smaller = farther
+    const scale = (0.55 + depth * 0.7) * U * (W / 1600) * 17;
+    const birds = [];
+    for (let i = 0; i < n; i++) {
+      birds.push({
+        arm: i === 0 ? 0 : (Math.random() < 0.5 ? -1 : 1),
+        slot: i === 0 ? 0 : (i + 1) >> 1,
+        ph: rand(0, Math.PI * 2),
+        flapW: rand(5.5, 7.5),
+        lag: rand(0, 0.6),
+        wob: rand(0.5, 1.4),
+      });
+    }
+    return {
+      dir, y, scale, birds,
+      x: dir === 1 ? -W * 0.12 : W * 1.12,
+      speed: dir * rand(26, 40) * (0.8 + depth * 0.5),
+      tone: 0.5 + depth * 0.5,
+      bob: rand(0, Math.PI * 2),
+    };
+  }
+  function stepSkeins(time, dt) {
+    for (let i = skeins.length - 1; i >= 0; i--) {
+      const sk = skeins[i];
+      sk.x += sk.speed * dt;
+      const margin = W * 0.16;
+      if ((sk.dir === 1 && sk.x > W + margin) || (sk.dir === -1 && sk.x < -margin)) {
+        skeins.splice(i, 1);
+      }
+    }
+    if (skeins.length < 2 && Math.random() < dt / CONFIG.skeinGap[0]) {
+      skeins.push(makeSkein());
+    }
+  }
+  function drawGoose(x, y, s, flap, tone) {
+    ctx.fillStyle = `rgba(12, 8, 16, ${tone})`;
+    const lift = flap * 0.7;
+    // wings: long, slight bend, tips swept
+    ctx.beginPath();
+    ctx.moveTo(x - s * 1.5, y - s * lift);
+    ctx.quadraticCurveTo(x - s * 0.7, y - s * (0.28 + lift * 0.5), x, y);
+    ctx.quadraticCurveTo(x + s * 0.7, y - s * (0.28 + lift * 0.5), x + s * 1.5, y - s * lift);
+    ctx.quadraticCurveTo(x + s * 0.7, y + s * 0.1, x, y + s * 0.14);
+    ctx.quadraticCurveTo(x - s * 0.7, y + s * 0.1, x - s * 1.5, y - s * lift);
+    ctx.closePath();
+    ctx.fill();
+    // body and neck riding the wing root
+    ctx.beginPath();
+    ctx.ellipse(x, y + s * 0.1, s * 0.34, s * 0.16, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.lineWidth = Math.max(0.8, s * 0.11);
+    ctx.strokeStyle = ctx.fillStyle;
+    ctx.beginPath();
+    ctx.moveTo(x - s * 0.22, y + s * 0.08);
+    ctx.quadraticCurveTo(x - s * 0.52, y + s * 0.02, x - s * 0.58, y - s * 0.2);
+    ctx.stroke();
+  }
+  function drawSkeins(time) {
+    for (const sk of skeins) {
+      for (const b of sk.birds) {
+        const slotX = sk.dir * b.slot * sk.scale * 2.6;
+        const slotY = b.slot * sk.scale * 1.05;
+        const x = sk.x + slotX;
+        const y = sk.y + slotY + Math.sin(time * b.wob + sk.bob + b.ph) * 2.2 * U;
+        const flap = Math.sin(time * b.flapW + b.ph);
+        drawGoose(x, y, sk.scale, flap, sk.tone);
+      }
+    }
+  }
+
+  // -------------------- twinkles --------------------
+  function drawTwinkles(time) {
+    for (let i = 0; i < 9; i++) {
+      const sx = ((i * 211.3) % 1) * W;
+      const sy = (0.03 + ((i * 67.7) % 1) * 0.34) * H;
+      const a = 0.15 + 0.3 * (0.5 + 0.5 * Math.sin(time * (0.5 + (i % 4) * 0.21) + i * 2.3));
+      ctx.fillStyle = `rgba(240, 232, 255, ${a.toFixed(3)})`;
+      ctx.fillRect(sx, sy, 1.5 * U, 1.5 * U);
+    }
+  }
+
+  // -------------------- resize / build --------------------
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    U = W / 1600;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    paintSky();
+    paintHills();
+
+    cloudA = makeCloudSheet(Math.ceil(W * 1.4), Math.ceil(H * 0.20), '74, 44, 56', 26);
+    cloudB = makeCloudSheet(Math.ceil(W * 1.4), Math.ceil(H * 0.14), '44, 26, 44', 20);
+
+    skeins = [makeSkein()];
+    skeins[0].x = W * 0.4;      // one already mid-frame
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  // -------------------- loop --------------------
+  let last = performance.now();
+  let ready = false;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    ctx.drawImage(skyLayer, 0, 0, W, H);
+    drawTwinkles(time);
+
+    // stratus slides across the moon
+    const gust = 1 + 0.35 * Math.sin(time * 0.08);
+    cloudAx -= CONFIG.cloudSpeed * gust * dt;
+    cloudBx -= CONFIG.cloudSpeed * 1.55 * gust * dt;
+    const wA = cloudA.width, wB = cloudB.width;
+    let x = ((cloudAx % wA) + wA) % wA - wA;
+    ctx.globalAlpha = 0.75;
+    while (x < W) { ctx.drawImage(cloudA, x, H * 0.30); x += wA; }
+    x = ((cloudBx % wB) + wB) % wB - wB;
+    ctx.globalAlpha = 0.8;
+    while (x < W) { ctx.drawImage(cloudB, x, H * 0.47); x += wB; }
+    ctx.globalAlpha = 1;
+
+    stepSkeins(time, dt);
+    drawSkeins(time);
+
+    ctx.drawImage(hillsFar, 0, 0, W, H);
+    ctx.drawImage(hillsMid, 0, 0, W, H);
+    ctx.drawImage(hillsNear, 0, 0, W, H);
+    ctx.drawImage(groundLayer, 0, 0, W, H);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
