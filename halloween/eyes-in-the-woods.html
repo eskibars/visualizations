@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Eyes in the Woods</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #03060b; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 124% 100% at 46% 44%,
+        rgba(0,0,0,0) 36%, rgba(0,0,0,.42) 82%, rgba(0,0,0,.85) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(198, 216, 190, .26);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">you are not alone here</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  EYES IN THE WOODS — a still, moonlit forest in four layers
+  //  of trunks and fog. Between the trees, eyeshine: pairs of
+  //  glowing eyes at every depth, blinking, holding their gaze,
+  //  occasionally sinking away into the dark while a new pair
+  //  kindles somewhere else. One large pair — something roosting
+  //  — blinks slowly, high in the middle distance.
+  //
+  //  Construction notes
+  //  ------------------
+  //  Trunks and the moon haze are painted once per resize, one
+  //  offscreen layer per forest depth; fog sprites drift between
+  //  the layers. Every pair of eyes is a tiny state machine —
+  //  kindle, watch, blink, slink — stamped from two prerendered
+  //  sprites (wide soft halo, hot core), so a frame costs a few
+  //  dozen sprite draws and nothing else.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1.6,
+
+    layers: [
+      { tint: '#0d1826', trunks: 7,  w: [0.014, 0.024], fogY: 0.86, fogA: 0.20 },
+      { tint: '#0a1320', trunks: 6,  w: [0.022, 0.038], fogY: 0.92, fogA: 0.22 },
+      { tint: '#070e17', trunks: 5,  w: [0.034, 0.055], fogY: 0.99, fogA: 0.25 },
+    ],
+
+    eyePairs: 8,          // wandering pairs, plus the roosting one
+    fireflies: 9,
+    fogBlobsPerBand: 8,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  function noise1(x) {
+    const i = Math.floor(x), f = x - i;
+    const h = (n) => {
+      const s = Math.sin(n * 127.1 + 311.7) * 43758.5453;
+      return s - Math.floor(s);
+    };
+    const u = f * f * f * (f * (f * 6 - 15) + 10);
+    return h(i) * (1 - u) + h(i + 1) * u;
+  }
+  const fbm1 = (x) => 0.6 * noise1(x) + 0.4 * noise1(x * 2.13 + 7.7);
+
+  // -------------------- sprites --------------------
+  function makeGlow(r, g, b) {
+    const s = 128, c = document.createElement('canvas');
+    c.width = c.height = s;
+    const g2 = c.getContext('2d');
+    const grad = g2.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    grad.addColorStop(0, `rgba(${r},${g},${b},1)`);
+    grad.addColorStop(0.25, `rgba(${r},${g},${b},.55)`);
+    grad.addColorStop(0.6, `rgba(${r},${g},${b},.16)`);
+    grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    g2.fillStyle = grad;
+    g2.fillRect(0, 0, s, s);
+    return c;
+  }
+  const glowGreen = makeGlow(198, 255, 148);
+  const glowAmber = makeGlow(255, 196, 110);
+  const glowPale = makeGlow(230, 244, 200);
+  const glowFly = makeGlow(210, 255, 160);
+  const glowFog = makeGlow(108, 138, 148);
+
+  function stamp(sprite, x, y, size, alpha) {
+    if (alpha <= 0.004) return;
+    ctx.globalAlpha = Math.min(1, alpha);
+    ctx.drawImage(sprite, x - size / 2, y - size / 2, size, size);
+    ctx.globalAlpha = 1;
+  }
+
+  // -------------------- forest layers --------------------
+  const layerCanvases = [];
+
+  function paintForestLayer(cfg, seed) {
+    const c = document.createElement('canvas');
+    c.width = Math.floor(W * DPR); c.height = Math.floor(H * DPR);
+    const g = c.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    // the layer's own air: hazy, lighter toward the moon side
+    const moonX = W * 0.3;
+    const bg = g.createLinearGradient(moonX - W * 0.5, 0, moonX + W * 0.7, 0);
+    bg.addColorStop(0, shade(cfg.tint, 7));
+    bg.addColorStop(1, shade(cfg.tint, -3));
+    g.fillStyle = bg;
+    g.fillRect(0, 0, W, H);
+
+    // canopy mass along the top: many small lobes, mostly
+    // off-frame so only their under-edges show
+    g.fillStyle = shade(cfg.tint, -7);
+    for (let i = 0; i < 16; i++) {
+      const cx = Math.random() * W;
+      const cy = -H * rand(0.045, 0.09);
+      const cr = W * rand(0.02, 0.05);
+      g.beginPath();
+      g.ellipse(cx, cy, cr, cr * rand(0.5, 0.7), rand(-0.3, 0.3), 0, Math.PI * 2);
+      g.fill();
+    }
+
+    // trunks: darker silhouettes against the layer's haze
+    for (let i = 0; i < cfg.trunks; i++) {
+      const x = ((i + rand(0.15, 0.85)) / cfg.trunks) * W;
+      const w0 = rand(cfg.w[0], cfg.w[1]) * W;
+      const lean = rand(-0.06, 0.06);
+      const topY = H * rand(-0.04, 0.1);
+      const topX = x + lean * H;
+      const trunkFill = shade(cfg.tint, -9);
+      g.fillStyle = trunkFill;
+      g.beginPath();
+      g.moveTo(x - w0 / 2, H + 2);
+      g.quadraticCurveTo(x - w0 * 0.18 + lean * H * 0.4, H * 0.5, topX - w0 * 0.1, topY);
+      g.lineTo(topX + w0 * 0.1, topY);
+      g.quadraticCurveTo(x + w0 * 0.18 + lean * H * 0.4, H * 0.5, x + w0 / 2, H + 2);
+      g.closePath();
+      g.fill();
+      // moonlit edge on the side facing the haze
+      const rimX = x < moonX ? -1 : 1;
+      g.strokeStyle = shade(cfg.tint, 12);
+      g.globalAlpha = 0.3;
+      g.lineWidth = Math.max(1, w0 * 0.08);
+      g.beginPath();
+      g.moveTo(x + rimX * w0 / 2, H + 2);
+      g.quadraticCurveTo(x + rimX * w0 * 0.18 + lean * H * 0.4, H * 0.5, topX + rimX * w0 * 0.1, topY);
+      g.stroke();
+      g.globalAlpha = 1;
+      // branch stubs, angled up
+      g.strokeStyle = trunkFill;
+      g.lineCap = 'round';
+      const stubs = 1 + (Math.random() * 2.4 | 0);
+      for (let s = 0; s < stubs; s++) {
+        const by = H * rand(0.12, 0.55);
+        const bw = w0 * rand(0.5, 0.9);
+        const dir = Math.random() < 0.5 ? -1 : 1;
+        const bx = x + (topX - x) * (1 - by / H);
+        g.lineWidth = Math.max(1, bw * 0.22);
+        g.beginPath();
+        g.moveTo(bx, by);
+        g.quadraticCurveTo(bx + dir * bw * 0.7, by - bw * 0.28, bx + dir * bw * 1.5, by - bw * 0.5);
+        g.stroke();
+      }
+    }
+    return c;
+  }
+
+  function shade(hex, amt) {
+    const n = parseInt(hex.slice(1), 16);
+    const r = Math.max(0, Math.min(255, (n >> 16) + amt));
+    const gg = Math.max(0, Math.min(255, ((n >> 8) & 255) + amt));
+    const b = Math.max(0, Math.min(255, (n & 255) + amt));
+    return `rgb(${r},${gg},${b})`;
+  }
+
+  let skyLayer;
+  function paintSky() {
+    skyLayer = document.createElement('canvas');
+    skyLayer.width = Math.floor(W * DPR); skyLayer.height = Math.floor(H * DPR);
+    const g = skyLayer.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    const grad = g.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, '#04070d');
+    grad.addColorStop(0.6, '#071019');
+    grad.addColorStop(1, '#0a1622');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, W, H);
+
+    // cool moon haze somewhere upper-left, filtered through canopy
+    const mx = W * 0.3, my = H * 0.22;
+    const halo = g.createRadialGradient(mx, my, 0, mx, my, W * 0.4);
+    halo.addColorStop(0, 'rgba(150, 185, 215, .14)');
+    halo.addColorStop(0.5, 'rgba(140, 175, 210, .06)');
+    halo.addColorStop(1, 'rgba(140, 175, 210, 0)');
+    g.fillStyle = halo;
+    g.fillRect(mx - W * 0.4, my - W * 0.4, W * 0.8, W * 0.8);
+  }
+
+  // -------------------- fog --------------------
+  let fog = [];
+  function buildFog() {
+    fog = [];
+    for (const cfg of CONFIG.layers) {
+      const blobs = [];
+      for (let i = 0; i < CONFIG.fogBlobsPerBand; i++) {
+        blobs.push({
+          x: Math.random() * 1.2,
+          yOff: rand(-0.02, 0.025),
+          s: rand(0.22, 0.45),
+          ph: rand(0, Math.PI * 2), sp: rand(0.5, 1.2),
+          v: rand(0.6, 1.3),
+        });
+      }
+      fog.push({ cfg, blobs });
+    }
+  }
+  function stepFog(dt) {
+    for (const { cfg, blobs } of fog) {
+      for (const o of blobs) {
+        o.x += (5 / W) * dt * 8 * o.v * 0.12 + 0.006 * dt * o.v;
+        if (o.x > 1.2) o.x -= 1.4;
+      }
+    }
+  }
+  function drawFogBand(i, time) {
+    const { cfg, blobs } = fog[i];
+    for (const o of blobs) {
+      const y = H * cfg.fogY + o.yOff * H + Math.sin(time * 0.2 * o.sp + o.ph) * H * 0.012;
+      const dens = 0.45 + 0.55 * fbm1(o.x * 4 + i * 7.3 + time * 0.04 + o.ph);
+      stamp(glowFog, o.x * W, y, o.s * W, cfg.fogA * dens);
+    }
+  }
+
+  // -------------------- eyes --------------------
+  let pairs = [];
+  const EYE_COLORS = [glowGreen, glowGreen, glowAmber, glowPale];
+
+  function makePair(i) {
+    const depth = rand(0, 1);              // 0 = deep, 1 = near
+    return {
+      x: rand(0.06, 0.94) * W,
+      y: H * rand(0.4 + 0.25 * depth, 0.72 + 0.2 * depth),
+      sep: (2.2 + depth * 5.5) * U * 8,    // inter-eye distance
+      size: (2.4 + depth * 6) * U * 3.2,
+      spr: EYE_COLORS[i % EYE_COLORS.length],
+      state: 'kindle', t: rand(0, 3),
+      alpha: 0,
+      blink: 1,                            // 1 open, 0 shut
+      nextBlink: rand(3, 9),
+      ph: rand(0, Math.PI * 2),
+      slinkVX: 0, slinkVY: 0,
+      big: false,
+    };
+  }
+
+  function makeOwl() {
+    const p = makePair(1);
+    p.x = W * rand(0.38, 0.52);
+    p.y = H * rand(0.2, 0.3);
+    p.sep = 24 * U * 3.2;
+    p.size = 17 * U * 3.2;
+    p.spr = glowAmber;
+    p.big = true;
+    p.nextBlink = rand(5, 11);
+    return p;
+  }
+
+  function buildEyes() {
+    pairs = [];
+    for (let i = 0; i < CONFIG.eyePairs; i++) pairs.push(makePair(i));
+    pairs.push(makeOwl());
+  }
+
+  function stepEyes(time, dt) {
+    for (const p of pairs) {
+      p.t += dt;
+      switch (p.state) {
+        case 'kindle':
+          p.alpha = Math.min(1, p.t / 2.2);
+          if (p.alpha >= 1) { p.state = 'watch'; p.t = 0; }
+          break;
+        case 'watch':
+          p.alpha = 1;
+          p.nextBlink -= dt;
+          if (p.nextBlink <= 0) {
+            p.state = 'blink'; p.t = 0;
+            p.blinkDur = rand(0.14, 0.3);
+            p.closedFor = Math.random() < 0.12 ? rand(0.8, 2.4) : 0;
+          }
+          // occasionally sink away into the dark
+          if (p.roamAt === undefined) p.roamAt = rand(18, 42);
+          if (p.t > p.roamAt) {
+            p.state = 'slink'; p.t = 0;
+            p.slinkVX = rand(-0.03, 0.03) * W;
+            p.slinkVY = rand(0.05, 0.12) * H;
+          }
+          break;
+        case 'blink': {
+          const half = p.blinkDur;
+          if (p.t < half) p.blink = 1 - p.t / half;
+          else if (p.t < half + p.closedFor) p.blink = 0;
+          else if (p.t < half * 2 + p.closedFor) p.blink = (p.t - half - p.closedFor) / half;
+          else {
+            p.blink = 1; p.state = 'watch';
+            p.nextBlink = rand(3, 10);
+          }
+          break;
+        }
+        case 'slink': {
+          const k = Math.min(1, p.t / 3.2);
+          p.alpha = 1 - k;
+          p.x += p.slinkVX * dt;
+          p.y += p.slinkVY * dt * (0.4 + k);
+          p.blink = 1 - 0.5 * Math.sin(p.t * 6);
+          if (k >= 1) {
+            // kindle again somewhere else
+            Object.assign(p, makePair((Math.random() * 99) | 0));
+            p.t = -rand(2, 9);            // delay before rekindling
+            p.state = 'waiting';
+          }
+          break;
+        }
+        case 'waiting':
+          if (p.t > 0) { p.state = 'kindle'; p.t = 0; }
+          break;
+      }
+    }
+  }
+
+  function drawEyes(time) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (const p of pairs) {
+      if (p.alpha <= 0.01 || p.blink <= 0.02) continue;
+      const a = p.alpha * p.blink;
+      const bobY = p.big ? Math.sin(time * 0.8 + p.ph) * 2 * U : Math.sin(time * 1.4 + p.ph) * U;
+      const sep = p.sep;
+      const sz = p.size;
+      for (const side of [-1, 1]) {
+        const ex = p.x + side * sep / 2;
+        const ey = p.y + bobY;
+        stamp(p.spr, ex, ey, sz * 4.5, 0.5 * a);
+        stamp(p.spr, ex, ey, sz * 1.5, 0.9 * a);
+        // the shine itself
+        ctx.fillStyle = `rgba(255, 255, 240, ${0.85 * a})`;
+        ctx.beginPath();
+        if (p.big) {
+          // almond with a dark vertical slit
+          ctx.ellipse(ex, ey, sz * 0.3, sz * 0.18, side * 0.18, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = `rgba(16, 12, 6, ${0.95 * a})`;
+          ctx.beginPath();
+          ctx.ellipse(ex, ey, sz * 0.075, sz * 0.15, 0, 0, Math.PI * 2);
+          ctx.fill();
+        } else {
+          ctx.ellipse(ex, ey, sz * 0.16, sz * 0.12, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+    ctx.restore();
+  }
+
+  // -------------------- fireflies --------------------
+  let flies = [];
+  function buildFlies() {
+    flies = [];
+    for (let i = 0; i < CONFIG.fireflies; i++) {
+      flies.push({
+        x: Math.random() * W, y: rand(H * 0.55, H * 0.97),
+        vx: rand(-8, 8), vy: rand(-5, 5),
+        ph: rand(0, Math.PI * 2),
+        blinkPh: rand(0, Math.PI * 2), blinkW: rand(0.2, 0.5),
+        s: rand(0.05, 0.09) * W * 0.06,
+      });
+    }
+  }
+  function drawFlies(time, dt) {
+    for (const f of flies) {
+      f.vx += (fbm1(time * 0.23 + f.ph) - 0.5) * 24 * dt;
+      f.vy += (fbm1(time * 0.19 + f.ph + 40) - 0.5) * 18 * dt;
+      f.vx = Math.max(-14, Math.min(14, f.vx));
+      f.vy = Math.max(-9, Math.min(9, f.vy));
+      f.x += f.vx * dt; f.y += f.vy * dt;
+      if (f.x < -20) f.x = W + 20; if (f.x > W + 20) f.x = -20;
+      if (f.y < H * 0.5) { f.y = H * 0.5; f.vy = Math.abs(f.vy); }
+      if (f.y > H + 10) { f.y = H + 10; f.vy = -Math.abs(f.vy); }
+      const b = Math.max(0, Math.sin(time * f.blinkW * Math.PI * 2 + f.blinkPh));
+      const a = Math.pow(b, 3);
+      if (a > 0.02) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'screen';
+        stamp(glowFly, f.x, f.y, f.s * 7 * (0.6 + a * 0.6), a * 0.8);
+        ctx.restore();
+      }
+    }
+  }
+
+  // -------------------- resize / build --------------------
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    U = W / 1600;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    paintSky();
+    layerCanvases.length = 0;
+    for (let i = 0; i < CONFIG.layers.length; i++) {
+      layerCanvases.push(paintForestLayer(CONFIG.layers[i], 3.3 + i * 5.1));
+    }
+    buildFog();
+    buildEyes();
+    buildFlies();
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  // -------------------- loop --------------------
+  let last = performance.now();
+  let ready = false;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    ctx.drawImage(skyLayer, 0, 0, W, H);
+
+    for (let i = 0; i < layerCanvases.length; i++) {
+      ctx.drawImage(layerCanvases[i], 0, 0, W, H);
+      drawFogBand(i, time);   // each band rolls in front of its layer
+    }
+
+    stepEyes(time, dt);
+    drawEyes(time);
+    drawFlies(time, dt);
+    stepFog(dt);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

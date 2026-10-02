@@ -1,0 +1,736 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Pumpkin Patch</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #060911; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 128% 102% at 50% 42%,
+        rgba(0,0,0,0) 42%, rgba(0,0,0,.34) 82%, rgba(0,0,0,.78) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(255, 205, 145, .27);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">the patch after midnight</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  PUMPKIN PATCH — a field of jack-o'-lanterns under a waning
+  //  moon. The field is laid out in three ridges receding from
+  //  the viewer; each ridge owns its own mist band, so the rows
+  //  separate into depth. Front-row pumpkins are fully rendered
+  //  (lobed bodies, moon-side rim light, carved faces lit by
+  //  their own candle); farther rows shrink to silhouette.
+  //
+  //  Construction notes
+  //  ------------------
+  //  Everything that never moves — sky, stars, moon, ridges and
+  //  the far/mid pumpkin rows — is painted once per resize into
+  //  offscreen layers; a frame is a few blits plus the animated
+  //  foreground. Candle light is a single prerendered radial
+  //  sprite scaled per pumpkin, never a per-frame gradient, and
+  //  the flicker itself is layered sines plus a value-noise
+  //  jitter with occasional gutters, so no two candles keep the
+  //  same rhythm.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1.6,
+
+    moon: { x: 0.715, y: 0.235, r: 0.062 },     // fraction of W / W / W
+    cloudSpeed: 9,                               // px/s base drift
+
+    ridges: [
+      { crest: 0.640, tint: '#101626', detail: 0.25 },  // far
+      { crest: 0.762, tint: '#0c1220', detail: 0.55 },  // mid
+      { crest: 0.908, tint: '#080d18', detail: 1.0 },   // front
+    ],
+
+    frontPumpkins: 6,
+    fireflies: 11,
+    mistBlobsPerBand: 9,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  // -------------------- tiny 1-D value noise --------------------
+  //  Smooth, seedless-by-construction noise for candle jitter and
+  //  mist density. Lattice values are hashed, interpolation is
+  //  quintic, so it is continuous enough to feel organic at the
+  //  frequencies used here.
+  function noise1(x) {
+    const i = Math.floor(x), f = x - i;
+    const h = (n) => {
+      const s = Math.sin(n * 127.1 + 311.7) * 43758.5453;
+      return s - Math.floor(s);
+    };
+    const u = f * f * f * (f * (f * 6 - 15) + 10);
+    return h(i) * (1 - u) + h(i + 1) * u;
+  }
+  const fbm1 = (x) => 0.6 * noise1(x) + 0.4 * noise1(x * 2.13 + 7.7);
+
+  // -------------------- sprite factory --------------------
+  //  One soft radial sprite per colour; everything glowing is
+  //  this sprite drawn at the right scale and alpha.
+  function makeGlow(r, g, b) {
+    const s = 128, c = document.createElement('canvas');
+    c.width = c.height = s;
+    const g2 = c.getContext('2d');
+    const grad = g2.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    grad.addColorStop(0, `rgba(${r},${g},${b},1)`);
+    grad.addColorStop(0.25, `rgba(${r},${g},${b},.55)`);
+    grad.addColorStop(0.6, `rgba(${r},${g},${b},.16)`);
+    grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    g2.fillStyle = grad;
+    g2.fillRect(0, 0, s, s);
+    return c;
+  }
+  const glowAmber = makeGlow(255, 158, 54);
+  const glowFlame = makeGlow(255, 214, 120);
+  const glowFirefly = makeGlow(212, 255, 140);
+  const glowMist = makeGlow(148, 160, 196);
+
+  function stamp(sprite, x, y, size, alpha) {
+    if (alpha <= 0.004) return;
+    ctx.globalAlpha = alpha;
+    ctx.drawImage(sprite, x - size / 2, y - size / 2, size, size);
+    ctx.globalAlpha = 1;
+  }
+
+  // -------------------- candle flicker --------------------
+  function Candle() {
+    this.ph = rand(0, Math.PI * 2);
+    this.jx = rand(3, 9);        // noise frequencies
+    this.jy = rand(1.7, 4.1);
+    this.gutter = rand(6, 26);   // seconds until next gutter
+    this.gutterT = -1;
+  }
+  Candle.prototype.value = function (t) {
+    // occasional short gutter: candle dips as a draft passes through
+    this.gutter -= 1 / 60;
+    if (this.gutterT < 0 && this.gutter <= 0) { this.gutterT = 0; this.gutterDur = rand(0.35, 0.9); }
+    let gut = 1;
+    if (this.gutterT >= 0) {
+      this.gutterT += 1 / 60;
+      const k = this.gutterT / this.gutterDur;
+      gut = 1 - 0.42 * Math.sin(Math.min(1, k) * Math.PI);
+      if (k >= 1) { this.gutterT = -1; this.gutter = rand(7, 30); }
+    }
+    const breathe = 0.5 + 0.5 * Math.sin(t * this.jy + this.ph);
+    const jitter = fbm1(t * this.jx + this.ph * 3.1);
+    return gut * (0.78 + 0.13 * breathe + 0.14 * (jitter - 0.5));
+  };
+
+  // -------------------- pumpkin geometry --------------------
+  //  A pumpkin is five vertical lobes; the moon sits right of
+  //  frame, so lobes brighten toward the right. `carved` carries
+  //  one of three face designs.
+  function makePumpkin(row, x, r, opts) {
+    return Object.assign({
+      row, x, r,
+      tilt: rand(-0.06, 0.06),
+      lean: rand(-0.05, 0.05),
+      squash: rand(0.72, 0.84),
+      face: -1,
+      candle: null,
+      glowScale: rand(0.92, 1.1),
+    }, opts || {});
+  }
+
+  function drawFace(g, x, y, r, kind, lit) {
+    // g: context already translated/rotated to the pumpkin face
+    g.fillStyle = `rgba(255, 196, 88, ${lit})`;
+    g.strokeStyle = 'rgba(64, 22, 4, .8)';   // cut rind reads as an edge
+    g.lineWidth = Math.max(1, r * 0.035);
+    const e = r * 0.05;
+    if (kind === 0) {          // classic grinning triangles
+      g.beginPath();
+      g.moveTo(x - r * 0.40, y - r * 0.16);
+      g.quadraticCurveTo(x - r * 0.26, y - r * 0.46, x - r * 0.10, y - r * 0.30);
+      g.lineTo(x - r * 0.16, y - r * 0.14);
+      g.closePath(); g.fill(); g.stroke();
+      g.beginPath();
+      g.moveTo(x + r * 0.40, y - r * 0.18);
+      g.quadraticCurveTo(x + r * 0.24, y - r * 0.48, x + r * 0.10, y - r * 0.30);
+      g.lineTo(x + r * 0.17, y - r * 0.13);
+      g.closePath(); g.fill(); g.stroke();
+      // swooping grin with two teeth
+      g.beginPath();
+      g.moveTo(x - r * 0.46, y + r * 0.16);
+      g.quadraticCurveTo(x, y + r * 0.30, x + r * 0.46, y + r * 0.12);
+      g.quadraticCurveTo(x + r * 0.28, y + r * 0.46, x, y + r * 0.42);
+      g.quadraticCurveTo(x - r * 0.28, y + r * 0.46, x - r * 0.46, y + r * 0.16);
+      g.closePath(); g.fill(); g.stroke();
+      // teeth notches punched back to dark
+      g.globalCompositeOperation = 'destination-out';
+      g.fillRect(x - r * 0.30, y + r * 0.14, r * 0.11, r * 0.15);
+      g.fillRect(x + r * 0.06, y + r * 0.24, r * 0.11, r * 0.14);
+      g.globalCompositeOperation = 'source-over';
+    } else if (kind === 1) {   // hollow-eyed scowl
+      g.beginPath(); g.ellipse(x - r * 0.30, y - r * 0.22, r * 0.16, r * 0.13, -0.35, 0, Math.PI * 2); g.fill(); g.stroke();
+      g.beginPath(); g.ellipse(x + r * 0.30, y - r * 0.22, r * 0.16, r * 0.13, 0.35, 0, Math.PI * 2); g.fill(); g.stroke();
+      g.beginPath();
+      g.moveTo(x - r * 0.40, y + r * 0.28);
+      g.quadraticCurveTo(x - r * 0.12, y + r * 0.08, x, y + r * 0.26);
+      g.quadraticCurveTo(x + r * 0.12, y + r * 0.08, x + r * 0.40, y + r * 0.28);
+      g.quadraticCurveTo(x + r * 0.18, y + r * 0.42, x, y + r * 0.34);
+      g.quadraticCurveTo(x - r * 0.18, y + r * 0.42, x - r * 0.40, y + r * 0.28);
+      g.closePath(); g.fill(); g.stroke();
+    } else {                   // crooked toothy grin
+      g.beginPath(); g.ellipse(x - r * 0.28, y - r * 0.24, r * 0.11, r * 0.15, 0, 0, Math.PI * 2); g.fill(); g.stroke();
+      g.beginPath(); g.ellipse(x + r * 0.28, y - r * 0.24, r * 0.11, r * 0.15, 0, 0, Math.PI * 2); g.fill(); g.stroke();
+      g.beginPath();
+      g.moveTo(x - r * 0.42, y + r * 0.14);
+      for (let i = 0; i <= 6; i++) {
+        const fx = x - r * 0.42 + (i / 6) * r * 0.84;
+        g.lineTo(fx, y + r * (0.14 + 0.22 * Math.sin(i * 2.4)));
+      }
+      g.quadraticCurveTo(x, y + r * 0.52, x - r * 0.42, y + r * 0.14);
+      g.closePath(); g.fill(); g.stroke();
+      g.globalCompositeOperation = 'destination-out';
+      g.fillRect(x - r * 0.08, y + r * 0.10, r * 0.10, r * 0.13);
+      g.globalCompositeOperation = 'source-over';
+    }
+  }
+
+  //  Full pumpkin with lobes, moon-side light, stem, optional face.
+  function drawPumpkin(x, baseY, r, p, time, detail) {
+    const h = r * p.squash;
+    const cx = x, cy = baseY - h * 0.92;
+    ctx.save();
+    ctx.translate(cx, baseY);
+    ctx.rotate(p.tilt);
+    ctx.translate(-cx, -baseY);
+
+    // contact shadow
+    ctx.fillStyle = 'rgba(0,0,0,.5)';
+    ctx.beginPath();
+    ctx.ellipse(cx, baseY - 1, r * 1.15, r * 0.2, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // body: outer lobes darker, centre lobes carry the light
+    const lobe = (dx, rx, fill) => {
+      ctx.fillStyle = fill;
+      ctx.beginPath();
+      ctx.ellipse(cx + dx * r, baseY - h * 0.52, rx * r, h * 0.52, 0, 0, Math.PI * 2);
+      ctx.fill();
+    };
+    lobe(-0.62, 0.34, '#5a2a0c');
+    lobe(0.62, 0.34, '#5f2d0d');
+    lobe(-0.34, 0.40, '#8a3f10');
+    lobe(0.34, 0.40, '#964412');
+    lobe(0, 0.46, '#b0551a');
+    // moon-side sheen (moon sits right of frame)
+    ctx.fillStyle = 'rgba(216, 226, 255, .10)';
+    ctx.beginPath();
+    ctx.ellipse(cx + r * 0.40, baseY - h * 0.72, r * 0.30, h * 0.30, 0.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    if (detail > 0.5) {
+      // ribs on the two visible outer lobes
+      ctx.strokeStyle = 'rgba(46, 18, 4, .55)';
+      ctx.lineWidth = Math.max(1, r * 0.045);
+      for (const dx of [-0.52, -0.16, 0.2, 0.52]) {
+        ctx.beginPath();
+        ctx.ellipse(cx + dx * r * 0.72, baseY - h * 0.52, Math.abs(dx) * r * 0.62 + r * 0.1, h * 0.5, 0, -Math.PI * 0.46, Math.PI * 0.46);
+        ctx.stroke();
+      }
+      // curved woody stem
+      ctx.strokeStyle = '#42511f';
+      ctx.lineCap = 'round';
+      ctx.lineWidth = r * 0.13;
+      ctx.beginPath();
+      ctx.moveTo(cx + r * p.lean * 6, baseY - h * 1.02);
+      ctx.quadraticCurveTo(cx + r * 0.1 + p.lean * r, baseY - h * 1.28, cx + r * 0.3 + p.lean * r * 2, baseY - h * 1.34);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // carved face lit by its own candle
+    if (p.face >= 0 && p.candle) {
+      const lit = Math.min(1, 0.55 + p.candle.value(time) * 0.5);
+      ctx.save();
+      ctx.translate(cx, baseY - h * 0.55);
+      ctx.rotate(p.tilt);
+      drawFace(ctx, 0, 0, r, p.face, 0.5 + 0.5 * lit);
+      ctx.restore();
+    }
+  }
+
+  // -------------------- scene layers (offscreen) --------------------
+  let skyLayer, ridgeFar, ridgeMid, groundLayer;
+
+  function paintSky() {
+    skyLayer = document.createElement('canvas');
+    skyLayer.width = Math.floor(W * DPR); skyLayer.height = Math.floor(H * DPR);
+    const g = skyLayer.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    const grad = g.createLinearGradient(0, 0, 0, H * 0.72);
+    grad.addColorStop(0, '#05070f');
+    grad.addColorStop(0.45, '#0a1020');
+    grad.addColorStop(0.8, '#15203a');
+    grad.addColorStop(1, '#253352');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, W, H);
+
+    // stars, denser near the top
+    for (let i = 0; i < 190; i++) {
+      const y = Math.pow(Math.random(), 1.4) * H * 0.6;
+      const x = Math.random() * W;
+      const a = rand(0.12, 0.7) * (1 - y / (H * 0.75));
+      g.fillStyle = `rgba(226, 233, 255, ${a})`;
+      const s = Math.random() < 0.12 ? 1.6 * U : 1 * U;
+      g.fillRect(x, y, s, s);
+    }
+
+    // moon: halo, then disc with maria and limb shading
+    const mx = W * CONFIG.moon.x, my = H * CONFIG.moon.y, mr = W * CONFIG.moon.r;
+    const halo = g.createRadialGradient(mx, my, mr * 0.6, mx, my, mr * 4.6);
+    halo.addColorStop(0, 'rgba(255, 232, 195, .34)');
+    halo.addColorStop(0.35, 'rgba(255, 224, 185, .12)');
+    halo.addColorStop(1, 'rgba(255, 224, 185, 0)');
+    g.fillStyle = halo;
+    g.fillRect(mx - mr * 4.6, my - mr * 4.6, mr * 9.2, mr * 9.2);
+
+    const disc = g.createRadialGradient(mx - mr * 0.25, my - mr * 0.3, mr * 0.2, mx, my, mr);
+    disc.addColorStop(0, '#fff3dc');
+    disc.addColorStop(0.75, '#f4ddae');
+    disc.addColorStop(1, '#e5c489');
+    g.fillStyle = disc;
+    g.beginPath(); g.arc(mx, my, mr, 0, Math.PI * 2); g.fill();
+
+    g.save();
+    g.beginPath(); g.arc(mx, my, mr, 0, Math.PI * 2); g.clip();
+    const mare = [
+      [-0.30, -0.16, 0.36, 0.30, -0.4, .11], [0.20, 0.26, 0.34, 0.26, 0.5, .10],
+      [0.36, -0.28, 0.18, 0.14, 0, .09], [-0.04, 0.48, 0.24, 0.13, 0, .08],
+      [-0.52, 0.28, 0.15, 0.12, 0, .09],
+    ];
+    for (const [dx, dy, rx, ry, rot, a] of mare) {
+      g.fillStyle = `rgba(146, 118, 82, ${a})`;
+      g.beginPath();
+      g.ellipse(mx + dx * mr, my + dy * mr, rx * mr, ry * mr, rot, 0, Math.PI * 2);
+      g.fill();
+    }
+    // faint limb darkening
+    const limb = g.createRadialGradient(mx, my, mr * 0.72, mx, my, mr);
+    limb.addColorStop(0, 'rgba(90, 62, 30, 0)');
+    limb.addColorStop(1, 'rgba(90, 62, 30, .25)');
+    g.fillStyle = limb;
+    g.fillRect(mx - mr, my - mr, mr * 2, mr * 2);
+    g.restore();
+  }
+
+  //  A ridge is painted with its permanent pumpkins. Returns the
+  //  crest function so dynamic layers agree with the silhouette.
+  function makeCrest(crestF, seed) {
+    // two smooth humps across the width
+    return (x) => {
+      const t = x / W;
+      return H * crestF
+        - Math.sin(t * Math.PI * 1.7 + seed) * H * 0.016
+        - Math.sin(t * Math.PI * 3.3 + seed * 2.7) * H * 0.008;
+    };
+  }
+
+  function paintRidge(crestF, seed, tint, pumpkins, detail) {
+    const c = document.createElement('canvas');
+    c.width = Math.floor(W * DPR); c.height = Math.floor(H * DPR);
+    const g = c.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+    const crest = makeCrest(crestF, seed);
+
+    // ground body
+    g.fillStyle = tint;
+    g.beginPath();
+    g.moveTo(-2, H + 2);
+    for (let x = -2; x <= W + 2; x += 8) g.lineTo(x, crest(x));
+    g.lineTo(W + 2, H + 2);
+    g.closePath();
+    g.fill();
+
+    // moonlit crest line, strongest on the moonward slope
+    const mx = W * CONFIG.moon.x;
+    g.lineWidth = 1.2 * U;
+    for (let x = 0; x < W; x += 6) {
+      const k = Math.max(0, 1 - Math.abs(x - mx) / (W * 0.75));
+      g.strokeStyle = `rgba(190, 205, 240, ${0.05 + 0.10 * k})`;
+      g.beginPath();
+      g.moveTo(x, crest(x)); g.lineTo(x + 6, crest(x + 6));
+      g.stroke();
+    }
+
+    // permanent pumpkins sitting on the crest
+    for (const p of pumpkins) {
+      const y = crest(p.x) + p.sink * H;
+      drawPumpkinOn(g, p.x, y, p.r * W, p, detail);
+    }
+    return { canvas: c, crest };
+  }
+
+  function drawPumpkinOn(g, x, baseY, r, p, detail) {
+    // silhouette-scale pumpkin for far/mid rows
+    const h = r * p.squash;
+    const cy = baseY - h * 0.52;
+    g.fillStyle = 'rgba(0,0,0,.4)';
+    g.beginPath(); g.ellipse(x, baseY - 1, r * 1.1, r * 0.18, 0, 0, Math.PI * 2); g.fill();
+    g.fillStyle = '#3a1d0a';
+    g.beginPath(); g.ellipse(x - r * 0.5, cy, r * 0.34, h * 0.52, 0, 0, Math.PI * 2); g.fill();
+    g.beginPath(); g.ellipse(x + r * 0.5, cy, r * 0.34, h * 0.52, 0, 0, Math.PI * 2); g.fill();
+    g.fillStyle = detail > 0.4 ? '#542a0c' : '#47220c';
+    g.beginPath(); g.ellipse(x, cy, r * 0.52, h * 0.52, 0, 0, Math.PI * 2); g.fill();
+    if (detail > 0.4) {
+      // faint moonlit crown so mid pumpkins don't read as flat dots
+      g.fillStyle = 'rgba(205, 216, 245, .09)';
+      g.beginPath();
+      g.ellipse(x + r * 0.16, cy - h * 0.34, r * 0.26, h * 0.16, 0.4, 0, Math.PI * 2);
+      g.fill();
+      g.strokeStyle = '#3f511f';
+      g.lineWidth = Math.max(1, r * 0.12);
+      g.lineCap = 'round';
+      g.beginPath();
+      g.moveTo(x, baseY - h * 1.02);
+      g.lineTo(x + p.lean * r, baseY - h * 1.24);
+      g.stroke();
+    }
+  }
+
+  function paintGround() {
+    groundLayer = document.createElement('canvas');
+    groundLayer.width = Math.floor(W * DPR); groundLayer.height = Math.floor(H * DPR);
+    const g = groundLayer.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+    const grad = g.createLinearGradient(0, H * 0.82, 0, H);
+    grad.addColorStop(0, '#0c1322');
+    grad.addColorStop(0.4, '#0d1526');
+    grad.addColorStop(1, '#070b14');
+    g.fillStyle = grad;
+    g.fillRect(0, H * 0.82, W, H * 0.18);
+
+    // broad pool of moonlight on the field, brightest toward the moon
+    const mx = W * CONFIG.moon.x;
+    const pool = g.createRadialGradient(mx, H * 0.9, 0, mx, H * 0.9, W * 0.62);
+    pool.addColorStop(0, 'rgba(186, 202, 240, .13)');
+    pool.addColorStop(0.5, 'rgba(186, 202, 240, .05)');
+    pool.addColorStop(1, 'rgba(186, 202, 240, 0)');
+    g.fillStyle = pool;
+    g.fillRect(0, H * 0.82, W, H * 0.18);
+
+    // sparse grass flecks catching the light
+    for (let i = 0; i < 240; i++) {
+      const y = H * rand(0.86, 1);
+      const x = Math.random() * W;
+      const k = Math.max(0, 1 - Math.abs(x - mx) / (W * 0.7)) * (1 - (y - H * 0.86) / (H * 0.14));
+      g.fillStyle = `rgba(168, 186, 226, ${0.03 + 0.10 * k * Math.random()})`;
+      g.fillRect(x, y, rand(2, 7) * U, 1 * U);
+    }
+  }
+
+  // -------------------- framing trees --------------------
+  //  Bare trees, grounded on the far ridge; branches droop as they
+  //  climb so the crowns read as gnarled rather than spidery.
+  function growTree(g, x, y, len, ang, depth) {
+    (function branch(x, y, len, ang, depth) {
+      if (depth === 0 || len < 3) return;
+      const bend = rand(-0.08, 0.08);
+      const nx = x + Math.cos(ang + bend) * len;
+      const ny = y + Math.sin(ang + bend) * len;
+      g.lineWidth = Math.max(0.7, len * 0.13);
+      g.beginPath(); g.moveTo(x, y); g.lineTo(nx, ny); g.stroke();
+      if (depth <= 2) {
+        // end twigs sweep outward and droop
+        for (const s of [-1, 1]) {
+          const ta = ang + s * 1.15;
+          g.lineWidth = Math.max(0.5, len * 0.07);
+          g.beginPath();
+          g.moveTo(nx, ny);
+          g.quadraticCurveTo(nx + Math.cos(ta) * len * 0.6, ny + Math.sin(ta) * len * 0.6 + len * 0.12,
+                             nx + Math.cos(ta) * len * 1.05, ny + Math.sin(ta) * len * 1.05 + len * 0.34);
+          g.stroke();
+        }
+        return;
+      }
+      for (let i = 0; i < 2; i++) {
+        branch(nx, ny, len * rand(0.62, 0.78),
+               ang + (i - 0.5) * 0.95 + rand(-0.18, 0.18), depth - 1);
+      }
+    })(x, y, len, ang, depth);
+  }
+
+  // -------------------- clouds --------------------
+  function makeCloudSheet(w, h, tint, blobs) {
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const g = c.getContext('2d');
+    for (let i = 0; i < blobs; i++) {
+      const x = Math.random() * w;
+      const y = h * rand(0.2, 0.8);
+      const r = rand(h * 0.2, h * 0.55);
+      const grad = g.createRadialGradient(x, y, 0, x, y, r);
+      grad.addColorStop(0, `rgba(${tint}, ${rand(0.10, 0.22)})`);
+      grad.addColorStop(1, `rgba(${tint}, 0)`);
+      g.fillStyle = grad;
+      g.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    const fade = g.createLinearGradient(0, 0, 0, h);
+    fade.addColorStop(0, 'rgba(0,0,0,1)');
+    fade.addColorStop(0.18, 'rgba(0,0,0,0)');
+    fade.addColorStop(0.8, 'rgba(0,0,0,0)');
+    fade.addColorStop(1, 'rgba(0,0,0,1)');
+    g.globalCompositeOperation = 'destination-out';
+    g.fillStyle = fade;
+    g.fillRect(0, 0, w, h);
+    return c;
+  }
+  let cloudA, cloudB, cloudAx = 0, cloudBx = 0;
+
+  // -------------------- mist bands --------------------
+  let mist = [];
+  function buildMist() {
+    mist = [];
+    const bands = [
+      { y: 0.70, drift: 7, alpha: 0.20, scale: [0.5, 1.1] },   // far
+      { y: 0.82, drift: 12, alpha: 0.16, scale: [0.7, 1.5] },  // mid
+      { y: 0.97, drift: 18, alpha: 0.13, scale: [1.0, 2.2] },  // front
+    ];
+    for (const b of bands) {
+      const blobs = [];
+      for (let i = 0; i < CONFIG.mistBlobsPerBand; i++) {
+        blobs.push({
+          x: Math.random(), yOff: rand(-0.02, 0.03),
+          s: rand(b.scale[0], b.scale[1]),
+          ph: rand(0, Math.PI * 2), sp: rand(0.6, 1.4),
+        });
+      }
+      mist.push({ band: b, blobs });
+    }
+  }
+  function stepMist(dt) {
+    for (const { band, blobs } of mist) {
+      for (const o of blobs) {
+        o.x += (band.drift / W) * dt * (0.7 + 0.6 * o.s);
+        if (o.x > 1.15) o.x -= 1.3;
+      }
+    }
+  }
+  function drawMistBand(i, time) {
+    const { band, blobs } = mist[i];
+    for (const o of blobs) {
+      const y = H * band.y + o.yOff * H + Math.sin(time * 0.22 * o.sp + o.ph) * H * 0.012;
+      const dens = 0.5 + 0.5 * fbm1(o.x * 5 + band.drift + time * 0.05 + o.ph);
+      stamp(glowMist, o.x * W, y, o.s * W * 0.30, band.alpha * dens);
+    }
+  }
+
+  // -------------------- fireflies --------------------
+  let flies = [];
+  function buildFlies() {
+    flies = [];
+    for (let i = 0; i < CONFIG.fireflies; i++) {
+      flies.push({
+        x: Math.random() * W, y: rand(H * 0.68, H * 0.97),
+        vx: rand(-8, 8), vy: rand(-5, 5),
+        ph: rand(0, Math.PI * 2),
+        blinkPh: rand(0, Math.PI * 2), blinkW: rand(0.25, 0.6),
+        s: rand(0.05, 0.09) * W * 0.06,
+      });
+    }
+  }
+  function drawFlies(time, dt) {
+    for (const f of flies) {
+      // gentle wander
+      f.vx += (fbm1(time * 0.23 + f.ph) - 0.5) * 26 * dt;
+      f.vy += (fbm1(time * 0.19 + f.ph + 40) - 0.5) * 20 * dt;
+      f.vx = Math.max(-16, Math.min(16, f.vx));
+      f.vy = Math.max(-10, Math.min(10, f.vy));
+      f.x += f.vx * dt; f.y += f.vy * dt;
+      if (f.x < -20) f.x = W + 20; if (f.x > W + 20) f.x = -20;
+      if (f.y < H * 0.55) { f.y = H * 0.55; f.vy = Math.abs(f.vy); }
+      if (f.y > H + 10) { f.y = H + 10; f.vy = -Math.abs(f.vy); }
+      // slow blink with dark spells
+      const b = Math.max(0, Math.sin(time * f.blinkW * Math.PI * 2 + f.blinkPh));
+      const a = Math.pow(b, 3);
+      if (a > 0.02) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'screen';
+        stamp(glowFirefly, f.x, f.y, f.s * 8 * (0.6 + a * 0.6), a * 0.85);
+        ctx.restore();
+        ctx.fillStyle = `rgba(235, 255, 190, ${a})`;
+        ctx.beginPath(); ctx.arc(f.x, f.y, Math.max(0.8, f.s * 0.16), 0, Math.PI * 2); ctx.fill();
+      }
+    }
+  }
+
+  // -------------------- resize / build --------------------
+  let frontPumps = [];
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    U = W / 1600;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    paintSky();
+    paintGround();
+
+    // far ridge: dark, small pumpkins, none carved
+    const farP = [];
+    for (let i = 0; i < 22; i++) {
+      farP.push({ x: Math.random() * W, r: rand(0.007, 0.012), lean: rand(-0.3, 0.3), squash: rand(0.72, 0.82), sink: rand(0.002, 0.014) });
+    }
+    ridgeFar = paintRidge(CONFIG.ridges[0].crest, 1.7, CONFIG.ridges[0].tint, farP, 0.25);
+
+    // framing trees bake into the sky layer (one fewer full-frame blit)
+    const tg = skyLayer.getContext('2d');
+    tg.setTransform(DPR, 0, 0, DPR, 0, 0);
+    tg.strokeStyle = '#070b13';
+    tg.lineCap = 'round';
+    growTree(tg, W * 0.055, ridgeFar.crest(W * 0.055) + 2, H * 0.095, -Math.PI / 2 - 0.08, 6);
+    growTree(tg, W * 0.955, ridgeFar.crest(W * 0.955) + 2, H * 0.070, -Math.PI / 2 + 0.09, 5);
+
+    // mid ridge: medium pumpkins, two faintly carved
+    const midP = [];
+    for (let i = 0; i < 13; i++) {
+      midP.push({ x: Math.random() * W, r: rand(0.013, 0.02), lean: rand(-0.3, 0.3), squash: rand(0.72, 0.84), sink: rand(0.004, 0.02) });
+    }
+    ridgeMid = paintRidge(CONFIG.ridges[1].crest, 4.2, CONFIG.ridges[1].tint, midP, 0.55);
+
+    // front ridge: the showpieces — big, all carved, staggered
+    // down the slope; edge hulks are cut by the frame for depth
+    frontPumps = [];
+    for (let i = 0; i < CONFIG.frontPumpkins; i++) {
+      const t = i / (CONFIG.frontPumpkins - 1);
+      const fx = W * (0.055 + 0.89 * t) + rand(-0.04, 0.04) * W;
+      const edgeHulk = i === 0 || i === CONFIG.frontPumpkins - 1;
+      const r = (edgeHulk ? rand(0.052, 0.066) : rand(0.036, 0.052)) * W;
+      const p = makePumpkin(2, fx, r, {
+        squash: rand(0.74, 0.84),
+        lean: rand(-0.06, 0.06),
+        tilt: rand(-0.05, 0.05),
+        face: i % 3,
+        candle: new Candle(),
+        glowScale: rand(0.9, 1.15),
+      });
+      p.baseY = H * (0.875 + 0.075 * t * t) + rand(-6, 18);
+      frontPumps.push(p);
+    }
+    // depth-sort so nearer pumpkins overlap farther ones
+    frontPumps.sort((a, b) => a.baseY - b.baseY);
+
+    cloudA = makeCloudSheet(Math.ceil(W * 1.4), Math.ceil(H * 0.5), '166, 150, 190', 55);
+    cloudB = makeCloudSheet(Math.ceil(W * 1.4), Math.ceil(H * 0.34), '96, 88, 130', 42);
+
+    buildMist();
+    buildFlies();
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  // -------------------- draw --------------------
+  function drawFrontPumpkins(time) {
+    for (const p of frontPumps) {
+      const carved = p.face >= 0;
+      const f = carved ? p.candle.value(time) : 0;
+      if (carved) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'screen';
+        // body glow behind the pumpkin
+        stamp(glowAmber, p.x, p.baseY - p.r * 0.55, p.r * 6.2 * p.glowScale, 0.34 * f);
+        ctx.restore();
+      }
+      drawPumpkin(p.x, p.baseY, p.r, p, time, 1);
+      if (carved) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'screen';
+        // light spill pooled on the ground in front
+        stamp(glowAmber, p.x, p.baseY + p.r * 0.16, p.r * 3.8, 0.22 * f);
+        // the candle itself, peeking through the face
+        stamp(glowFlame, p.x, p.baseY - p.r * 0.5, p.r * 1.7, 0.5 * f);
+        ctx.restore();
+      }
+    }
+  }
+
+  function drawClouds(time, dt) {
+    const gust = 1 + 0.4 * Math.sin(time * 0.09);
+    cloudAx -= CONFIG.cloudSpeed * gust * dt;
+    cloudBx -= CONFIG.cloudSpeed * 1.8 * gust * dt;
+    const wA = cloudA.width, wB = cloudB.width;
+    let x = ((cloudAx % wA) + wA) % wA - wA;
+    ctx.globalAlpha = 0.62;
+    while (x < W) { ctx.drawImage(cloudA, x, -H * 0.05); x += wA; }
+    x = ((cloudBx % wB) + wB) % wB - wB;
+    ctx.globalAlpha = 0.55;
+    while (x < W) { ctx.drawImage(cloudB, x, H * 0.12); x += wB; }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawTwinkles(time) {
+    // a handful of the brighter stars breathe
+    for (let i = 0; i < 10; i++) {
+      const sx = ((i * 197.3) % 1) * W;
+      const sy = (0.04 + ((i * 61.7) % 1) * 0.42) * H;
+      const a = 0.25 + 0.3 * (0.5 + 0.5 * Math.sin(time * (0.7 + (i % 5) * 0.23) + i * 2.1));
+      ctx.fillStyle = `rgba(230, 238, 255, ${a})`;
+      ctx.fillRect(sx, sy, 1.6 * U, 1.6 * U);
+    }
+  }
+
+  // -------------------- loop --------------------
+  let last = performance.now();
+  let ready = false;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    ctx.drawImage(skyLayer, 0, 0, W, H);
+    drawTwinkles(time);
+    drawClouds(time, dt);
+
+    ctx.drawImage(ridgeFar.canvas, 0, 0, W, H);
+    drawMistBand(0, time);
+    ctx.drawImage(ridgeMid.canvas, 0, 0, W, H);
+    drawMistBand(1, time);
+
+    ctx.drawImage(groundLayer, 0, 0, W, H);
+    drawFrontPumpkins(time);
+    drawFlies(time, dt);
+    drawMistBand(2, time);
+    stepMist(dt);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

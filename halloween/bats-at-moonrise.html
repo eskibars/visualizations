@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Bats at Moonrise</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #140a16; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 128% 102% at 50% 52%,
+        rgba(0,0,0,0) 40%, rgba(0,0,0,.38) 82%, rgba(0,0,0,.82) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(255, 190, 150, .27);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">the colony takes the air</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  BATS AT MOONRISE — a harvest moon swelling over the
+  //  treeline while the colony streams out to feed. Two loose
+  //  rivers of bats cross the disc on wander-and-separation
+  //  paths; slow bands of cloud shear across the light; the
+  //  trees hold the horizon in two dark layers.
+  //
+  //  Construction notes
+  //  ------------------
+  //  Moon, sky and both treelines are painted once per resize;
+  //  a frame is three blits, the cloud sheets and forty bats.
+  //  Each bat is a flap oscillator driving a five-curve wing
+  //  path — membrane scallops included — with depth coming from
+  //  size, speed and tone. The streams are led, not simulated:
+  //  each has a noise-wandering anchor the individuals relax
+  //  toward, which keeps the flock loose but coherent for a
+  //  fraction of the cost of real boids.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1.6,
+
+    moon: { x: 0.52, y: 0.46, r: 0.30 },   // r as fraction of H
+
+    bats: 42,
+    cloudSpeed: 6,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  function noise1(x) {
+    const i = Math.floor(x), f = x - i;
+    const h = (n) => {
+      const s = Math.sin(n * 127.1 + 311.7) * 43758.5453;
+      return s - Math.floor(s);
+    };
+    const u = f * f * f * (f * (f * 6 - 15) + 10);
+    return h(i) * (1 - u) + h(i + 1) * u;
+  }
+  const fbm1 = (x) => 0.6 * noise1(x) + 0.4 * noise1(x * 2.13 + 7.7);
+
+  // -------------------- static scenery --------------------
+  let skyLayer, treeFar, treeNear, groundLayer;
+
+  function paintSky() {
+    skyLayer = document.createElement('canvas');
+    skyLayer.width = Math.floor(W * DPR); skyLayer.height = Math.floor(H * DPR);
+    const g = skyLayer.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    const grad = g.createLinearGradient(0, 0, 0, H * 0.72);
+    grad.addColorStop(0, '#150c1c');
+    grad.addColorStop(0.4, '#2a1226');
+    grad.addColorStop(0.72, '#4a1d28');
+    grad.addColorStop(1, '#74322a');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, W, H);
+
+    // warm pooled light around the moon position
+    const mx = W * CONFIG.moon.x, my = H * CONFIG.moon.y;
+    const pool = g.createRadialGradient(mx, my, 0, mx, my, W * 0.52);
+    pool.addColorStop(0, 'rgba(255, 150, 70, .17)');
+    pool.addColorStop(0.5, 'rgba(230, 120, 60, .07)');
+    pool.addColorStop(1, 'rgba(230, 120, 60, 0)');
+    g.fillStyle = pool;
+    g.fillRect(0, 0, W, H);
+
+    // stars only in the upper third, away from the glow
+    for (let i = 0; i < 90; i++) {
+      const y = Math.pow(Math.random(), 1.6) * H * 0.34;
+      const x = Math.random() * W;
+      const a = rand(0.08, 0.42) * (1 - y / (H * 0.42));
+      g.fillStyle = `rgba(255, 230, 220, ${a})`;
+      g.fillRect(x, y, Math.random() < 0.12 ? 1.6 * U : 1 * U, 1 * U);
+    }
+
+    // the moon itself: vast, amber, low
+    const mr = H * CONFIG.moon.r;
+    const halo = g.createRadialGradient(mx, my, mr * 0.92, mx, my, mr * 1.5);
+    halo.addColorStop(0, 'rgba(255, 170, 90, .34)');
+    halo.addColorStop(1, 'rgba(255, 150, 80, 0)');
+    g.fillStyle = halo;
+    g.fillRect(mx - mr * 1.5, my - mr * 1.5, mr * 3, mr * 3);
+
+    const disc = g.createRadialGradient(mx - mr * 0.2, my - mr * 0.28, mr * 0.1, mx, my, mr);
+    disc.addColorStop(0, '#ffdfae');
+    disc.addColorStop(0.55, '#ffc684');
+    disc.addColorStop(0.85, '#f2a05e');
+    disc.addColorStop(1, '#d97e44');
+    g.fillStyle = disc;
+    g.beginPath();
+    g.arc(mx, my, mr, 0, Math.PI * 2);
+    g.fill();
+
+    // maria — broad soft blotches, warmer near the lower limb
+    g.save();
+    g.beginPath(); g.arc(mx, my, mr, 0, Math.PI * 2); g.clip();
+    const mare = [
+      [-0.30, -0.30, 0.34, 0.26, -0.5, .10], [0.22, -0.12, 0.30, 0.22, 0.4, .09],
+      [-0.05, 0.25, 0.36, 0.26, 0, .10], [0.42, 0.30, 0.18, 0.14, 0, .09],
+      [-0.55, 0.10, 0.16, 0.12, 0, .08], [0.05, -0.55, 0.18, 0.11, 0.2, .07],
+    ];
+    for (const [dx, dy, rx, ry, rot, a] of mare) {
+      g.fillStyle = `rgba(196, 108, 52, ${a})`;
+      g.beginPath();
+      g.ellipse(mx + dx * mr, my + dy * mr, rx * mr, ry * mr, rot, 0, Math.PI * 2);
+      g.fill();
+    }
+    // limb darkening
+    const limb = g.createRadialGradient(mx, my, mr * 0.75, mx, my, mr);
+    limb.addColorStop(0, 'rgba(120, 55, 25, 0)');
+    limb.addColorStop(1, 'rgba(120, 55, 25, .35)');
+    g.fillStyle = limb;
+    g.fillRect(mx - mr, my - mr, mr * 2, mr * 2);
+    g.restore();
+  }
+
+  function canopyPath(g, baseY, amp, seed) {
+    // billowing deciduous canopy: layered abs-sine lobes
+    g.beginPath();
+    g.moveTo(-2, H + 2);
+    g.lineTo(-2, baseY);
+    for (let x = 0; x <= W; x += 5) {
+      const t = x / W;
+      const y = baseY
+        - Math.abs(Math.sin(t * 11 + seed)) * amp * 0.55
+        - Math.abs(Math.sin(t * 27.3 + seed * 2.1)) * amp * 0.3
+        - Math.abs(Math.sin(t * 53.1 + seed * 3.3)) * amp * 0.12
+        - noise1(t * 7 + seed) * amp * 0.5;
+      g.lineTo(x, y);
+    }
+    g.lineTo(W + 2, H + 2);
+    g.closePath();
+  }
+
+  // a spruce: three stacked, slightly irregular cones with lean
+  function drawConifer(g, x, baseY, h, lean) {
+    const tiers = 3;
+    g.fillStyle = '#0e0710';
+    for (let i = 0; i < tiers; i++) {
+      const t0 = i / tiers;                    // bottom of tier
+      const y0 = baseY - h * t0 * 0.78;
+      const y1 = baseY - h * ((i + 1) / tiers) * 0.86;
+      const w0 = h * 0.30 * (1 - t0 * 0.62);
+      const w1 = w0 * 0.55;
+      const sk = lean * h * 0.1 * (i + 1) / tiers;
+      g.beginPath();
+      g.moveTo(x - w0 + sk * 0.4, y0);
+      g.quadraticCurveTo(x - w1 + sk * 0.7, (y0 + y1) / 2, x - w1 * 0.4 + sk, y1);
+      g.lineTo(x + w1 * 0.4 + sk, y1);
+      g.quadraticCurveTo(x + w1 + sk * 0.7, (y0 + y1) / 2, x + w0 + sk * 0.4, y0);
+      g.closePath();
+      g.fill();
+    }
+  }
+
+  function paintTrees() {
+    treeFar = document.createElement('canvas');
+    treeFar.width = Math.floor(W * DPR); treeFar.height = Math.floor(H * DPR);
+    let g = treeFar.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+    canopyPath(g, H * 0.715, H * 0.028, 1.7);
+    g.fillStyle = '#1d0f1c';
+    g.fill();
+
+    treeNear = document.createElement('canvas');
+    treeNear.width = Math.floor(W * DPR); treeNear.height = Math.floor(H * DPR);
+    g = treeNear.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+    canopyPath(g, H * 0.795, H * 0.042, 4.2);
+    g.fillStyle = '#0e0710';
+    g.fill();
+    // spruces leaning out of the near canopy
+    drawConifer(g, W * 0.115, H * 0.80, H * 0.16, -0.6);
+    drawConifer(g, W * 0.315, H * 0.83, H * 0.12, 0.3);
+    drawConifer(g, W * 0.655, H * 0.815, H * 0.14, 0.5);
+    drawConifer(g, W * 0.90, H * 0.80, H * 0.11, -0.4);
+  }
+
+  function paintGround() {
+    groundLayer = document.createElement('canvas');
+    groundLayer.width = Math.floor(W * DPR); groundLayer.height = Math.floor(H * DPR);
+    const g = groundLayer.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+    const grad = g.createLinearGradient(0, H * 0.8, 0, H);
+    grad.addColorStop(0, '#0b060d');
+    grad.addColorStop(1, '#050308');
+    g.fillStyle = grad;
+    g.fillRect(0, H * 0.8, W, H * 0.2);
+  }
+
+  // -------------------- clouds --------------------
+  //  The feather toward the sheet's top and bottom edges is baked
+  //  into each blob's alpha (an erase pass via destination-out
+  //  composites as a painted rectangle on swiftshader), and every
+  //  blob is wrapped across the sheet's horizontal edges so the
+  //  tiling in frame() never shows a seam.
+  function sheetEnvelope(y, h) {
+    const e = Math.min(1, Math.min(y, h - y) / (h * 0.22));
+    return e * e * (3 - 2 * e);
+  }
+  function makeCloudSheet(w, h, tint, blobs) {
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const g = c.getContext('2d');
+    for (let i = 0; i < blobs; i++) {
+      const x = Math.random() * w;
+      const y = h * rand(0.12, 0.88);
+      const rx = rand(h * 0.5, h * 1.4);     // wide, flat blobs
+      const ry = rand(h * 0.12, h * 0.3);
+      const a = rand(0.2, 0.42) * sheetEnvelope(y, h);
+      const grad = g.createRadialGradient(x, y, 0, x, y, rx);
+      grad.addColorStop(0, `rgba(${tint}, ${a.toFixed(3)})`);
+      grad.addColorStop(1, `rgba(${tint}, 0)`);
+      g.save();
+      g.translate(x, y);
+      g.scale(1, ry / rx);
+      g.translate(-x, -y);
+      g.fillStyle = grad;
+      for (const ox of [-w, 0, w]) g.fillRect(x - rx + ox, y - rx, rx * 2, rx * 2);
+      g.restore();
+    }
+    return c;
+  }
+  let cloudA, cloudB, cloudAx = 0, cloudBx = 0;
+  let cloudBars = [];
+
+  // one elongated dark cloud with a warm under-rim, for crossing
+  // the disc as a silhouette band. Radial-gradient puffs (the one
+  // technique that renders identically everywhere), kept well
+  // inside the canvas bounds so no puff is ever sliced by an edge.
+  function makeCloudBar(w, h) {
+    const c = document.createElement('canvas');
+    c.width = Math.ceil(w); c.height = Math.ceil(h);
+    const g = c.getContext('2d');
+    const puffs = [];
+    for (let i = 0; i < 6; i++) {
+      puffs.push({
+        px: w * (0.18 + 0.64 * (i / 5)) + rand(-w * 0.02, w * 0.02),
+        py: h * 0.46 + rand(-h * 0.05, h * 0.05),
+        pr: h * rand(0.3, 0.38),         // stays inside the bar
+      });
+    }
+    // a staggered second row widens the band without more bulk
+    for (let i = 0; i < 5; i++) {
+      puffs.push({
+        px: w * (0.24 + 0.55 * (i / 4)) + rand(-w * 0.02, w * 0.02),
+        py: h * 0.56 + rand(-h * 0.04, h * 0.04),
+        pr: h * rand(0.26, 0.34),
+      });
+    }
+    // warm halo first: peeks out beneath the dark mass
+    for (const p of puffs) {
+      const gy = p.py + p.pr * 0.45, gr = p.pr * 1.05;
+      const warm = g.createRadialGradient(p.px, gy, 0, p.px, gy, gr);
+      warm.addColorStop(0, 'rgba(255, 155, 85, .16)');
+      warm.addColorStop(1, 'rgba(255, 155, 85, 0)');
+      g.fillStyle = warm;
+      g.fillRect(p.px - gr, gy - gr, gr * 2, gr * 2);
+    }
+    // then the dark body
+    for (const p of puffs) {
+      const grad = g.createRadialGradient(p.px, p.py, 0, p.px, p.py, p.pr);
+      grad.addColorStop(0, 'rgba(28, 12, 19, .5)');
+      grad.addColorStop(0.55, 'rgba(28, 12, 19, .36)');
+      grad.addColorStop(1, 'rgba(28, 12, 19, 0)');
+      g.fillStyle = grad;
+      g.fillRect(p.px - p.pr, p.py - p.pr, p.pr * 2, p.pr * 2);
+    }
+    return c;
+  }
+
+  function buildCloudBars() {
+    cloudBars = [];
+    const defs = [
+      { y: 0.375, sp: 13, sc: [0.75, 0.19] },
+      { y: 0.455, sp: 9, sc: [0.95, 0.23] },
+      { y: 0.545, sp: 17, sc: [0.6, 0.16] },
+      { y: 0.315, sp: 7, sc: [0.85, 0.17] },
+    ];
+    for (const d of defs) {
+      cloudBars.push({
+        img: makeCloudBar(W * d.sc[0], H * d.sc[1]),
+        x: Math.random() * W * 1.4 - W * 0.2,
+        y: H * d.y,
+        sp: d.sp,
+      });
+    }
+  }
+
+  // -------------------- bats --------------------
+  let bats = [];
+  const streams = [
+    { y0: 0.40, dir: 1, spread: 0.16, speed: [55, 95], ph: 0.0 },
+    { y0: 0.58, dir: -1, spread: 0.12, speed: [45, 80], ph: 5.2 },
+  ];
+
+  function spawnBat(stream, anywhere) {
+    const s = streams[stream];
+    // a few pass close to the camera — big, fast, dramatic
+    const depth = Math.random() < 0.16 ? rand(1.5, 2.1) : Math.pow(Math.random(), 1.5);
+    return {
+      stream,
+      x: anywhere ? Math.random() * W : (s.dir === 1 ? -W * 0.05 : W * 1.05),
+      y: H * (s.y0 + rand(-s.spread, s.spread) * 0.5),
+      vx: s.dir * rand(s.speed[0], s.speed[1]) * (0.7 + depth * 0.6),
+      wobPh: rand(0, Math.PI * 2), wobW: rand(0.6, 1.6),
+      flapW: rand(9, 14), flapPh: rand(0, Math.PI * 2),
+      size: (0.55 + depth) * W * 0.0048,
+      tone: 0.55 + depth * 0.45,
+      lead: rand(0, 40),
+    };
+  }
+
+  function buildBats() {
+    bats = [];
+    for (let i = 0; i < CONFIG.bats; i++) bats.push(spawnBat(i % streams.length, true));
+  }
+
+  function stepBats(time, dt) {
+    for (const b of bats) {
+      const s = streams[b.stream];
+      // relax toward the stream's wandering anchor line
+      const anchorY = H * (s.y0 + (fbm1(time * 0.07 + s.ph + b.lead) - 0.5) * 2 * s.spread);
+      b.y += (anchorY - b.y) * 0.4 * dt + Math.sin(time * b.wobW + b.wobPh) * 14 * dt;
+      b.x += b.vx * dt;
+      if (s.dir === 1 && b.x > W * 1.06) Object.assign(b, spawnBat(b.stream, false));
+      if (s.dir === -1 && b.x < -W * 0.06) Object.assign(b, spawnBat(b.stream, false));
+    }
+  }
+
+  function drawBat(b, time) {
+    const s = b.size;
+    const flap = Math.sin(time * b.flapW + b.flapPh);
+    const lift = flap * 0.9;
+    const y = b.y + flap * s * 0.15;
+    ctx.fillStyle = `rgba(10, 5, 12, ${b.tone})`;
+    // left wing
+    ctx.beginPath();
+    ctx.moveTo(b.x, y);
+    ctx.quadraticCurveTo(b.x - s * 0.8, y - s * (0.5 + lift * 0.9), b.x - s * 1.9, y - s * lift);
+    // scalloped trailing edge back to the body
+    ctx.quadraticCurveTo(b.x - s * 1.45, y + s * (0.28 - lift * 0.2), b.x - s * 1.1, y + s * (0.18 - lift * 0.12));
+    ctx.quadraticCurveTo(b.x - s * 0.7, y + s * (0.34 - lift * 0.18), b.x, y + s * 0.16);
+    // right wing mirrored
+    ctx.quadraticCurveTo(b.x + s * 0.7, y + s * (0.34 - lift * 0.18), b.x + s * 1.1, y + s * (0.18 - lift * 0.12));
+    ctx.quadraticCurveTo(b.x + s * 1.45, y + s * (0.28 - lift * 0.2), b.x + s * 1.9, y - s * lift);
+    ctx.quadraticCurveTo(b.x + s * 0.8, y - s * (0.5 + lift * 0.9), b.x, y);
+    ctx.fill();
+    // ears
+    ctx.beginPath();
+    ctx.moveTo(b.x - s * 0.12, y - s * 0.05);
+    ctx.lineTo(b.x - s * 0.2, y - s * 0.32);
+    ctx.lineTo(b.x - s * 0.02, y - s * 0.12);
+    ctx.lineTo(b.x + s * 0.02, y - s * 0.12);
+    ctx.lineTo(b.x + s * 0.2, y - s * 0.32);
+    ctx.lineTo(b.x + s * 0.12, y - s * 0.05);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // -------------------- fog strip --------------------
+  function drawHorizonFog(time) {
+    ctx.save();
+    for (let i = 0; i < 2; i++) {
+      const y = H * (0.735 + i * 0.045);
+      const off = ((time * (10 + i * 7)) % (W * 1.6));
+      const g = ctx.createLinearGradient(0, y - H * 0.035, 0, y + H * 0.06);
+      g.addColorStop(0, 'rgba(120, 70, 70, 0)');
+      g.addColorStop(0.5, `rgba(150, 90, 82, ${0.13 - i * 0.04})`);
+      g.addColorStop(1, 'rgba(120, 70, 70, 0)');
+      ctx.fillStyle = g;
+      const bw = W * 0.8;
+      const bx = -((off % (bw * 2)) - bw);
+      ctx.fillRect(bx - W * 0.1, y - H * 0.035, bw * 2, H * 0.1);
+      ctx.fillRect(bx - W * 0.1 - bw * 2, y - H * 0.035, bw * 2, H * 0.1);
+    }
+    ctx.restore();
+  }
+
+  // -------------------- resize / build --------------------
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    U = W / 1600;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    paintSky();
+    paintTrees();
+    paintGround();
+
+    cloudA = makeCloudSheet(Math.ceil(W * 1.4), Math.ceil(H * 0.26), '30, 16, 26', 26);
+    cloudB = makeCloudSheet(Math.ceil(W * 1.4), Math.ceil(H * 0.16), '20, 10, 18', 20);
+    buildCloudBars();
+
+    buildBats();
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  // -------------------- loop --------------------
+  let last = performance.now();
+  let ready = false;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    ctx.drawImage(skyLayer, 0, 0, W, H);
+
+    // cloud bands shear across the moon
+    const gust = 1 + 0.4 * Math.sin(time * 0.1);
+    cloudAx -= CONFIG.cloudSpeed * gust * dt;
+    cloudBx -= CONFIG.cloudSpeed * 1.7 * gust * dt;
+    const wA = cloudA.width, wB = cloudB.width;
+    let x = ((cloudAx % wA) + wA) % wA - wA;
+    ctx.globalAlpha = 0.5;
+    while (x < W) { ctx.drawImage(cloudA, x, H * 0.30); x += wA; }
+    x = ((cloudBx % wB) + wB) % wB - wB;
+    ctx.globalAlpha = 0.5;
+    while (x < W) { ctx.drawImage(cloudB, x, H * 0.52); x += wB; }
+    ctx.globalAlpha = 1;
+    for (const cb of cloudBars) {
+      cb.x -= cb.sp * gust * dt;
+      const cw = cb.img.width;
+      if (cb.x < -cw) cb.x = W + rand(0, W * 0.5);
+      ctx.drawImage(cb.img, cb.x, cb.y - cb.img.height / 2);
+    }
+
+    ctx.drawImage(treeFar, 0, 0, W, H);
+    drawHorizonFog(time);
+    ctx.drawImage(treeNear, 0, 0, W, H);
+    ctx.drawImage(groundLayer, 0, 0, W, H);
+
+    stepBats(time, dt);
+    for (const b of bats) drawBat(b, time);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

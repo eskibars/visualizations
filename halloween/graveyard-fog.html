@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Graveyard Fog</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #060913; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 126% 100% at 46% 40%,
+        rgba(0,0,0,0) 40%, rgba(0,0,0,.36) 82%, rgba(0,0,0,.8) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(186, 214, 205, .27);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">the ground remembers</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  GRAVEYARD FOG — old stones on a rising slope, and the fog
+  //  that owns them. Three fog banks slide between the rows, so
+  //  the graves separate into depth and their bases drown; the
+  //  will-o'-wisps wander above it all on noise paths, trailing
+  //  motes, guttering out and re-igniting somewhere nearby.
+  //
+  //  Construction notes
+  //  ------------------
+  //  The sky, moon, ruined abbey and each tombstone row are
+  //  painted once per resize into offscreen layers; the frame is
+  //  five blits, the fog sprite field and the wisps. Fog is just
+  //  soft sprites whose density follows the same value noise the
+  //  wisps navigate by, which is what makes the banks look like
+  //  they billow rather than slide. All glow is one prerendered
+  //  sprite scaled per draw — no per-frame gradients.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1.6,
+
+    moon: { x: 0.235, y: 0.205, r: 0.043 },
+
+    rows: [
+      { crest: 0.585, tint: '#0e1626', stones: 12, s: [0.012, 0.020] },  // far (up the hill)
+      { crest: 0.735, tint: '#0a111e', stones: 9,  s: [0.022, 0.036] },  // mid
+      { crest: 0.905, tint: '#070c16', stones: 7,  s: [0.048, 0.078] },  // near
+    ],
+
+    fogBands: [
+      { y: 0.665, drift: 5,  alpha: 0.30, scale: [0.16, 0.34], blobs: 16 }, // between far & mid
+      { y: 0.815, drift: 9,  alpha: 0.28, scale: [0.22, 0.44], blobs: 15 }, // between mid & near
+      { y: 0.97,  drift: 14, alpha: 0.52, scale: [0.30, 0.58], blobs: 14 }, // front bank
+    ],
+
+    wisps: 5,
+    motePool: 70,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  // -------------------- value noise --------------------
+  function noise1(x) {
+    const i = Math.floor(x), f = x - i;
+    const h = (n) => {
+      const s = Math.sin(n * 127.1 + 311.7) * 43758.5453;
+      return s - Math.floor(s);
+    };
+    const u = f * f * f * (f * (f * 6 - 15) + 10);
+    return h(i) * (1 - u) + h(i + 1) * u;
+  }
+  const fbm1 = (x) => 0.6 * noise1(x) + 0.4 * noise1(x * 2.13 + 7.7);
+
+  // -------------------- sprites --------------------
+  function makeGlow(r, g, b) {
+    const s = 128, c = document.createElement('canvas');
+    c.width = c.height = s;
+    const g2 = c.getContext('2d');
+    const grad = g2.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    grad.addColorStop(0, `rgba(${r},${g},${b},1)`);
+    grad.addColorStop(0.25, `rgba(${r},${g},${b},.55)`);
+    grad.addColorStop(0.6, `rgba(${r},${g},${b},.16)`);
+    grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    g2.fillStyle = grad;
+    g2.fillRect(0, 0, s, s);
+    return c;
+  }
+  const glowWisp = makeGlow(168, 255, 208);
+  const glowWispWarm = makeGlow(255, 196, 120);
+  const glowMote = makeGlow(190, 255, 220);
+  const glowFog = makeGlow(138, 158, 186);
+
+  function stamp(sprite, x, y, size, alpha) {
+    if (alpha <= 0.004) return;
+    ctx.globalAlpha = Math.min(1, alpha);
+    ctx.drawImage(sprite, x - size / 2, y - size / 2, size, size);
+    ctx.globalAlpha = 1;
+  }
+
+  // -------------------- crest curves --------------------
+  function makeCrest(crestF, seed) {
+    return (x) => {
+      const t = x / W;
+      return H * crestF
+        + Math.sin(t * Math.PI * 1.5 + seed) * H * 0.012
+        + Math.sin(t * Math.PI * 3.1 + seed * 2.3) * H * 0.006;
+    };
+  }
+
+  // -------------------- tombstones --------------------
+  //  kind: 0 slab, 1 cross, 2 obelisk, 3 broken slab, 4 celtic cross
+  function drawStone(g, x, baseY, h, kind, tilt) {
+    g.save();
+    g.translate(x, baseY);
+    g.rotate(tilt);
+    const w = h * (kind === 2 ? 0.34 : 0.6);
+
+    // base shadow
+    g.fillStyle = 'rgba(0,0,0,.45)';
+    g.beginPath();
+    g.ellipse(0, 1, w * 0.95, h * 0.05, 0, 0, Math.PI * 2);
+    g.fill();
+
+    g.fillStyle = '#101828';
+    g.strokeStyle = 'rgba(170, 192, 228, .30)';   // moonlit rim
+    g.lineWidth = Math.max(1, h * 0.02);
+
+    if (kind === 0 || kind === 3) {          // slab (maybe broken)
+      g.beginPath();
+      g.moveTo(-w / 2, 0);
+      g.lineTo(-w / 2, -h * 0.78);
+      if (kind === 0) {
+        g.arc(0, -h * 0.78, w / 2, Math.PI, 0);
+      } else {
+        g.lineTo(-w * 0.18, -h * 0.92);      // jagged break
+        g.lineTo(w * 0.05, -h * 0.80);
+        g.lineTo(w * 0.22, -h * 0.88);
+        g.lineTo(w / 2, -h * 0.74);
+      }
+      g.lineTo(w / 2, 0);
+      g.closePath();
+      g.fill(); g.stroke();
+      // engraved lines
+      g.strokeStyle = 'rgba(6, 10, 20, .55)';
+      g.lineWidth = Math.max(1, h * 0.014);
+      for (let i = 1; i <= 3; i++) {
+        const yy = -h * (0.24 + i * 0.13);
+        g.beginPath(); g.moveTo(-w * 0.3, yy); g.lineTo(w * 0.3, yy); g.stroke();
+      }
+    } else if (kind === 1) {                 // latin cross on plinth
+      const bw = w * 0.42;
+      g.fillStyle = '#0e1626';
+      g.fillRect(-w * 0.42, -h * 0.16, w * 0.84, h * 0.16);   // plinth
+      g.fillRect(-bw / 2, -h * 0.9, bw, h * 0.76);            // shaft
+      g.fillRect(-w * 0.3, -h * 0.68, w * 0.6, bw);           // arm
+      g.strokeStyle = 'rgba(170, 192, 228, .22)';
+      g.strokeRect(-bw / 2, -h * 0.9, bw, h * 0.76);
+    } else if (kind === 2) {                 // obelisk
+      g.beginPath();
+      g.moveTo(-w / 2, 0);
+      g.lineTo(-w * 0.32, -h * 0.86);
+      g.lineTo(0, -h);
+      g.lineTo(w * 0.32, -h * 0.86);
+      g.lineTo(w / 2, 0);
+      g.closePath();
+      g.fill(); g.stroke();
+    } else {                                 // celtic cross
+      const bw = w * 0.3;
+      g.beginPath();
+      g.arc(0, -h * 0.72, w * 0.3, 0, Math.PI * 2);
+      g.fill(); g.stroke();
+      g.fillStyle = '#0e1626';
+      g.fillRect(-bw / 2, -h * 0.92, bw, h * 0.9);
+      g.fillRect(-w * 0.42, -h * 0.66, w * 0.84, bw);
+      // ring hole punched back
+      g.save();
+      g.globalCompositeOperation = 'destination-out';
+      g.beginPath();
+      g.arc(0, -h * 0.72, w * 0.12, 0, Math.PI * 2);
+      g.fill();
+      g.restore();
+    }
+    g.restore();
+  }
+
+  // -------------------- scene layers --------------------
+  let skyLayer;
+  const rowLayers = [];
+  let rowCrests = [];
+
+  function paintSky(crestFar) {
+    skyLayer = document.createElement('canvas');
+    skyLayer.width = Math.floor(W * DPR); skyLayer.height = Math.floor(H * DPR);
+    const g = skyLayer.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    const grad = g.createLinearGradient(0, 0, 0, H * 0.62);
+    grad.addColorStop(0, '#050813');
+    grad.addColorStop(0.55, '#0a1122');
+    grad.addColorStop(0.85, '#152138');
+    grad.addColorStop(1, '#1e2d45');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, W, H);
+
+    // stars
+    for (let i = 0; i < 170; i++) {
+      const y = Math.pow(Math.random(), 1.5) * H * 0.52;
+      const x = Math.random() * W;
+      const a = rand(0.1, 0.6) * (1 - y / (H * 0.65));
+      g.fillStyle = `rgba(214, 226, 255, ${a})`;
+      g.fillRect(x, y, Math.random() < 0.1 ? 1.6 * U : 1 * U, 1 * U);
+    }
+
+    // moon: cool, small, high; heavy halo reading through haze
+    const mx = W * CONFIG.moon.x, my = H * CONFIG.moon.y, mr = W * CONFIG.moon.r;
+    const halo = g.createRadialGradient(mx, my, mr * 0.5, mx, my, mr * 4.0);
+    halo.addColorStop(0, 'rgba(205, 220, 250, .26)');
+    halo.addColorStop(0.4, 'rgba(195, 212, 245, .09)');
+    halo.addColorStop(1, 'rgba(195, 212, 245, 0)');
+    g.fillStyle = halo;
+    g.fillRect(mx - mr * 4.0, my - mr * 4.0, mr * 8, mr * 8);
+
+    g.fillStyle = '#e8edf8';
+    g.beginPath(); g.arc(mx, my, mr, 0, Math.PI * 2); g.fill();
+    g.save();
+    g.beginPath(); g.arc(mx, my, mr, 0, Math.PI * 2); g.clip();
+    g.fillStyle = 'rgba(150, 164, 196, .28)';
+    g.beginPath(); g.ellipse(mx - mr * 0.25, my - mr * 0.1, mr * 0.3, mr * 0.24, -0.3, 0, Math.PI * 2); g.fill();
+    g.beginPath(); g.ellipse(mx + mr * 0.3, my + mr * 0.22, mr * 0.2, mr * 0.16, 0.4, 0, Math.PI * 2); g.fill();
+    g.beginPath(); g.ellipse(mx + mr * 0.05, my - mr * 0.42, mr * 0.12, mr * 0.1, 0, 0, Math.PI * 2); g.fill();
+    g.restore();
+
+    // ruined abbey on the far crest, right of frame
+    const ax = W * 0.845, ay = crestFar(W * 0.845) + 2;
+    const s = H * 0.00115;
+    g.fillStyle = '#070c16';
+    // nave with broken gable
+    g.beginPath();
+    g.moveTo(ax - 60 * s, ay);
+    g.lineTo(ax - 60 * s, ay - 88 * s);
+    g.lineTo(ax - 34 * s, ay - 112 * s);   // broken peak left side
+    g.lineTo(ax - 12 * s, ay - 96 * s);
+    g.lineTo(ax + 8 * s, ay - 104 * s);    // ragged ridge
+    g.lineTo(ax + 40 * s, ay - 110 * s);
+    g.lineTo(ax + 62 * s, ay - 84 * s);
+    g.lineTo(ax + 62 * s, ay);
+    g.closePath(); g.fill();
+    // tower
+    g.fillRect(ax + 66 * s, ay - 132 * s, 30 * s, 132 * s);
+    g.beginPath();       // tower's broken spire
+    g.moveTo(ax + 63 * s, ay - 132 * s);
+    g.lineTo(ax + 78 * s, ay - 152 * s);
+    g.lineTo(ax + 99 * s, ay - 132 * s);
+    g.closePath(); g.fill();
+    // one lit lancet window
+    g.fillStyle = 'rgba(255, 196, 110, .75)';
+    g.beginPath();
+    g.moveTo(ax + 76 * s, ay - 112 * s);
+    g.lineTo(ax + 76 * s, ay - 126 * s);
+    g.arc(ax + 81 * s, ay - 126 * s, 5 * s, Math.PI, 0);
+    g.lineTo(ax + 86 * s, ay - 112 * s);
+    g.closePath(); g.fill();
+    // window halo
+    const wg = g.createRadialGradient(ax + 81 * s, ay - 120 * s, 0, ax + 81 * s, ay - 120 * s, 26 * s);
+    wg.addColorStop(0, 'rgba(255, 190, 105, .18)');
+    wg.addColorStop(1, 'rgba(255, 190, 105, 0)');
+    g.fillStyle = wg;
+    g.fillRect(ax + 55 * s, ay - 146 * s, 52 * s, 52 * s);
+  }
+
+  function paintRow(rowCfg, seed) {
+    const crest = makeCrest(rowCfg.crest, seed);
+    const c = document.createElement('canvas');
+    c.width = Math.floor(W * DPR); c.height = Math.floor(H * DPR);
+    const g = c.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    // ground
+    g.fillStyle = rowCfg.tint;
+    g.beginPath();
+    g.moveTo(-2, H + 2);
+    for (let x = -2; x <= W + 2; x += 8) g.lineTo(x, crest(x));
+    g.lineTo(W + 2, H + 2);
+    g.closePath();
+    g.fill();
+
+    // moonlit crest edge, stronger under the moon
+    const mx = W * CONFIG.moon.x;
+    for (let x = 0; x < W; x += 6) {
+      const k = Math.max(0, 1 - Math.abs(x - mx) / (W * 0.8));
+      g.strokeStyle = `rgba(170, 192, 228, ${0.04 + 0.09 * k})`;
+      g.lineWidth = 1.2 * U;
+      g.beginPath();
+      g.moveTo(x, crest(x)); g.lineTo(x + 6, crest(x + 6));
+      g.stroke();
+    }
+
+    // stones at jittered slots
+    const n = rowCfg.stones;
+    for (let i = 0; i < n; i++) {
+      const t = (i + rand(0.1, 0.9)) / n;
+      const x = t * W;
+      const h = rand(rowCfg.s[0], rowCfg.s[1]) * W;
+      const kind = Math.random() < 0.55 ? 0 : (Math.random() < 0.5 ? 1 : (Math.random() < 0.5 ? 2 : (Math.random() < 0.6 ? 3 : 4)));
+      drawStone(g, x, crest(x) + h * rand(0.1, 0.3), h, kind, rand(-0.07, 0.07));
+    }
+    return { canvas: c, crest };
+  }
+
+  // dead tree veiling in the mid row: a short gnarled trunk that
+  // forks into several named main boughs, each recursively jointed
+  function paintDeadTree(g, x, groundY) {
+    g.strokeStyle = '#0a0f1c';
+    g.lineCap = 'round';
+    function seg(px, py, len, ang, w) {
+      const bend = rand(-0.07, 0.07);
+      const na = ang + bend;
+      const nx = px + Math.cos(na) * len;
+      const ny = py + Math.sin(na) * len;
+      g.lineWidth = w;
+      g.beginPath();
+      g.moveTo(px, py);
+      g.quadraticCurveTo(
+        px + Math.cos(ang + bend * 0.3) * len * 0.55 + Math.sin(bend * 4) * len * 0.05,
+        py + Math.sin(ang + bend * 0.3) * len * 0.55,
+        nx, ny);
+      g.stroke();
+      return [nx, ny, na];
+    }
+    function bough(px, py, len, ang, w, depth) {
+      if (depth === 0 || len < 4) return;
+      const [nx, ny, na] = seg(px, py, len, ang, w);
+      bough(nx, ny, len * rand(0.68, 0.8), na + rand(-0.14, 0.14), w * 0.62, depth - 1);
+      if (depth >= 2) {
+        bough(nx, ny, len * rand(0.45, 0.6),
+              na + (Math.random() < 0.5 ? -1 : 1) * rand(0.6, 0.95), w * 0.5, depth - 2);
+      } else {
+        // end claw: two short twigs
+        bough(nx, ny, len * 0.4, na - 0.5, w * 0.4, 0);
+        bough(nx, ny, len * 0.4, na + 0.55, w * 0.4, 0);
+      }
+    }
+    // trunk: two segments up, then the crown
+    const [tx, ty, ta] = seg(x, groundY, H * 0.072, -Math.PI / 2 + 0.05, W * 0.009);
+    const [cx, cy] = seg(tx, ty, H * 0.042, ta - 0.02, W * 0.006);
+    for (const a of [-2.5, -1.85, -1.1, -Math.PI / 2 + 0.06]) {
+      bough(cx, cy, H * rand(0.048, 0.07), a, W * 0.0042, 3);
+    }
+  }
+
+  // -------------------- fog --------------------
+  let fog = [];
+  function buildFog() {
+    fog = [];
+    for (const band of CONFIG.fogBands) {
+      // blobs cluster into a few banks, leaving real gaps between them
+      const clusters = [];
+      const nClusters = 4;
+      for (let c = 0; c < nClusters; c++) clusters.push(rand(0, 1.2));
+      const blobs = [];
+      for (let i = 0; i < band.blobs; i++) {
+        const cx = clusters[i % nClusters];
+        blobs.push({
+          x: (cx + rand(-0.09, 0.09) + 1.2) % 1.2,
+          yOff: rand(-0.02, 0.03),
+          s: rand(band.scale[0], band.scale[1]),
+          ph: rand(0, Math.PI * 2), sp: rand(0.5, 1.3),
+          v: rand(0.7, 1.5),
+        });
+      }
+      fog.push({ band, blobs });
+    }
+  }
+  // slow surge: the whole fog breathes over ~a minute
+  function fogSurge(time) {
+    return 0.92 + 0.16 * (0.5 + 0.5 * Math.sin(time * 0.11 + Math.sin(time * 0.031) * 1.7));
+  }
+  function stepFog(dt) {
+    for (const { band, blobs } of fog) {
+      for (const o of blobs) {
+        o.x += (band.drift / W) * dt * o.v;
+        if (o.x > 1.2) o.x -= 1.4;
+      }
+    }
+  }
+  function drawFogBand(i, time) {
+    const surge = fogSurge(time);
+    const { band, blobs } = fog[i];
+    for (const o of blobs) {
+      const y = H * band.y + o.yOff * H + Math.sin(time * 0.18 * o.sp + o.ph) * H * 0.014;
+      const dens = 0.45 + 0.55 * fbm1(o.x * 4.2 + i * 9.1 + time * 0.043 * o.sp + o.ph);
+      stamp(glowFog, o.x * W, y, o.s * W, band.alpha * dens * surge);
+    }
+  }
+
+  // -------------------- wisps --------------------
+  let wisps = [], motes = [];
+  function makeWisp(i) {
+    return {
+      x: rand(0.08, 0.92) * W,
+      y: rand(0.58, 0.9) * H,
+      ph: rand(0, Math.PI * 2),
+      sp: rand(0.16, 0.34),
+      warm: i === 0,                    // one amber wisp among the cold ones
+      life: 1, state: 'roam', t: rand(0, 20),
+      roamDur: rand(10, 26),
+      size: rand(0.030, 0.05),
+    };
+  }
+  function buildWisps() {
+    wisps = [];
+    for (let i = 0; i < CONFIG.wisps; i++) wisps.push(makeWisp(i));
+    motes = [];
+    for (let i = 0; i < CONFIG.motePool; i++) motes.push({ x: 0, y: 0, vx: 0, vy: 0, life: 0, max: 1, warm: false });
+  }
+  function spawnMote(x, y, warm) {
+    for (const m of motes) {
+      if (m.life <= 0) {
+        m.x = x + rand(-4, 4); m.y = y + rand(-4, 4);
+        m.vx = rand(-9, 9); m.vy = rand(-16, -4);
+        m.life = m.max = rand(1.2, 2.6);
+        m.warm = warm;
+        return;
+      }
+    }
+  }
+  const GUTTER_DUR = 1.5, KINDLE_DUR = 2.4;
+  function drawWisps(time, dt) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (const w of wisps) {
+      w.t += dt;
+      // drift along noise, sag and rise gently, soft-clamped to
+      // the field so none wander off into the sky or off-frame
+      const nx = fbm1(time * w.sp + w.ph) - 0.5;
+      const ny = fbm1(time * w.sp * 0.8 + w.ph + 31.7) - 0.5;
+      w.x += nx * 34 * dt + 6 * dt;
+      w.y += ny * 22 * dt + Math.sin(time * 0.9 + w.ph) * 7 * dt;
+      w.x = Math.min(W * 0.96, Math.max(W * 0.04, w.x));
+      w.y = Math.min(H * 0.93, Math.max(H * 0.52, w.y));
+
+      if (w.state === 'roam') {
+        w.life = 1;
+        if (w.t >= w.roamDur) { w.state = 'gutter'; w.t = 0; }
+      } else if (w.state === 'gutter') {
+        w.life = Math.max(0, 1 - w.t / GUTTER_DUR);
+        if (w.t >= GUTTER_DUR * 0.5 && !w.moved) {
+          // re-ignite somewhere nearby
+          w.x = Math.min(0.97, Math.max(0.03, w.x + rand(-0.12, 0.12) * W));
+          w.y = Math.min(0.95, Math.max(0.42, w.y + rand(-0.1, 0.05) * H));
+          w.moved = true;
+        }
+        if (w.t >= GUTTER_DUR) { w.state = 'kindle'; w.t = 0; w.moved = false; }
+      } else { // kindle
+        w.life = Math.min(1, w.t / KINDLE_DUR);
+        if (w.t >= KINDLE_DUR) { w.state = 'roam'; w.t = 0; w.roamDur = rand(10, 26); }
+      }
+
+      const flick = 0.82 + 0.18 * fbm1(time * 7 + w.ph * 5);
+      const a = w.life * flick;
+      if (a > 0.02) {
+        const spr = w.warm ? glowWispWarm : glowWisp;
+        const sz = w.size * W * (0.8 + 0.25 * flick);
+        // teardrop flame: tall wobbling ellipse inside a wide halo
+        stamp(spr, w.x, w.y, sz * 3.6, 0.42 * a);
+        ctx.save();
+        ctx.translate(w.x, w.y);
+        const lean = (fbm1(time * 2.4 + w.ph * 9) - 0.5) * 0.5;
+        ctx.rotate(lean);
+        stamp(spr, 0, 0, sz * 1.15, 0.9 * a);
+        ctx.scale(0.55, 1);
+        stamp(spr, 0, -sz * 0.04, sz * 0.8, a);
+        ctx.restore();
+        // hot core
+        ctx.fillStyle = w.warm ? `rgba(255, 235, 200, ${0.9 * a})` : `rgba(232, 255, 242, ${0.9 * a})`;
+        ctx.beginPath();
+        ctx.ellipse(w.x, w.y - sz * 0.02, Math.max(1, sz * 0.05), Math.max(1.6, sz * 0.1), 0, 0, Math.PI * 2);
+        ctx.fill();
+        // shed motes
+        if (Math.random() < 0.35 * a) spawnMote(w.x, w.y, w.warm);
+      }
+    }
+    ctx.restore();
+
+    // motes
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (const m of motes) {
+      if (m.life <= 0) continue;
+      m.life -= dt;
+      m.x += m.vx * dt; m.y += m.vy * dt;
+      m.vy -= 6 * dt;                    // they drift upward
+      const a = Math.max(0, m.life / m.max) * 0.5;
+      stamp(m.warm ? glowWispWarm : glowMote, m.x, m.y, 8 * U + 10 * U * a, a);
+    }
+    ctx.restore();
+  }
+
+  // -------------------- twinkles --------------------
+  function drawTwinkles(time) {
+    for (let i = 0; i < 8; i++) {
+      const sx = ((i * 211.3) % 1) * W;
+      const sy = (0.03 + ((i * 67.7) % 1) * 0.4) * H;
+      const a = 0.2 + 0.28 * (0.5 + 0.5 * Math.sin(time * (0.6 + (i % 4) * 0.27) + i * 2.3));
+      ctx.fillStyle = `rgba(222, 232, 255, ${a})`;
+      ctx.fillRect(sx, sy, 1.5 * U, 1.5 * U);
+    }
+  }
+
+  // -------------------- resize / build --------------------
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    U = W / 1600;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    rowLayers.length = 0;
+    rowCrests = [];
+
+    // far row first so the sky can sit the abbey on its crest
+    const farCrest = makeCrest(CONFIG.rows[0].crest, 2.4);
+    paintSky(farCrest);
+
+    for (let i = 0; i < CONFIG.rows.length; i++) {
+      const layer = paintRow(CONFIG.rows[i], 2.4 + i * 3.1);
+      rowLayers.push(layer);
+      rowCrests.push(layer.crest);
+    }
+
+    // dead tree rooted in the mid row, left of centre
+    const midG = rowLayers[1].canvas.getContext('2d');
+    midG.setTransform(DPR, 0, 0, DPR, 0, 0);
+    paintDeadTree(midG, W * 0.13, rowCrests[1](W * 0.13) + H * 0.02);
+
+    buildFog();
+    buildWisps();
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  // -------------------- loop --------------------
+  let last = performance.now();
+  let ready = false;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    ctx.drawImage(skyLayer, 0, 0, W, H);
+    drawTwinkles(time);
+
+    ctx.drawImage(rowLayers[0].canvas, 0, 0, W, H);
+    drawFogBand(0, time);
+    ctx.drawImage(rowLayers[1].canvas, 0, 0, W, H);
+    drawFogBand(1, time);
+    ctx.drawImage(rowLayers[2].canvas, 0, 0, W, H);
+    drawFogBand(2, time);
+
+    drawWisps(time, dt);
+
+    stepFog(dt);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,636 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>The Cauldron</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #05080f; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 124% 100% at 44% 48%,
+        rgba(0,0,0,0) 38%, rgba(0,0,0,.4) 82%, rgba(0,0,0,.82) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(178, 232, 190, .27);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">double, double</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  THE CAULDRON — something is brewing in a moonlit clearing.
+  //  The pot sits on coals: flames lick up around its belly,
+  //  sparks ride the heat, the brew glows and swells and pops,
+  //  and its vapor climbs and unwinds into the night. Every
+  //  little while the whole pot burps — a fat bubble, a green
+  //  pulse across the clearing, a fresh plume. Something small
+  //  watches from the brush.
+  //
+  //  Construction notes
+  //  ------------------
+  //  The pot, stones, trees and sky are painted once per resize;
+  //  everything that lives — flames, bubbles, vapor, sparks — is
+  //  a small pooled particle system stamped from prerendered
+  //  sprites. The vapor wanders on the same value noise the fog
+  //  in the other pieces uses; the burp is just an envelope that
+  //  briefly raises bubble size, spawn rate and a scene-wide
+  //  green wash.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1.6,
+
+    pot: { x: 0.44, y: 0.68, r: 0.105 },   // centre of belly, fraction of W/W/W
+    groundY: 0.80,
+
+    vapor: 64,
+    bubbles: 11,
+    sparks: 9,
+    flames: 6,
+    grass: 26,
+
+    burpGap: [22, 40],
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  function noise1(x) {
+    const i = Math.floor(x), f = x - i;
+    const h = (n) => {
+      const s = Math.sin(n * 127.1 + 311.7) * 43758.5453;
+      return s - Math.floor(s);
+    };
+    const u = f * f * f * (f * (f * 6 - 15) + 10);
+    return h(i) * (1 - u) + h(i + 1) * u;
+  }
+  const fbm1 = (x) => 0.6 * noise1(x) + 0.4 * noise1(x * 2.13 + 7.7);
+
+  // -------------------- sprites --------------------
+  function makeGlow(r, g, b) {
+    const s = 128, c = document.createElement('canvas');
+    c.width = c.height = s;
+    const g2 = c.getContext('2d');
+    const grad = g2.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    grad.addColorStop(0, `rgba(${r},${g},${b},1)`);
+    grad.addColorStop(0.25, `rgba(${r},${g},${b},.55)`);
+    grad.addColorStop(0.6, `rgba(${r},${g},${b},.16)`);
+    grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    g2.fillStyle = grad;
+    g2.fillRect(0, 0, s, s);
+    return c;
+  }
+  const glowFire = makeGlow(255, 140, 52);
+  const glowEmber = makeGlow(255, 190, 90);
+  const glowBrew = makeGlow(122, 255, 160);
+  const glowVapor = makeGlow(142, 196, 178);
+  const glowEyes = makeGlow(255, 208, 120);
+
+  function stamp(sprite, x, y, size, alpha) {
+    if (alpha <= 0.004) return;
+    ctx.globalAlpha = Math.min(1, alpha);
+    ctx.drawImage(sprite, x - size / 2, y - size / 2, size, size);
+    ctx.globalAlpha = 1;
+  }
+
+  // -------------------- geometry helpers --------------------
+  let px, py, pr, rimY, rimRx, rimRy, groundY;
+  function layout() {
+    px = W * CONFIG.pot.x;
+    py = H * CONFIG.pot.y;
+    pr = W * CONFIG.pot.r;
+    rimY = py - pr * 0.72;
+    rimRx = pr * 0.78;
+    rimRy = pr * 0.24;
+    groundY = H * CONFIG.groundY;
+  }
+
+  // -------------------- static scenery --------------------
+  let skyLayer, potLayer, grassLayer;
+
+  function paintSky() {
+    skyLayer = document.createElement('canvas');
+    skyLayer.width = Math.floor(W * DPR); skyLayer.height = Math.floor(H * DPR);
+    const g = skyLayer.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    const grad = g.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, '#04060d');
+    grad.addColorStop(0.55, '#081020');
+    grad.addColorStop(0.82, '#0d1a2c');
+    grad.addColorStop(1, '#0a1420');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, W, H);
+
+    // stars
+    for (let i = 0; i < 130; i++) {
+      const y = Math.pow(Math.random(), 1.5) * H * 0.55;
+      g.fillStyle = `rgba(210, 225, 250, ${rand(0.08, 0.5)})`;
+      g.fillRect(Math.random() * W, y, Math.random() < 0.1 ? 1.6 * U : 1 * U, 1 * U);
+    }
+
+    // cool moon glow, upper right, behind trees
+    const mx = W * 0.8, my = H * 0.18;
+    const halo = g.createRadialGradient(mx, my, 0, mx, my, W * 0.3);
+    halo.addColorStop(0, 'rgba(190, 210, 240, .2)');
+    halo.addColorStop(0.5, 'rgba(180, 200, 235, .07)');
+    halo.addColorStop(1, 'rgba(180, 200, 235, 0)');
+    g.fillStyle = halo;
+    g.fillRect(mx - W * 0.3, my - W * 0.3, W * 0.6, W * 0.6);
+
+    // treeline
+    g.fillStyle = '#050a12';
+    g.beginPath();
+    g.moveTo(-2, groundY + 2);
+    for (let x = 0; x <= W; x += 7) {
+      const t = x / W;
+      const y = groundY - H * 0.06
+        - Math.abs(Math.sin(t * 8 + 1.2)) * H * 0.05
+        - Math.abs(Math.sin(t * 21.7 + 3.1)) * H * 0.02
+        - noise1(t * 6 + 9) * H * 0.04;
+      g.lineTo(x, y);
+    }
+    g.lineTo(W + 2, groundY + 2);
+    g.closePath();
+    g.fill();
+
+    // ground
+    const gr = g.createLinearGradient(0, groundY - H * 0.05, 0, H);
+    gr.addColorStop(0, '#0b1220');
+    gr.addColorStop(1, '#060a12');
+    g.fillStyle = gr;
+    g.fillRect(0, groundY - H * 0.06, W, H);
+
+    // stones around the fire
+    for (let i = 0; i < 9; i++) {
+      const sx = px + rand(-pr * 1.7, pr * 1.7);
+      const sy = groundY + rand(0, H * 0.03);
+      const sw = rand(0.02, 0.05) * W;
+      g.fillStyle = `rgb(${(18 + rand(-4, 6)) | 0}, ${(22 + rand(-4, 6)) | 0}, ${(32 + rand(-4, 6)) | 0})`;
+      g.beginPath();
+      g.ellipse(sx, sy, sw, sw * rand(0.45, 0.62), rand(-0.2, 0.2), 0, Math.PI * 2);
+      g.fill();
+    }
+  }
+
+  function paintPot() {
+    potLayer = document.createElement('canvas');
+    potLayer.width = Math.floor(W * DPR); potLayer.height = Math.floor(H * DPR);
+    const g = potLayer.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    // legs
+    g.strokeStyle = '#0a0f18';
+    g.lineCap = 'round';
+    g.lineWidth = pr * 0.09;
+    for (const dx of [-0.62, 0, 0.62]) {
+      g.beginPath();
+      g.moveTo(px + dx * pr * 0.7, py + pr * 0.5);
+      g.quadraticCurveTo(px + dx * pr * 0.85, py + pr * 0.85, px + dx * pr * 0.9, py + pr * 1.06);
+      g.stroke();
+    }
+
+    // belly: iron with a subtle vertical sheen
+    const belly = g.createLinearGradient(px - pr, py - pr, px + pr, py + pr);
+    belly.addColorStop(0, '#141c28');
+    belly.addColorStop(0.5, '#1b2532');
+    belly.addColorStop(1, '#0d141e');
+    g.fillStyle = belly;
+    g.beginPath();
+    g.ellipse(px, py, pr, pr * 0.86, 0, 0, Math.PI * 2);
+    g.fill();
+
+    // rim: outer lip and the cavity below the brew line
+    g.fillStyle = '#101823';
+    g.beginPath();
+    g.ellipse(px, rimY, rimRx * 1.08, rimRy * 1.25, 0, 0, Math.PI * 2);
+    g.fill();
+    g.fillStyle = '#070c13';
+    g.beginPath();
+    g.ellipse(px, rimY + pr * 0.03, rimRx * 0.98, rimRy * 1.05, 0, 0, Math.PI * 2);
+    g.fill();
+
+    // faint rim highlight, cool from the moon side
+    g.strokeStyle = 'rgba(168, 195, 230, .2)';
+    g.lineWidth = Math.max(1, pr * 0.02);
+    g.beginPath();
+    g.ellipse(px, rimY, rimRx * 1.08, rimRy * 1.25, 0, Math.PI * 1.05, Math.PI * 1.75);
+    g.stroke();
+  }
+
+  function paintGrass() {
+    grassLayer = document.createElement('canvas');
+    grassLayer.width = Math.floor(W * DPR); grassLayer.height = Math.floor(H * DPR);
+    const g = grassLayer.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+    g.strokeStyle = '#04070c';
+    g.lineCap = 'round';
+    for (let i = 0; i < CONFIG.grass; i++) {
+      const x = Math.random() * W;
+      const y = H * rand(0.92, 1.02);
+      const len = H * rand(0.05, 0.13) * (0.6 + 0.4 * Math.abs(x - px) / (W * 0.5));
+      const lean = rand(-0.3, 0.3) + (x < px ? 0.12 : -0.12);
+      g.lineWidth = Math.max(1, W * 0.0022 * rand(0.7, 1.3));
+      g.beginPath();
+      g.moveTo(x, y + 2);
+      g.quadraticCurveTo(x + lean * len * 0.4, y - len * 0.6, x + lean * len, y - len);
+      g.stroke();
+    }
+  }
+
+  // -------------------- fire --------------------
+  const flames = [];
+  function buildFlames() {
+    flames.length = 0;
+    for (let i = 0; i < CONFIG.flames; i++) {
+      flames.push({
+        dx: (Math.random() < 0.5 ? -1 : 1) * rand(pr * 0.5, pr * 0.92),
+        h: pr * rand(0.28, 0.55),
+        w: pr * rand(0.1, 0.2),
+        ph: rand(0, Math.PI * 2), sp: rand(7, 12),
+      });
+    }
+  }
+  function drawFire(time) {
+    const flick = 0.8 + 0.2 * fbm1(time * 3.1) * fbm1(time * 1.7 + 4);
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    // under-glow on the ground and the pot's belly
+    stamp(glowFire, px, groundY + pr * 0.12, pr * 5.2, 0.4 * flick);
+    stamp(glowFire, px, py + pr * 0.6, pr * 2.3, 0.3 * flick);
+    ctx.restore();
+
+    // flames licking up around the belly
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (const f of flames) {
+      const k = 0.65 + 0.35 * Math.sin(time * f.sp + f.ph) * fbm1(time * 2.3 + f.ph);
+      const h = f.h * k;
+      const fx = px + f.dx;
+      const out = Math.sign(f.dx);              // lean away from the pot
+      const baseY = py + pr * (0.8 + 0.12 * Math.abs(f.dx) / pr);
+      const g = ctx.createLinearGradient(fx, baseY, fx + out * h * 0.2, baseY - h);
+      g.addColorStop(0, 'rgba(255, 176, 76, .7)');
+      g.addColorStop(0.55, 'rgba(255, 128, 44, .34)');
+      g.addColorStop(1, 'rgba(255, 96, 34, 0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.moveTo(fx - f.w, baseY);
+      ctx.quadraticCurveTo(fx - f.w * 0.7 + out * h * 0.12, baseY - h * 0.45, fx + out * h * 0.18 + Math.sin(time * 5 + f.ph) * f.w * 0.4, baseY - h);
+      ctx.quadraticCurveTo(fx + f.w * 0.7 + out * h * 0.12, baseY - h * 0.45, fx + f.w, baseY);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // -------------------- sparks --------------------
+  let sparks = [];
+  function buildSparks() {
+    sparks = [];
+    for (let i = 0; i < CONFIG.sparks; i++) sparks.push({ x: 0, y: 0, vx: 0, vy: 0, life: 0, max: 1 });
+  }
+  function stepSparks(time, dt) {
+    for (const s of sparks) {
+      if (s.life <= 0 && Math.random() < 0.012) {
+        s.x = px + rand(-pr * 0.7, pr * 0.7);
+        s.y = py + pr * 0.8;
+        s.vx = rand(-14, 14);
+        s.vy = -rand(50, 130);
+        s.life = s.max = rand(0.9, 1.9);
+      }
+      if (s.life > 0) {
+        s.life -= dt;
+        s.vy += 42 * dt;
+        s.vx += (fbm1(time * 1.2 + s.y * 0.01) - 0.5) * 40 * dt;
+        s.x += s.vx * dt; s.y += s.vy * dt;
+      }
+    }
+  }
+  function drawSparks() {
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (const s of sparks) {
+      if (s.life <= 0) continue;
+      const a = Math.min(1, s.life / s.max * 1.6);
+      const flick = 0.6 + 0.4 * Math.sin(s.life * 31);
+      stamp(glowEmber, s.x, s.y, 9 * U + 7 * U * a, 0.75 * a * flick);
+      ctx.fillStyle = `rgba(255, 226, 160, ${0.9 * a * flick})`;
+      ctx.fillRect(s.x - U, s.y - U, 2 * U, 2 * U);
+    }
+    ctx.restore();
+  }
+
+  // -------------------- brew --------------------
+  let bubbles = [];
+  function buildBubbles() {
+    bubbles = [];
+    for (let i = 0; i < CONFIG.bubbles; i++) bubbles.push(newBubble(true));
+  }
+  function newBubble(anywhere) {
+    return {
+      t: anywhere ? rand(0, 1) : 0,
+      dur: rand(1.6, 3.6),
+      dx: rand(-0.72, 0.72),       // across the brew ellipse
+      r0: rand(2, 5) * U,
+      r1: rand(7, 15) * U,
+      ph: rand(0, Math.PI * 2),
+      popped: false,
+    };
+  }
+  let popPulses = [];
+  function drawBrew(time, dt) {
+    const burp = burpEnvelope();
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    // the glowing surface
+    stamp(glowBrew, px, rimY, rimRx * 2.6, 0.30 + 0.1 * burp + 0.05 * Math.sin(time * 0.9));
+    ctx.restore();
+
+    // surface ellipse
+    const sg = ctx.createLinearGradient(px, rimY - rimRy, px, rimY + rimRy);
+    sg.addColorStop(0, `rgba(150, 255, 185, ${0.75 + 0.1 * burp})`);
+    sg.addColorStop(0.55, 'rgba(64, 220, 120, .8)');
+    sg.addColorStop(1, 'rgba(18, 120, 60, .85)');
+    ctx.fillStyle = sg;
+    ctx.beginPath();
+    ctx.ellipse(px, rimY, rimRx * 0.95, rimRy * 0.95, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // shimmer arcs drifting on the surface
+    ctx.strokeStyle = 'rgba(210, 255, 220, .25)';
+    ctx.lineWidth = Math.max(1, U);
+    for (let i = 0; i < 2; i++) {
+      const t = (time * (0.14 + i * 0.08) + i * 3.1) % 1;
+      const ax = px + (t * 2 - 1) * rimRx * 0.55;
+      ctx.beginPath();
+      ctx.ellipse(ax, rimY + rimRy * 0.12, rimRx * 0.2, rimRy * 0.3, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // bubbles
+    for (let i = 0; i < bubbles.length; i++) {
+      const b = bubbles[i];
+      b.t += dt / (b.dur * (1 - 0.35 * burp));
+      if (b.t >= 1) {
+        // pop: brief glow + droplets, then a fresh bubble
+        popPulses.push({ x: bx(b), y: rimY - rimRy * 0.3, life: 0.5, max: 0.5, r: b.r1 });
+        for (let d = 0; d < 3; d++) {
+          drops.push({
+            x: bx(b), y: rimY - rimRy * 0.3,
+            vx: rand(-30, 30), vy: -rand(40, 110),
+            life: rand(0.4, 0.8), max: 0.8,
+          });
+        }
+        bubbles[i] = newBubble(false);
+        continue;
+      }
+      const k = b.t;
+      const r = b.r0 + (b.r1 - b.r0) * Math.pow(k, 1.6) * (1 + burp * 0.8);
+      const x = bx(b) + Math.sin(time * 1.3 + b.ph) * 2 * U;
+      const y = rimY + rimRy * 0.15 - k * rimRy * 0.5;
+      // a swelling dome: darker heart, bright meniscus, one glint
+      ctx.fillStyle = `rgba(20, 105, 58, ${0.4 + 0.3 * k})`;
+      ctx.beginPath();
+      ctx.ellipse(x, y, r, r * 0.75, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = `rgba(225, 255, 235, ${0.45 + 0.4 * k})`;
+      ctx.lineWidth = Math.max(1, r * 0.12);
+      ctx.beginPath();
+      ctx.ellipse(x, y, r, r * 0.75, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = `rgba(240, 255, 245, ${0.5 + 0.4 * k})`;
+      ctx.beginPath();
+      ctx.ellipse(x - r * 0.3, y - r * 0.26, r * 0.16, r * 0.1, -0.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // pop pulses
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (let i = popPulses.length - 1; i >= 0; i--) {
+      const p = popPulses[i];
+      p.life -= dt;
+      if (p.life <= 0) { popPulses.splice(i, 1); continue; }
+      const a = p.life / p.max;
+      stamp(glowBrew, p.x, p.y, p.r * 6 * (1.4 - a * 0.4), 0.5 * a);
+    }
+    ctx.restore();
+
+    // droplets from pops
+    ctx.fillStyle = 'rgba(190, 255, 210, .85)';
+    for (let i = drops.length - 1; i >= 0; i--) {
+      const d = drops[i];
+      d.life -= dt;
+      if (d.life <= 0) { drops.splice(i, 1); continue; }
+      d.vy += 320 * dt;
+      d.x += d.vx * dt; d.y += d.vy * dt;
+      const a = Math.min(1, d.life / d.max * 2);
+      ctx.globalAlpha = a;
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, 1.6 * U, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+  }
+  function bx(b) { return px + b.dx * rimRx * 0.8; }
+  let drops = [];
+
+  // -------------------- vapor --------------------
+  let vapor = [];
+  function buildVapor() {
+    vapor = [];
+    for (let i = 0; i < CONFIG.vapor; i++) vapor.push(newVaporPuff(true));
+  }
+  function newVaporPuff(anywhere) {
+    return {
+      x: px + rand(-rimRx * 0.7, rimRx * 0.7),
+      y: anywhere ? rimY - rand(0, H * 0.3) : rimY,
+      r: rand(10, 26) * U,
+      vy: -rand(26, 52) * U * 1.4,
+      ph: rand(0, Math.PI * 2),
+      life: 0, max: rand(4, 7.5),
+    };
+  }
+  function drawVapor(time, dt) {
+    const burp = burpEnvelope();
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (const v of vapor) {
+      v.life += dt;
+      if (v.life >= v.max) { Object.assign(v, newVaporPuff(false)); continue; }
+      const k = v.life / v.max;
+      // curl-ish wander; fresh plumes get the burp's extra lift
+      v.x += (fbm1(time * 0.5 + v.y * 0.004 + v.ph) - 0.5) * 46 * dt + 4 * dt;
+      v.y += v.vy * dt * (1 + burp * 0.5) * (1 - k * 0.35);
+      v.r += 9 * U * dt;
+      // green near the pot, violet-grey as it climbs and cools
+      const a = Math.sin(Math.min(1, k) * Math.PI) * 0.16 * (0.7 + 0.3 * fbm1(time * 0.8 + v.ph));
+      stamp(glowVapor, v.x, v.y, v.r * 2.6, a);
+      if (k < 0.3) stamp(glowBrew, v.x, v.y, v.r * 1.7, 0.1 * (1 - k / 0.3));
+    }
+    ctx.restore();
+  }
+
+  // -------------------- burp --------------------
+  let burpAt = 8, burpT = -1;
+  function burpEnvelope() {
+    if (burpT < 0) return 0;
+    const k = burpT / 2.6;
+    return Math.sin(Math.min(1, k) * Math.PI);
+  }
+  function stepBurp(dt) {
+    if (burpT < 0) {
+      burpAt -= dt;
+      if (burpAt <= 0) burpT = 0;
+    } else {
+      burpT += dt;
+      if (burpT > 2.6) { burpT = -1; burpAt = rand(...CONFIG.burpGap); }
+    }
+  }
+
+  // -------------------- the watcher --------------------
+  const watcher = { blink: 1, next: 6, t: 0, dur: 0.22 };
+  function drawWatcher(time, dt) {
+    watcher.t += dt;
+    watcher.next -= dt;
+    if (watcher.next <= 0) {
+      watcher.t = 0;
+      watcher.next = rand(6, 15);
+      watcher.dur = rand(0.18, 0.3);
+    }
+    const k = watcher.t / watcher.dur;
+    watcher.blink = watcher.t < watcher.dur ? Math.abs(1 - 2 * k) : 1;
+    const a = 0.55 * watcher.blink;
+    if (a <= 0.02) return;
+    const ex = W * 0.845, ey = groundY - H * 0.075;
+    const sep = 7 * U;
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (const side of [-1, 1]) {
+      stamp(glowEyes, ex + side * sep / 2, ey, 26 * U, a * 0.5);
+      ctx.fillStyle = `rgba(255, 236, 190, ${a})`;
+      ctx.beginPath();
+      ctx.arc(ex + side * sep / 2, ey, 1.8 * U, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // -------------------- grass sway --------------------
+  function drawGrassSway(time) {
+    // a few blades redrawn with sway over the static layer
+    ctx.save();
+    ctx.strokeStyle = '#04070c';
+    ctx.lineCap = 'round';
+    for (let i = 0; i < 8; i++) {
+      const x = ((i * 173.3) % 1) * W;
+      const y = H * (0.94 + ((i * 61.7) % 1) * 0.06);
+      const len = H * 0.07;
+      const sway = Math.sin(time * 0.8 + i * 1.7) * 0.08;
+      ctx.lineWidth = Math.max(1, W * 0.0022);
+      ctx.beginPath();
+      ctx.moveTo(x, y + 2);
+      ctx.quadraticCurveTo(x + sway * len * 0.5, y - len * 0.6, x + sway * len, y - len);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // -------------------- resize / build --------------------
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    U = W / 1600;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    layout();
+    paintSky();
+    paintPot();
+    paintGrass();
+    buildFlames();
+    buildBubbles();
+    buildVapor();
+    buildSparks();
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  // -------------------- loop --------------------
+  let last = performance.now();
+  let ready = false;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    ctx.drawImage(skyLayer, 0, 0, W, H);
+    stepBurp(dt);
+
+    drawFire(time);
+    ctx.drawImage(potLayer, 0, 0, W, H);
+
+    // firelight on the pot's belly: a flickering warm arc below
+    const bfl = 0.8 + 0.2 * fbm1(time * 2.9 + 11);
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    ctx.strokeStyle = `rgba(255, 150, 60, ${0.22 * bfl})`;
+    ctx.lineWidth = pr * 0.09;
+    ctx.beginPath();
+    ctx.ellipse(px, py, pr * 0.94, pr * 0.8, 0, Math.PI * 0.18, Math.PI * 0.82);
+    ctx.stroke();
+    stamp(glowFire, px, py + pr * 0.7, pr * 1.4, 0.2 * bfl);
+    ctx.restore();
+    drawBrew(time, dt);
+    drawVapor(time, dt);
+    drawSparks();
+    stepSparks(time, dt);
+    drawWatcher(time, dt);
+
+    // burp wash: a breath of green rolling out over the clearing
+    const burp = burpEnvelope();
+    if (burp > 0.01) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+      const wash = ctx.createRadialGradient(px, py, 0, px, py, W * 0.75);
+      wash.addColorStop(0, `rgba(110, 235, 150, ${0.07 * burp})`);
+      wash.addColorStop(0.5, `rgba(110, 235, 150, ${0.025 * burp})`);
+      wash.addColorStop(1, 'rgba(110, 235, 150, 0)');
+      ctx.fillStyle = wash;
+      ctx.fillRect(0, 0, W, H);
+      ctx.restore();
+    }
+
+    ctx.drawImage(grassLayer, 0, 0, W, H);
+    drawGrassSway(time);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

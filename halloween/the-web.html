@@ -1,0 +1,567 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>The Web</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #04060d; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 122% 100% at 44% 44%,
+        rgba(0,0,0,0) 38%, rgba(0,0,0,.4) 82%, rgba(0,0,0,.82) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(196, 214, 235, .28);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">woven in moonlight</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  THE WEB — an orb web strung across the frame, beaded with
+  //  dew. A slow band of moonlight sweeps the silk every dozen
+  //  seconds and the drops ignite as it crosses them; wind leans
+  //  the whole web and breathes through the spiral; and every
+  //  so often the weaver lets herself down to the hub on a
+  //  single gossamer, sits a while, and hauls back up.
+  //
+  //  Construction notes
+  //  ------------------
+  //  The web is pure geometry rebuilt per resize: spokes from a
+  //  hub to off-frame anchors, a capture spiral whose rings
+  //  widen outward, each segment sagging between joints. Sag,
+  //  sway and the wind lean are all parameters of those curves,
+  //  so the silk flexes rather than slides. Droplets are a
+  //  flat pooled array stamped from two prerendered sprites;
+  //  the light sweep is just a travelling gaussian on their
+  //  brightness, plus one wide soft beam sprite. Nothing glows
+  //  via per-frame gradients.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1.6,
+
+    hub: { x: 0.44, y: 0.45 },       // web centre, fraction of W/H
+    spokes: 12,
+    rings: 13,
+    ringGrow: 1.16,                  // spiral spacing widens outward
+
+    sweepPeriod: 13,                 // seconds per light sweep
+    windScale: 1,
+
+    spider: { minGap: 14, maxGap: 34, descend: [5, 8], idle: [7, 14] },
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  function noise1(x) {
+    const i = Math.floor(x), f = x - i;
+    const h = (n) => {
+      const s = Math.sin(n * 127.1 + 311.7) * 43758.5453;
+      return s - Math.floor(s);
+    };
+    const u = f * f * f * (f * (f * 6 - 15) + 10);
+    return h(i) * (1 - u) + h(i + 1) * u;
+  }
+  const fbm1 = (x) => 0.6 * noise1(x) + 0.4 * noise1(x * 2.13 + 7.7);
+
+  // -------------------- sprites --------------------
+  function makeGlow(r, g, b) {
+    const s = 128, c = document.createElement('canvas');
+    c.width = c.height = s;
+    const g2 = c.getContext('2d');
+    const grad = g2.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    grad.addColorStop(0, `rgba(${r},${g},${b},1)`);
+    grad.addColorStop(0.25, `rgba(${r},${g},${b},.55)`);
+    grad.addColorStop(0.6, `rgba(${r},${g},${b},.16)`);
+    grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    g2.fillStyle = grad;
+    g2.fillRect(0, 0, s, s);
+    return c;
+  }
+  const glowDew = makeGlow(208, 228, 255);
+  const glowWarm = makeGlow(255, 226, 170);
+  const glowBokehCool = makeGlow(120, 150, 190);
+  const glowBokehWarm = makeGlow(190, 160, 120);
+
+  function stamp(sprite, x, y, size, alpha) {
+    if (alpha <= 0.004) return;
+    ctx.globalAlpha = Math.min(1, alpha);
+    ctx.drawImage(sprite, x - size / 2, y - size / 2, size, size);
+    ctx.globalAlpha = 1;
+  }
+
+  // -------------------- web geometry --------------------
+  let web = null;
+
+  function buildWeb() {
+    const hx = W * CONFIG.hub.x, hy = H * CONFIG.hub.y;
+    const anchors = [];
+    const n = CONFIG.spokes;
+    // irregular but gap-guarded anchor angles
+    const angles = [];
+    for (let i = 0; i < n; i++) angles.push((i / n) * Math.PI * 2 + rand(-0.5, 0.5) * (Math.PI * 2 / n) * 0.5);
+    angles.sort((a, b) => a - b);
+    for (const a of angles) {
+      // anchors sit beyond the frame edge in their direction
+      const reach = Math.hypot(W, H) * rand(0.55, 0.85);
+      anchors.push({ x: hx + Math.cos(a) * reach, y: hy + Math.sin(a) * reach, a });
+    }
+
+    // spiral ring radii: a base series, wobbling independently on
+    // every spoke, so the rings breathe instead of orbiting
+    const baseRings = [];
+    let r = 0.055;
+    for (let k = 0; k < CONFIG.rings; k++) { baseRings.push(r); r *= CONFIG.ringGrow; }
+    const ringWobble = baseRings.map(() => anchors.map(() => rand(0.9, 1.1)));
+
+    // dew collects on only some segments, a few drops each, and
+    // every drop hangs slightly below its thread
+    const dew = [];
+    for (let k = 2; k < CONFIG.rings; k++) {
+      for (let j = 0; j < CONFIG.spokes; j++) {
+        if (Math.random() > 0.42) continue;
+        const count = 1 + (Math.random() * 3.2 | 0);
+        for (let c = 0; c < count; c++) {
+          dew.push({
+            k, j, t: rand(0.1, 0.9),
+            hang: rand(1.5, 5),             // px below the silk
+            s: 0.35 + Math.pow(Math.random(), 2.2) * 1.4,
+            base: rand(0.14, 0.5),
+            tw: rand(0.3, 1.4), ph: rand(0, Math.PI * 2),
+            glint: Math.random() < 0.1,
+          });
+        }
+      }
+    }
+    // string two of the top anchors onto the branch tips so the
+    // silk reads as actually hung between the branches
+    for (const tip of branchTips) {
+      let best = -1, bestD = 1e9;
+      for (let i = 0; i < anchors.length; i++) {
+        const want = Math.atan2(tip.y - hy, tip.x - hx);
+        let d = Math.abs(anchors[i].a - want);
+        d = Math.min(d, Math.PI * 2 - d);
+        if (d < bestD) { bestD = d; best = i; }
+      }
+      if (bestD < 0.45) {
+        anchors[best].x = tip.x;
+        anchors[best].y = tip.y;
+      }
+    }
+
+    web = { hx, hy, anchors, baseRings, ringWobble, dew };
+  }
+
+  //  Point on the frame of the web with current wind applied.
+  //  `flex` (0..1) is how freely a point moves: hub moves most,
+  //  anchors not at all.
+  function windOffset(x, y, flex, time) {
+    const wx = (fbm1(time * 0.16 + x * 0.0004) - 0.5) * 2;
+    const wy = (fbm1(time * 0.13 + y * 0.0004 + 40) - 0.5) * 2;
+    const amp = W * 0.006 * flex * CONFIG.windScale;
+    return { x: wx * amp, y: wy * amp * 0.7 + Math.sin(time * 0.5 + x * 0.002) * amp * 0.2 };
+  }
+
+  //  World position of the spiral joint segment (ring k, spokes j..j+1),
+  //  with wind applied: x0,y0 on spoke j; x1,y1 on spoke j+1.
+  function jointPos(k, j, time) {
+    const { hx, hy, anchors, baseRings, ringWobble } = web;
+    const a0 = anchors[j % anchors.length];
+    const a1 = anchors[(j + 1) % anchors.length];
+    const kk = Math.min(k, baseRings.length - 1);
+    const rad = (a, jj) => ringsDist(a, baseRings[kk] * ringWobble[kk][jj % anchors.length]);
+    const px0 = hx + Math.cos(a0.a) * rad(a0, j), py0 = hy + Math.sin(a0.a) * rad(a0, j);
+    const px1 = hx + Math.cos(a1.a) * rad(a1, j + 1), py1 = hy + Math.sin(a1.a) * rad(a1, j + 1);
+    const f = flexAt((px0 + px1) / 2, (py0 + py1) / 2);
+    const wO = windOffset((px0 + px1) / 2, (py0 + py1) / 2, f, time);
+    return { x0: px0 + wO.x, y0: py0 + wO.y, x1: px1 + wO.x, y1: py1 + wO.y };
+  }
+  function ringsDist(anchor, rr) { return anchorReach(anchor) * rr; }
+  const reachCache = new Map();
+  function anchorReach(anchor) {
+    if (!reachCache.has(anchor)) reachCache.set(anchor, Math.hypot(anchor.x - web.hx, anchor.y - web.hy));
+    return reachCache.get(anchor);
+  }
+  function flexAt(x, y) {
+    const d = Math.hypot(x - web.hx, y - web.hy);
+    const maxd = Math.hypot(W, H) * 0.75;
+    return Math.min(1, d / maxd) * 0.9 + 0.1;
+  }
+
+  // -------------------- background (static) --------------------
+  let bgLayer;
+  function paintBackground() {
+    bgLayer = document.createElement('canvas');
+    bgLayer.width = Math.floor(W * DPR); bgLayer.height = Math.floor(H * DPR);
+    const g = bgLayer.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    const grad = g.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, '#05070e');
+    grad.addColorStop(0.55, '#070b16');
+    grad.addColorStop(1, '#0a101f');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, W, H);
+
+    // faint stars
+    for (let i = 0; i < 110; i++) {
+      const a = rand(0.05, 0.3);
+      g.fillStyle = `rgba(200, 215, 245, ${a})`;
+      g.fillRect(Math.random() * W, Math.random() * H, 1 * U, 1 * U);
+    }
+
+    // out-of-focus moon glow behind foliage, upper right
+    const mx = W * 0.87, my = H * 0.14;
+    const halo = g.createRadialGradient(mx, my, 0, mx, my, W * 0.34);
+    halo.addColorStop(0, 'rgba(235, 226, 200, .16)');
+    halo.addColorStop(0.4, 'rgba(220, 210, 185, .07)');
+    halo.addColorStop(1, 'rgba(220, 210, 185, 0)');
+    g.fillStyle = halo;
+    g.fillRect(mx - W * 0.34, my - W * 0.34, W * 0.68, W * 0.68);
+
+    // dim bokeh discs drifting nowhere: distant lights
+    const bokeh = [
+      [0.16, 0.24, 0.045, glowBokehCool, 0.10], [0.30, 0.10, 0.028, glowBokehCool, 0.08],
+      [0.72, 0.32, 0.022, glowBokehWarm, 0.07], [0.90, 0.44, 0.034, glowBokehCool, 0.08],
+      [0.08, 0.62, 0.026, glowBokehWarm, 0.06], [0.60, 0.86, 0.030, glowBokehCool, 0.06],
+    ];
+    for (const [x, y, s, spr, a] of bokeh) stampOn(g, spr, x * W, y * H, s * W * 2, a);
+
+    // bare branch silhouettes reaching in from the top corners
+    g.fillStyle = '#02040a';
+    g.strokeStyle = '#02040a';
+    g.lineCap = 'round';
+    branchTips = [];
+    branchTips.push(cornerBranch(g, 0, -8, 0.42, 1));
+    branchTips.push(cornerBranch(g, W, -8, Math.PI - 0.38, -1));
+  }
+  let branchTips = [];
+  function stampOn(g, spr, x, y, size, alpha) {
+    g.globalAlpha = alpha;
+    g.drawImage(spr, x - size / 2, y - size / 2, size, size);
+    g.globalAlpha = 1;
+  }
+  function cornerBranch(g, x0, y0, ang, dir) {
+    // one tapered arc into frame, with twig clusters along it
+    const len = W * 0.24;
+    const bend = 0.22 * dir;
+    const ex = x0 + Math.cos(ang + bend) * len;
+    const ey = y0 + Math.sin(ang + bend) * len;
+    g.lineWidth = W * 0.004;
+    g.beginPath();
+    g.moveTo(x0, y0);
+    g.quadraticCurveTo(x0 + Math.cos(ang) * len * 0.55, y0 + Math.sin(ang) * len * 0.55 + 10, ex, ey);
+    g.stroke();
+    for (let i = 1; i <= 6; i++) {
+      const t = i / 6.4;
+      const bx = x0 + Math.cos(ang + bend * t * t) * len * t;
+      const by = y0 + Math.sin(ang + bend * t * t) * len * t + 14 * t;
+      const ta = ang + (Math.random() < 0.5 ? -1 : 1) * rand(0.9, 1.5);
+      const tl = W * rand(0.012, 0.03) * (1 - t * 0.5);
+      g.lineWidth = Math.max(1, W * 0.0016 * (1 - t * 0.5));
+      g.beginPath();
+      g.moveTo(bx, by);
+      g.quadraticCurveTo(bx + Math.cos(ta) * tl * 0.6, by + Math.sin(ta) * tl * 0.6 + 4,
+                         bx + Math.cos(ta) * tl, by + Math.sin(ta) * tl + tl * 0.22);
+      g.stroke();
+    }
+    return { x: ex, y: ey };
+  }
+
+  // -------------------- light sweep --------------------
+  function sweepCenter(time) {
+    // sweeps travel across the frame on a diagonal, then rest
+    const cycle = CONFIG.sweepPeriod;
+    const t = (time % cycle) / cycle;
+    const ease = t < 0.45 ? (t / 0.45) : 1;                 // move, then linger
+    return -0.25 + ease * 1.5;                              // position along sweep axis
+  }
+  function sweepAmountAt(px, py, time) {
+    const s = sweepCenter(time);
+    // project onto the sweep diagonal (normalised 0..1 across frame)
+    const proj = (px / W * 0.71 + (1 - py / H) * 0.71);
+    const d = Math.abs(proj - s);
+    return Math.exp(-(d * d) / (2 * 0.13 * 0.13));
+  }
+
+  // -------------------- draw web --------------------
+  function drawWeb(time) {
+    const { hx, hy, anchors, baseRings, dew } = web;
+    const hFlex = 0.35;
+    const hO = windOffset(hx, hy, hFlex, time);
+    const hxw = hx + hO.x, hyw = hy + hO.y;
+
+    ctx.lineCap = 'round';
+
+    // spokes: anchor -> hub, slight sag
+    ctx.strokeStyle = 'rgba(196, 214, 240, .085)';
+    for (const a of anchors) {
+      const f = flexAt((a.x + hx) / 2, (a.y + hy) / 2);
+      const wO = windOffset((a.x + hx) / 2, (a.y + hy) / 2, f, time);
+      const mx = (a.x + hxw) / 2 + wO.x, my = (a.y + hyw) / 2 + wO.y + W * 0.004;
+      ctx.lineWidth = 1 * U;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.quadraticCurveTo(mx, my, hxw, hyw);
+      ctx.stroke();
+    }
+
+    // capture spiral: rings of segments between neighbouring spokes
+    for (let k = 0; k < baseRings.length; k++) {
+      const segs = [];
+      for (let j = 0; j < anchors.length; j++) {
+        const p = jointPos(k, j, time);
+        segs.push(p);
+      }
+      ctx.strokeStyle = `rgba(206, 222, 246, ${0.10 + 0.05 * (1 - k / baseRings.length)})`;
+      ctx.lineWidth = k < 2 ? 0.8 * U : 1 * U;
+      ctx.beginPath();
+      ctx.moveTo(segs[0].x1, segs[0].y1);
+      for (let j = 0; j < segs.length; j++) {
+        const p = segs[j], q = segs[(j + 1) % segs.length];
+        // silk sags between joints, more toward the outer rings
+        const sag = W * 0.0042 * (0.35 + k / baseRings.length);
+        ctx.quadraticCurveTo((p.x1 + q.x0) / 2, (p.y1 + q.y0) / 2 + sag, q.x0, q.y0);
+      }
+      ctx.closePath();
+      ctx.stroke();
+    }
+
+    // hub
+    ctx.fillStyle = 'rgba(210, 224, 246, .16)';
+    ctx.beginPath();
+    ctx.arc(hxw, hyw, Math.max(1.5, W * 0.0022), 0, Math.PI * 2);
+    ctx.fill();
+
+    // droplets, pinned to the sagging arcs between spiral joints
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (const d of web.dew) {
+      const p = jointPos(d.k, d.j, time);
+      const q = jointPos(d.k, (d.j + 1) % web.anchors.length, time);
+      const sag = W * 0.0042 * (0.35 + d.k / baseRings.length);
+      const cxm = (p.x1 + q.x0) / 2, cym = (p.y1 + q.y0) / 2 + sag;
+      const u1 = 1 - d.t;
+      const bx = u1 * u1 * p.x1 + 2 * u1 * d.t * cxm + d.t * d.t * q.x0;
+      const by = u1 * u1 * p.y1 + 2 * u1 * d.t * cym + d.t * d.t * q.y0 + d.hang * U;
+
+      const tw = 0.75 + 0.25 * Math.sin(time * d.tw * Math.PI * 2 + d.ph);
+      const sweep = sweepAmountAt(bx, by, time);
+      const a = Math.min(1, d.base * tw + sweep * 0.9);
+      const sz = (4.5 + d.s * 7) * U * (1 + sweep * 0.4);
+      stamp(glowDew, bx, by, sz * 2.4, a * 0.42);
+      if (sweep > 0.05) stamp(glowWarm, bx, by, sz * 1.8, sweep * 0.35);
+      stamp(glowDew, bx, by, sz * 1.05, a);
+      // bright cores read only when lit
+      ctx.fillStyle = `rgba(235, 244, 255, ${Math.min(1, a * a)})`;
+      ctx.beginPath();
+      ctx.arc(bx, by, Math.max(0.6, d.s * 1.1 * U * (1 + sweep)), 0, Math.PI * 2);
+      ctx.fill();
+      if (d.glint && sweep > 0.35) {
+        // short 4-point star on the lucky few
+        ctx.strokeStyle = `rgba(240, 246, 255, ${0.3 * sweep})`;
+        ctx.lineWidth = 0.9 * U;
+        const fl = sz * 1.05 * sweep;
+        ctx.beginPath();
+        ctx.moveTo(bx - fl, by); ctx.lineTo(bx + fl, by);
+        ctx.moveTo(bx, by - fl); ctx.lineTo(bx, by + fl);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+
+    // the beam itself: one wide soft band along the sweep
+    const beamA = sweepBeamAlpha(time);
+    if (beamA > 0.005) {
+      const s = sweepCenter(time);
+      const bx = (s * W * 1.1) - W * 0.05;
+      ctx.save();
+      ctx.translate(bx, H * 0.5);
+      ctx.rotate(-0.62);
+      const g = ctx.createLinearGradient(-W * 0.16, 0, W * 0.16, 0);
+      g.addColorStop(0, 'rgba(255, 240, 205, 0)');
+      g.addColorStop(0.5, `rgba(255, 240, 205, ${0.045 * beamA})`);
+      g.addColorStop(1, 'rgba(255, 240, 205, 0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(-W * 0.16, -H, W * 0.32, H * 2);
+      ctx.restore();
+    }
+  }
+  function sweepBeamAlpha(time) {
+    const t = (time % CONFIG.sweepPeriod) / CONFIG.sweepPeriod;
+    return t < 0.45 ? Math.sin((t / 0.45) * Math.PI) : Math.max(0, 1 - (t - 0.45) / 0.2);
+  }
+
+  // -------------------- spider --------------------
+  const spider = { state: 'hidden', t: 0, y: 0, nextIn: 6 };
+  function stepSpider(time, dt) {
+    spider.t += dt;
+    const cfg = CONFIG.spider;
+    switch (spider.state) {
+      case 'hidden':
+        if (spider.t > spider.nextIn) {
+          spider.state = 'descend';
+          spider.t = 0;
+          spider.dur = rand(...cfg.descend);
+          spider.fromY = -H * 0.08;
+          spider.toY = H * (CONFIG.hub.y + rand(0.02, 0.1));
+          spider.x = web.hx + rand(-0.06, 0.06) * W;
+        }
+        break;
+      case 'descend': {
+        const k = Math.min(1, spider.t / spider.dur);
+        const e = k * k * (3 - 2 * k);
+        spider.y = spider.fromY + (spider.toY - spider.fromY) * e;
+        if (k >= 1) { spider.state = 'idle'; spider.t = 0; spider.dur = rand(...cfg.idle); }
+        break;
+      }
+      case 'idle':
+        spider.y = spider.toY + Math.sin(time * 0.8) * 3 * U;
+        if (spider.t > spider.dur) { spider.state = 'ascend'; spider.t = 0; spider.dur = rand(...cfg.descend) * 0.8; }
+        break;
+      case 'ascend': {
+        const k = Math.min(1, spider.t / spider.dur);
+        const e = k * k;
+        spider.y = spider.toY + (spider.fromY - spider.toY) * e;
+        if (k >= 1) { spider.state = 'hidden'; spider.t = 0; spider.nextIn = rand(cfg.minGap, cfg.maxGap); }
+        break;
+      }
+    }
+  }
+
+  function drawSpider(time) {
+    if (spider.state === 'hidden') return;
+    const x = spider.x + windOffset(spider.x, spider.y, 0.5, time).x;
+    const y = spider.y;
+    const s = W * 0.0095;
+
+    // gossamer up to the top edge
+    ctx.strokeStyle = 'rgba(206, 222, 246, .14)';
+    ctx.lineWidth = 0.8 * U;
+    ctx.beginPath();
+    ctx.moveTo(x + (0 - 0), -10);
+    ctx.quadraticCurveTo(x + windOffset(x, y * 0.5, 0.3, time).x * 0.5, y * 0.5, x, y - s * 1.2);
+    ctx.stroke();
+
+    ctx.save();
+    ctx.translate(x, y);
+    const sway = Math.sin(time * 1.7) * 0.06;
+    ctx.rotate(sway);
+
+    // legs: four arched pairs, each with its own knee and foot so
+    // the front pair reaches up-out and the back pair trails down;
+    // idle spiders twitch one leg now and then
+    ctx.strokeStyle = '#05070d';
+    ctx.lineCap = 'round';
+    // per-leg [kneeX, kneeY, footX, footY] in units of s
+    const LEGS = [
+      [1.15, -0.62, 1.75, -0.1],
+      [1.5, -0.35, 2.0, 0.4],
+      [1.45, -0.2, 1.9, 0.8],
+      [1.1, -0.08, 1.45, 1.05],
+    ];
+    for (let side = -1; side <= 1; side += 2) {
+      for (let i = 0; i < 4; i++) {
+        const twitch = (spider.state === 'idle' && Math.sin(time * 2.6 + i * 1.9 + side * 2.2) > 0.93) ? 0.12 * side : 0;
+        const [knX, knY, ftX, ftY] = LEGS[i];
+        ctx.lineWidth = Math.max(0.7, s * 0.12 * (1 - i * 0.14));
+        ctx.beginPath();
+        ctx.moveTo(side * s * 0.3, -s * 0.2);
+        ctx.quadraticCurveTo(side * s * 0.7, knY - s * 0.28, side * knX * s, knY * s);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(side * knX * s, knY * s);
+        ctx.quadraticCurveTo(side * ((knX + ftX) / 2 + twitch) * s, (knY + ftY) / 2 * s - s * 0.16, side * (ftX + twitch) * s, ftY * s);
+        ctx.stroke();
+      }
+    }
+
+    // body: abdomen below, head above, both slightly offset
+    ctx.fillStyle = '#04060b';
+    ctx.beginPath();
+    ctx.ellipse(0, s * 0.5, s * 0.68, s * 0.9, 0, 0, Math.PI * 2);   // abdomen
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(0, -s * 0.5, s * 0.44, 0, Math.PI * 2);                  // head
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(185, 205, 235, .28)';
+    ctx.lineWidth = Math.max(0.5, s * 0.06);
+    ctx.beginPath();
+    ctx.ellipse(0, s * 0.5, s * 0.68, s * 0.9, 0, Math.PI * 1.1, Math.PI * 1.9);
+    ctx.stroke();
+    // faint top rim so the silhouette separates from dark bg
+    ctx.strokeStyle = 'rgba(190, 208, 235, .22)';
+    ctx.lineWidth = Math.max(0.6, s * 0.07);
+    ctx.beginPath();
+    ctx.arc(0, s * 0.55, s * 0.78, Math.PI * 1.15, Math.PI * 1.85);
+    ctx.stroke();
+    // eye glints when the sweep is on her
+    const sweep = sweepAmountAt(x, y, time);
+    if (sweep > 0.25) {
+      ctx.fillStyle = `rgba(255, 240, 210, ${0.75 * sweep})`;
+      ctx.beginPath(); ctx.arc(-s * 0.16, -s * 0.55, Math.max(0.5, s * 0.07), 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(s * 0.16, -s * 0.55, Math.max(0.5, s * 0.07), 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // -------------------- resize / build --------------------
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    U = W / 1600;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    reachCache.clear();
+    paintBackground();
+    buildWeb();
+    reachCache.clear();
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  // -------------------- loop --------------------
+  let last = performance.now();
+  let ready = false;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    ctx.drawImage(bgLayer, 0, 0, W, H);
+    drawWeb(time);
+    stepSpider(time, dt);
+    drawSpider(time);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
