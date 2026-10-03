@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Harbour Lights</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #04060e; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 128% 104% at 50% 46%,
+        rgba(0,0,0,0) 44%, rgba(0,0,0,.32) 82%, rgba(0,0,0,.74) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(190, 226, 255, .28);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">quayside · two bells</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  HARBOUR LIGHTS — a working dock at night, seen from across the
+  //  water. Quay lights and warehouse windows sit on the far side;
+  //  a small ship crosses the basin now and then with running
+  //  lights; a lighthouse on the mole sweeps its beam across the
+  //  whole scene; and everything above the waterline repeats
+  //  below it as a broken, rippling reflection.
+  //
+  //  Construction notes
+  //  ------------------
+  //  The quay and its lights are painted once per resize; the water
+  //  is one cached gradient plus per-frame ripple strokes; the
+  //  reflections are light sprites blitted into a vertically
+  //  compressed, wobbling band under each source. The beam is two
+  //  rotating wedges over the top, so it can pass over the ship,
+  //  the water and the far quay without touching their draw code.
+  // ============================================================
+  const CONFIG = {
+    //  Mostly small additive sprites over gradients; 2x gains nothing visible.
+    dprCap: 1.6,
+
+    horizon: 0.52,           // waterline
+    quayTop: 0.30,           // top of the far quay silhouette (from top)
+
+    quayLights: 11,
+    //  How much of the quay band the buildings may occupy. Without a ceiling the
+    //  blocks fill the whole band and the far shore reads as a flat wall rather
+    //  than as a port with sky above it.
+    quayMaxFill: 0.62,
+
+    shipEvery: [14, 30],     // s between crossings
+    shipSpeed: [26, 44],     // px/s at 1600w
+    shipScale: 0.9,
+
+    beaconSweep: 7.0,        // s per full rotation
+    beaconX: 0.855,          // fraction of width
+    beaconBeam: 0.075,       // beam half-angle, radians
+    beaconReach: 0.62,       // beam length, as a fraction of the diagonal
+
+    rippleBands: 34,
+    reflectionSquash: 0.34,  // vertical compression of the upside-down image
+    reflectionWobble: 5.5,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+
+  // ---------------- sprites ----------------
+  function glow(r, g, b, core) {
+    const s = 64;
+    const c = document.createElement('canvas');
+    c.width = c.height = s;
+    const x = c.getContext('2d');
+    const grad = x.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    grad.addColorStop(0, `rgba(255,255,255,${core ? 0.95 : 0.7})`);
+    grad.addColorStop(0.14, `rgba(${r},${g},${b},${core ? 0.90 : 0.60})`);
+    grad.addColorStop(0.44, `rgba(${r},${g},${b},0.20)`);
+    grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    x.fillStyle = grad;
+    x.fillRect(0, 0, s, s);
+    return c;
+  }
+
+  let sprWarm, sprCold, sprRed, sprGreen, sprBeacon, sprMoon;
+
+  function buildSprites() {
+    sprWarm = glow(255, 208, 146, true);
+    sprCold = glow(214, 236, 255, true);
+    sprRed = glow(255, 84, 64, true);
+    sprGreen = glow(120, 255, 170, true);
+    sprBeacon = glow(255, 246, 226, true);
+    sprMoon = glow(226, 234, 255, false);
+  }
+
+  function stamp(sprite, x, y, size, alpha) {
+    if (alpha <= 0.004 || size <= 0.2) return;
+    ctx.globalAlpha = Math.min(1, alpha);
+    ctx.drawImage(sprite, x - size / 2, y - size / 2, size, size);
+    ctx.globalAlpha = 1;
+  }
+
+  function horizonY() { return H * CONFIG.horizon; }
+
+  // ---------------- the quay ----------------
+  //  Far-side structure: warehouses with lit windows, cranes, masts, a
+  //  lighthouse on the mole. Painted once per resize; the lights themselves are
+  //  kept in `quayLights` so their reflections can be animated.
+  let quayLights = [];
+  let beacon = null;
+
+  function buildQuay() {
+    quayLights = [];
+    const hy = horizonY();
+    const topY = H * CONFIG.quayTop;
+
+    // warehouse blocks along the quay
+    const maxH = (hy - topY) * CONFIG.quayMaxFill;
+    let x = -W * 0.05;
+    while (x < W * 1.05) {
+      const bw = rand(0.09, 0.21) * W;
+      const bh = rand(0.34, 1.0) * maxH;
+      const by = hy - bh;
+      const isWarehouse = Math.random() < 0.68;
+
+      const cols = isWarehouse ? Math.max(2, Math.round(bw / (W * 0.030))) : 0;
+      const rows = isWarehouse ? Math.max(2, Math.round(bh / (H * 0.026))) : 0;
+      for (let c = 0; c < cols; c++) {
+        for (let r = 0; r < rows; r++) {
+          if (Math.random() > 0.52) continue;
+          quayLights.push({
+            x: x + bw * ((c + 0.5) / cols),
+            y: by + bh * ((r + 0.5) / rows),
+            size: rand(0.008, 0.016) * U,
+            sprite: Math.random() < 0.28 ? sprCold : sprWarm,
+            a: rand(0.5, 1.0),
+            // windows are steady; only the odd one is a masthead lamp
+            wobble: 0,
+          });
+        }
+      }
+
+      // rooftop plant or a small crane on some blocks
+      if (Math.random() < 0.35) {
+        const mx = x + bw * rand(0.2, 0.8);
+        quayLights.push({
+          x: mx, y: by - rand(0.012, 0.030) * H,
+          size: rand(0.008, 0.014) * U,
+          sprite: Math.random() < 0.5 ? sprRed : sprWarm,
+          a: rand(0.6, 1.0),
+          wobble: 0,
+        });
+      }
+
+      x += bw + rand(0.001, 0.008) * W;
+    }
+
+    // quayside lamps: taller, brighter, spaced along the mole
+    for (let i = 0; i < CONFIG.quayLights; i++) {
+      const lx = W * (0.03 + (i / (CONFIG.quayLights - 1)) * 0.94) + rand(-W * 0.006, W * 0.006);
+      quayLights.push({
+        x: lx,
+        y: hy - rand(0.020, 0.055) * H,
+        size: rand(0.026, 0.042) * U,
+        sprite: sprWarm,
+        a: rand(0.75, 1.0),
+        wobble: rand(0.2, 0.7),
+      });
+    }
+
+    // the mole and the lighthouse, on the right
+    beacon = {
+      x: W * CONFIG.beaconX,
+      baseY: hy,
+      h: rand(0.16, 0.21) * H,
+      w: rand(0.026, 0.034) * W,
+    };
+    quayLights.push({
+      x: beacon.x, y: beacon.baseY - beacon.h,
+      size: rand(0.030, 0.040) * U,
+      sprite: sprBeacon,
+      a: 1.0,
+      wobble: 0,
+      beacon: true,
+    });
+  }
+
+  // ---------------- backdrop ----------------
+  let backdrop = null;
+
+  function paintBackdrop() {
+    if (!backdrop) backdrop = document.createElement('canvas');
+    backdrop.width = Math.max(1, Math.floor(W * DPR));
+    backdrop.height = Math.max(1, Math.floor(H * DPR));
+    const g = backdrop.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+    const hy = horizonY();
+    const topY = H * CONFIG.quayTop;
+
+    // Night sky: cold at the top, a little warmer near the water where the
+    // town's own light pools.
+    const sky = g.createLinearGradient(0, 0, 0, hy);
+    sky.addColorStop(0, '#04060f');
+    sky.addColorStop(0.45, '#0a1024');
+    sky.addColorStop(0.78, '#152142');
+    sky.addColorStop(1, '#25304f');
+    g.fillStyle = sky;
+    g.fillRect(0, 0, W, hy);
+
+    // A moon, low and hazy, off to the left of the beacon.
+    const mx = W * 0.24, my = H * 0.155;
+    const mr = Math.min(W, H) * 0.030;
+    const halo = g.createRadialGradient(mx, my, 0, mx, my, mr * 6);
+    halo.addColorStop(0, 'rgba(216, 228, 255, 0.34)');
+    halo.addColorStop(0.22, 'rgba(180, 200, 240, 0.10)');
+    halo.addColorStop(1, 'rgba(150, 170, 220, 0)');
+    g.fillStyle = halo;
+    g.fillRect(mx - mr * 6, my - mr * 6, mr * 12, mr * 12);
+    g.fillStyle = 'rgba(232, 240, 255, 0.92)';
+    g.beginPath(); g.arc(mx, my, mr, 0, Math.PI * 2); g.fill();
+    g.fillStyle = 'rgba(200, 214, 244, 0.30)';
+    g.beginPath(); g.arc(mx - mr * 0.28, my - mr * 0.24, mr * 0.20, 0, Math.PI * 2); g.fill();
+    g.beginPath(); g.arc(mx + mr * 0.30, my + mr * 0.18, mr * 0.13, 0, Math.PI * 2); g.fill();
+
+    // A few stars, high only.
+    for (let i = 0; i < 140; i++) {
+      const sx = rand(0, W);
+      const sy = rand(0, topY * 0.82);
+      const a = rand(0.10, 0.55) * (1 - sy / (topY * 0.9));
+      g.fillStyle = `rgba(226, 236, 255, ${a.toFixed(3)})`;
+      g.fillRect(sx, sy, Math.max(1, W * 0.0009), Math.max(1, W * 0.0009));
+    }
+
+    // The far shore: a dark band with a lit top edge.
+    const land = g.createLinearGradient(0, topY, 0, hy);
+    land.addColorStop(0, '#070a16');
+    land.addColorStop(1, '#03040a');
+    g.fillStyle = land;
+    g.fillRect(0, topY, W, hy - topY);
+    g.fillStyle = 'rgba(150, 178, 224, 0.10)';
+    g.fillRect(0, topY, W, Math.max(1, H * 0.0016));
+
+    //  Quay structures: dark blocks standing on the waterline. The same loop
+    //  runs here as in buildQuay(), with the same height rule, so the geometry
+    //  and the windows that sit on it cannot disagree.
+    const maxHh = (hy - topY) * CONFIG.quayMaxFill;
+    let x = -W * 0.05;
+    while (x < W * 1.05) {
+      const bw = rand(0.09, 0.21) * W;
+      const bh = rand(0.34, 1.0) * maxHh;
+      const by = hy - bh;
+      const shade = rand(0.75, 1.15);
+      g.fillStyle = `rgb(${(8 * shade) | 0}, ${(11 * shade) | 0}, ${(22 * shade) | 0})`;
+      g.fillRect(x, by, bw, bh);
+      g.fillStyle = 'rgba(130, 156, 206, 0.12)';
+      g.fillRect(x, by, bw, Math.max(1, H * 0.0014));
+      x += bw + rand(0.001, 0.008) * W;
+    }
+
+    // The mole and its tower.
+    if (beacon) {
+      const b = beacon;
+      g.fillStyle = '#04060c';
+      g.fillRect(b.x - b.w * 2.4, hy - b.h * 0.16, b.w * 4.8, b.h * 0.30);
+      g.beginPath();
+      g.moveTo(b.x - b.w * 0.52, b.baseY);
+      g.lineTo(b.x - b.w * 0.36, b.baseY - b.h);
+      g.lineTo(b.x + b.w * 0.36, b.baseY - b.h);
+      g.lineTo(b.x + b.w * 0.52, b.baseY);
+      g.closePath();
+      g.fillStyle = '#060a14';
+      g.fill();
+      // a band of red on the tower, as harbour towers have
+      g.fillStyle = 'rgba(150, 46, 44, 0.55)';
+      g.fillRect(b.x - b.w * 0.42, b.baseY - b.h * 0.62, b.w * 0.84, b.h * 0.10);
+      // lantern gallery
+      g.fillStyle = '#0a0f1c';
+      g.fillRect(b.x - b.w * 0.52, b.baseY - b.h - b.w * 0.16, b.w * 1.04, b.w * 0.22);
+    }
+
+    // The water: one gradient. Ripples are drawn per frame.
+    const water = g.createLinearGradient(0, hy, 0, H);
+    water.addColorStop(0, '#0d1730');
+    water.addColorStop(0.22, '#080f22');
+    water.addColorStop(0.62, '#050a18');
+    water.addColorStop(1, '#02040c');
+    g.fillStyle = water;
+    g.fillRect(0, hy, W, H - hy);
+
+    // A band of reflected town glow right under the quay, before any ripples.
+    const band = g.createLinearGradient(0, hy, 0, hy + (H - hy) * 0.55);
+    band.addColorStop(0, 'rgba(120, 150, 210, 0.22)');
+    band.addColorStop(0.30, 'rgba(80, 106, 166, 0.10)');
+    band.addColorStop(1, 'rgba(40, 60, 110, 0)');
+    g.fillStyle = band;
+    g.fillRect(0, hy, W, (H - hy) * 0.55);
+  }
+
+  // ---------------- the crossing ship ----------------
+  let ship = null;
+  let nextShip = 0;
+
+  function spawnShip(now) {
+    const dir = Math.random() < 0.5 ? 1 : -1;
+    ship = {
+      dir,
+      x: dir > 0 ? -W * 0.10 : W * 1.10,
+      y: horizonY() - rand(0.004, 0.016) * H,
+      v: rand(CONFIG.shipSpeed[0], CONFIG.shipSpeed[1]) * U / 1000,
+      scale: CONFIG.shipScale * rand(0.8, 1.25),
+      sway: rand(0, Math.PI * 2),
+    };
+    nextShip = now + rand(CONFIG.shipEvery[0], CONFIG.shipEvery[1]);
+  }
+
+  function drawShip(time) {
+    if (!ship) return;
+    const s = ship.scale * U / 1000;
+    const bob = Math.sin(time * 0.9 + ship.sway) * 1.6 * s;
+    const x = ship.x, y = ship.y + bob;
+
+    // Hull: a low dark wedge with a pale waterline.
+    ctx.save();
+    ctx.fillStyle = 'rgba(6, 9, 18, 0.96)';
+    ctx.beginPath();
+    ctx.moveTo(x - 52 * s, y);
+    ctx.lineTo(x + 40 * s, y);
+    ctx.lineTo(x + 30 * s, y + 9 * s);
+    ctx.lineTo(x - 44 * s, y + 9 * s);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = 'rgba(160, 180, 220, 0.14)';
+    ctx.fillRect(x - 50 * s, y + 8 * s, 86 * s, 1.4 * s);
+
+    // Superstructure, offset toward the stern.
+    ctx.fillStyle = 'rgba(8, 12, 24, 0.96)';
+    ctx.fillRect(x - 18 * s, y - 14 * s, 30 * s, 14 * s);
+    ctx.fillRect(x - 6 * s, y - 22 * s, 12 * s, 9 * s);
+
+    // Mast and funnel.
+    ctx.strokeStyle = 'rgba(12, 16, 28, 0.9)';
+    ctx.lineWidth = 1.2 * s;
+    ctx.beginPath();
+    ctx.moveTo(x - 8 * s, y - 22 * s);
+    ctx.lineTo(x - 10 * s, y - 38 * s);
+    ctx.stroke();
+    ctx.restore();
+
+    // Running lights: red to port, green to starboard, white masthead and
+    // stern. Which of them you see depends on the direction of travel.
+    const lead = ship.dir > 0 ? x + 46 * s : x - 58 * s;
+    const trail = ship.dir > 0 ? x - 52 * s : x + 40 * s;
+    stamp(sprCold, lead, y - 2 * s, 12 * s, 0.85);
+    stamp(sprCold, x - 8 * s, y - 40 * s, 9 * s, 0.80);
+    stamp(sprCold, trail, y + 3 * s, 8 * s, 0.65);
+    stamp(ship.dir > 0 ? sprGreen : sprRed, x + (ship.dir > 0 ? 34 : -44) * s, y + 1 * s, 8 * s, 0.85);
+    stamp(ship.dir > 0 ? sprRed : sprGreen, x + (ship.dir > 0 ? -46 : 36) * s, y + 1 * s, 8 * s, 0.85);
+
+    // Wake: a short smear behind, brightening toward the hull.
+    const wakeLen = 60 * s;
+    for (let i = 0; i < 5; i++) {
+      const t = i / 4;
+      stamp(sprCold, trail - ship.dir * t * wakeLen, y + 4 * s + t * 2 * s, (16 + t * 22) * s, 0.14 * (1 - t * 0.7));
+    }
+    // Reflection straight down, wobbling, weak.
+    const ry = horizonY() + (y - horizonY()) * CONFIG.reflectionSquash;
+    stamp(sprCold, lead, ry + 6 * s, 20 * s, 0.20);
+    stamp(sprCold, x - 8 * s, ry + 10 * s, 14 * s, 0.14);
+  }
+
+  // ---------------- reflections ----------------
+  //  Each quay light gets an inverted, squashed, horizontally wobbling copy
+  //  below the waterline, drawn as a vertical smear so it reads as broken water
+  //  rather than as a mirrored image.
+  function drawReflections(time) {
+    const hy = horizonY();
+    const span = H - hy;
+    ctx.save();
+    for (const L of quayLights) {
+      const depth = hy - L.y;
+      const ry = hy + depth * CONFIG.reflectionSquash;
+      if (ry > H + 40) continue;
+      const wob = Math.sin(time * 1.6 + L.x * 0.021) * CONFIG.reflectionWobble * (1 + depth / H);
+      const fade = clamp(1 - (ry - hy) / (span * 0.95), 0.05, 1);
+      const a = L.a * fade * 0.34;
+      // Three stacked copies, each a little lower, wider and dimmer: the smear.
+      for (let k = 0; k < 3; k++) {
+        stamp(
+          L.sprite,
+          L.x + wob * (1 + k * 0.5) + Math.sin(time * 2.3 + k) * 2,
+          ry + k * L.size * 0.65,
+          L.size * (0.85 + k * 0.55),
+          a * (1 - k * 0.28)
+        );
+      }
+    }
+    ctx.restore();
+  }
+
+  // ---------------- ripples ----------------
+  //  Horizontal dashes over the reflection band, denser near the horizon. These
+  //  are what break the reflections into a quivering line, and they are the only
+  //  per-frame stroke work on the page.
+  function drawRipples(time) {
+    const hy = horizonY();
+    const span = H - hy;
+    ctx.save();
+    ctx.lineWidth = Math.max(1, H * 0.0016);
+    for (let i = 0; i < CONFIG.rippleBands; i++) {
+      const t = i / (CONFIG.rippleBands - 1);
+      const y = hy + span * Math.pow(t, 1.35);
+      // Bands near the horizon are shorter and brighter; near ones are long.
+      const dash = lerp(0.010, 0.055, t) * W;
+      const gap = dash * lerp(2.4, 4.2, t);
+      const alpha = lerp(0.16, 0.05, t);
+      const drift = (time * lerp(6, 22, t)) % (dash + gap);
+      ctx.strokeStyle = `rgba(190, 216, 255, ${alpha.toFixed(3)})`;
+      ctx.beginPath();
+      for (let x = -dash + drift; x < W + dash; x += dash + gap) {
+        // The dash rides a slow sine so adjacent bands do not line up.
+        const yy = y + Math.sin(x * 0.006 + time * 0.7 + i * 0.9) * lerp(0.6, 2.6, t);
+        ctx.moveTo(x, yy);
+        ctx.lineTo(x + dash, yy);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // ---------------- beacon ----------------
+  //  Two rotating wedges drawn over everything: the beam has to pass across the
+  //  sky, the far quay and the water, so it cannot live in any one layer.
+  function drawBeacon(time) {
+    if (!beacon) return;
+    const b = beacon;
+    const bx = b.x, by = b.baseY - b.h;
+    const ang = (time / CONFIG.beaconSweep) * Math.PI * 2;
+    const len = Math.hypot(W, H) * CONFIG.beaconReach;
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (let s = 0; s < 2; s++) {
+      const a0 = ang + (s === 0 ? 0 : Math.PI);
+      const half = CONFIG.beaconBeam * (1 + s * 0.02);
+      const grad = ctx.createRadialGradient(bx, by, 0, bx, by, len);
+      // The beam is brightest close to the lantern and fades with distance. A
+      //  tight half-angle keeps it reading as a searchlight rather than as a
+      //  wash over half the frame.
+      grad.addColorStop(0, 'rgba(255, 248, 226, 0.55)');
+      grad.addColorStop(0.05, 'rgba(255, 244, 214, 0.26)');
+      grad.addColorStop(0.35, 'rgba(255, 238, 200, 0.07)');
+      grad.addColorStop(1, 'rgba(255, 232, 190, 0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(bx, by);
+      ctx.arc(bx, by, len, a0 - half, a0 + half);
+      ctx.closePath();
+      ctx.fill();
+    }
+    // The lantern itself pulses with the sweep.
+    const pulse = 0.72 + 0.28 * Math.sin(time * 2.6);
+    ctx.globalCompositeOperation = 'source-over';
+    stamp(sprBeacon, bx, by, b.w * 4.2 * pulse, 0.9);
+    ctx.restore();
+  }
+
+  // ---------------- loop ----------------
+  let last = performance.now();
+  let ready = false;
+  const start = performance.now();
+
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.max(1, Math.floor(window.innerWidth));
+    H = Math.max(1, Math.floor(window.innerHeight));
+    U = Math.min(W, H);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    buildSprites();
+    buildQuay();
+    paintBackdrop();
+  }
+  window.addEventListener('resize', resize, { passive: true });
+
+  function frame(now) {
+    const time = (now - start) / 1000;
+    last = now;
+
+    if (!ship && time >= nextShip) spawnShip(time);
+    if (ship) {
+      ship.x += ship.dir * ship.v * (1 / 60);
+      if (ship.x < -W * 0.18 || ship.x > W * 1.18) ship = null;
+    }
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.drawImage(backdrop, 0, 0, W, H);
+
+    // Quay lights and the lantern, above the waterline.
+    const beaconL = quayLights.find((q) => q.beacon);
+    for (const L of quayLights) {
+      if (L.beacon) continue;
+      const flick = L.wobble ? 1 + L.wobble * 0.10 * Math.sin(time * 2.2 + L.x * 0.05) : 1;
+      stamp(L.sprite, L.x, L.y, L.size * flick, L.a);
+    }
+    if (beaconL) stamp(beaconL.sprite, beaconL.x, beaconL.y, beaconL.size, beaconL.a);
+
+    drawReflections(time);
+    drawShip(time);
+    drawRipples(time);
+    drawBeacon(time);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  spawnShip(0);
+  nextShip = rand(CONFIG.shipEvery[0], CONFIG.shipEvery[1]);
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
