@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>VHS Deck</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #05060a; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .scanlines {
+      pointer-events: none; position: fixed; inset: 0; opacity: .55;
+      background: repeating-linear-gradient(0deg,
+        rgba(255,0,80,.045) 0 1px, rgba(0,255,220,.035) 1px 2px, rgba(0,0,0,.16) 2px 4px);
+      mix-blend-mode: screen;
+    }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 122% 100% at 50% 48%,
+        rgba(0,0,0,0) 44%, rgba(0,0,0,.34) 80%, rgba(0,0,0,.84) 100%);
+    }
+    .osd {
+      pointer-events: none; position: fixed; inset: 0;
+      font: 500 clamp(8px, .66vw, 12px)/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: rgba(240, 240, 240, .82);
+      text-shadow: 0 0 6px rgba(0,0,0,.9), 1px 0 0 rgba(255,40,90,.30), -1px 0 0 rgba(60,240,255,.30);
+      letter-spacing: .12em;
+      opacity: 0; transition: opacity 2s ease 1.2s;
+    }
+    body.ready .osd { opacity: 1; }
+    .osd .tl { position: absolute; left: 3.4vw; top: 5.6vh; }
+    .osd .tr { position: absolute; right: 3.4vw; top: 5.6vh; text-align: right; }
+    .osd .bl { position: absolute; left: 3.4vw; bottom: 14vh; }
+    .osd .rec {
+      position: absolute; right: 3.4vw; top: 5.6vh;
+      display: flex; align-items: center; gap: .6em;
+    }
+    .osd .rec .dot {
+      width: .7em; height: .7em; border-radius: 999px; background: #ff2b4e;
+      box-shadow: 0 0 10px rgba(255,43,78,.9);
+      animation: blink 1.6s steps(1, end) infinite;
+    }
+    @keyframes blink { 0%, 50% { opacity: 1 } 50.01%, 100% { opacity: .15 } }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 5.2vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(240, 240, 240, .40);
+      text-shadow: 0 0 8px rgba(0,0,0,.9);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="scanlines"></div>
+  <div class="vignette"></div>
+  <div class="osd">
+    <div class="tl">PLAY &#9654;</div>
+    <div class="rec"><span class="dot"></span><span>REC</span></div>
+    <div class="tr" id="counter">0:00:00</div>
+    <div class="bl" id="spMode">SP &nbsp; HI-FI &nbsp; STEREO</div>
+  </div>
+  <div class="caption">please rewind</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  VHS DECK — an analogue videotape running. The picture is a
+  //  colour-bar test card over a slow travelling base, but what
+  //  makes it VHS is everything wrong with it: head-switching
+  //  noise tearing along the bottom, dropout specks where the
+  //  oxide has shed, chroma smear to the right of every edge,
+  //  tape wobble, a rolling brightness bar, and a tracking glitch
+  //  now and then that skews the whole frame.
+  //
+  //  Construction notes
+  //  ------------------
+  //  The bars themselves are painted once per resize: they are flat
+  //  colour and never change. Everything that makes it look like
+  //  tape is per frame and drawn as bands, not per-pixel work.
+  // ============================================================
+  const CONFIG = {
+    //  Flat bars and band artefacts; a 1.4 store is indistinguishable and much
+    //  cheaper on the full-frame bands.
+    dprCap: 1.4,
+
+    bars: [
+      "#c0c0c0", "#c0c000", "#00c0c0", "#00c000",
+      "#c000c0", "#c00000", "#0000c0", "#101010",
+    ],
+    topBars: 0.72,           // fraction of the height the bars occupy
+    bottomBars: ["#0d0d0d", "#ffffff", "#8a1fc0", "#0d0d0d", "#1a3a8a", "#0d0d0d", "#1a8a3a", "#0d0d0d"],
+
+    rollHz: 0.085,           // the brightness bar's roll rate
+    wobbleHz: 0.6,
+    dropoutRate: 34,          // specks per second
+    headSwitchH: 0.035,      // fraction of height with head-switching noise
+    glitchEvery: [9, 22],    // s between tracking glitches
+    glitchSeconds: 1.5,
+  };
+
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d", { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  const TAU = Math.PI * 2;
+
+  // ---------------- bars ----------------
+  let bars = null;
+  function paintBars() {
+    if (!bars) bars = document.createElement("canvas");
+    bars.width = Math.max(1, Math.floor(W * DPR));
+    bars.height = Math.max(1, Math.floor(H * DPR));
+    const g = bars.getContext("2d");
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    const topH = H * CONFIG.topBars;
+    const n = CONFIG.bars.length;
+    const bw = W / n;
+    for (let i = 0; i < n; i++) {
+      g.fillStyle = CONFIG.bars[i];
+      g.fillRect(i * bw, 0, bw + 1, topH);
+    }
+
+    // The lower third: the standard castellation and pluge strip, simplified.
+    const midY = topH;
+    const midH = (H - topH) * 0.55;
+    for (let i = 0; i < n; i++) {
+      g.fillStyle = CONFIG.bars[n - 1 - i];
+      g.fillRect(i * bw, midY, bw + 1, midH);
+    }
+    const lowY = midY + midH;
+    const lowH = H - lowY;
+    const m = CONFIG.bottomBars.length;
+    const lw = W / m;
+    for (let i = 0; i < m; i++) {
+      g.fillStyle = CONFIG.bottomBars[i];
+      g.fillRect(i * lw, lowY, lw + 1, lowH);
+    }
+
+    // A faint crosshair and circle, as a test card carries.
+    g.strokeStyle = "rgba(255,255,255,0.18)";
+    g.lineWidth = Math.max(1, U * 0.0016);
+    const r = Math.min(W, H) * 0.30;
+    g.beginPath(); g.arc(W / 2, H * 0.36, r, 0, TAU); g.stroke();
+    g.beginPath();
+    g.moveTo(W / 2, H * 0.36 - r * 1.1); g.lineTo(W / 2, H * 0.36 + r * 1.1);
+    g.moveTo(W / 2 - r * 1.1, H * 0.36); g.lineTo(W / 2 + r * 1.1, H * 0.36);
+    g.stroke();
+    // A grid over the lower half, so the picture has structure to smear.
+    g.strokeStyle = "rgba(0,0,0,0.20)";
+    for (let i = 1; i < 12; i++) {
+      const x = (i / 12) * W;
+      g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke();
+    }
+  }
+
+  // ---------------- tape artefacts ----------------
+  const drops = [];
+  let smear = null;
+  function spawnDrop() {
+    drops.push({
+      x: Math.random(),
+      y: Math.random(),
+      w: rand(0.006, 0.052),
+      h: rand(0.0016, 0.010),
+      life: 1,
+      bright: Math.random() < 0.45,
+    });
+  }
+
+  function drawTape(time, glitch) {
+    //  Tape wobble: a slow horizontal displacement that varies down the frame,
+    //  which is what a stretched tape does. Drawn by copying the bar image back
+    //  over itself in horizontal slices, offset by a few pixels.
+    //
+    //  Ten slices rather than twenty-two: each slice is a full-width blit, so the
+    //  slice count is a direct multiplier on the frame cost, and ten already
+    //  gives a displacement that varies smoothly enough down the frame.
+    const wob = Math.sin(time * CONFIG.wobbleHz * TAU * 0.5) * 0.5
+      + Math.sin(time * 1.31) * 0.3;
+    const slices = 10;
+    for (let i = 0; i < slices; i++) {
+      const y = (i / slices) * H;
+      const h = H / slices + 1;
+      // Displacement grows toward the bottom of the frame, as the tape tension
+      // does at the head drum.
+      const t = i / slices;
+      const dx = (wob * t * 2.4 + Math.sin(time * 2.1 + i * 0.7) * 0.35 * t) * (U * 0.0034);
+      if (Math.abs(dx) < 0.05) continue;
+      ctx.drawImage(bars,
+        0, Math.floor(y * DPR), Math.floor(W * DPR), Math.ceil(h * DPR),
+        dx, y, W, h);
+    }
+
+    //  The tracking glitch: a large skew for a second or so, as the deck loses
+    //  lock. Drawn as displaced bands across the whole frame.
+    if (glitch > 0.01) {
+      const bands = 9;
+      for (let i = 0; i < bands; i++) {
+        const y = (i / bands) * H + Math.sin(time * 7 + i) * 40;
+        const h = H / bands + 1;
+        const dx = Math.sin(time * 5.3 + i * 1.9) * glitch * U * 0.09;
+        ctx.drawImage(bars,
+          0, Math.floor(clamp(y, 0, H - 1) * DPR), Math.floor(W * DPR), Math.ceil(Math.min(h, H - y) * DPR),
+          dx, y, W, h);
+      }
+      // A bright tear line through the middle of the glitch.
+      ctx.fillStyle = `rgba(232, 236, 255, ${(0.30 * glitch).toFixed(3)})`;
+      const ty = H * (0.25 + 0.5 * Math.abs(Math.sin(time * 1.7)));
+      ctx.fillRect(0, ty, W, Math.max(1, U * 0.004));
+    }
+
+    //  Head-switching noise: the ragged band at the very bottom where the
+    //  video head swaps, present on every VHS tape ever played.
+    const hsH = H * CONFIG.headSwitchH;
+    const hsY = H - hsH;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, hsY, W, hsH);
+    ctx.clip();
+    ctx.fillStyle = "rgba(10, 10, 14, 0.86)";
+    ctx.fillRect(0, hsY, W, hsH);
+    // Ragged teeth, so the boundary is not a clean line.
+    ctx.fillStyle = "rgba(240, 240, 245, 0.35)";
+    for (let x = 0; x < W; x += Math.max(3, U * 0.004)) {
+      const t = Math.random();
+      const th = hsH * (0.25 + t * 0.75);
+      ctx.fillRect(x, hsY + hsH - th, Math.max(2, U * 0.003), th);
+    }
+    ctx.restore();
+    // A wash of white through the middle of the band.
+    ctx.fillStyle = `rgba(220, 226, 236, ${(0.20 + 0.10 * Math.sin(time * 8)).toFixed(3)})`;
+    ctx.fillRect(W * 0.36, hsY, W * 0.28, hsH * 0.5);
+
+    //  Dropouts: oxide shedding, as short bright or dark specks. Emitted from a
+    //  rate rather than every frame, so they read as defects rather than noise.
+    for (let i = drops.length - 1; i >= 0; i--) {
+      const d = drops[i];
+      d.life -= 1 / 60 * 3.4;
+      if (d.life <= 0) { drops.splice(i, 1); continue; }
+      ctx.fillStyle = d.bright
+        ? `rgba(255, 255, 255, ${(0.55 * d.life).toFixed(3)})`
+        : `rgba(6, 6, 10, ${(0.70 * d.life).toFixed(3)})`;
+      ctx.fillRect(d.x * W, d.y * H, d.w * W, Math.max(1, d.h * H));
+    }
+
+    //  Chroma smear: a faint, wider copy of the bars offset to the right. VHS
+    //  carries colour on a subcarrier with far less bandwidth than luminance, so
+    //  colour bleeds sideways while edges stay sharp — this is the single most
+    //  recognisable thing about the format.
+    //
+    //  Composited at half resolution. Chroma bleed is by definition soft and
+    //  low-bandwidth, so downscaling loses nothing of the effect, and this was
+    //  the most expensive single operation on the page: a full-frame screen
+    //  composite at 1920x1080 is 2 MPx of blending per frame.
+    const sw = Math.max(1, Math.round(W * 0.5));
+    const sh = Math.max(1, Math.round(H * 0.5));
+    if (!smear) smear = document.createElement('canvas');
+    if (smear.width !== sw || smear.height !== sh) { smear.width = sw; smear.height = sh; }
+    const sm = smear.getContext('2d');
+    sm.setTransform(1, 0, 0, 1, 0, 0);
+    sm.globalCompositeOperation = 'source-over';
+    sm.clearRect(0, 0, sw, sh);
+    sm.drawImage(bars, 0, 0, sw, sh);
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    ctx.globalAlpha = 0.16;
+    ctx.drawImage(smear, U * 0.006, 0, W, H);
+    ctx.restore();
+
+    //  The rolling brightness bar, as a deck with a dirty head has.
+    const rollY = ((time * CONFIG.rollHz) % 1) * (H + H * 0.4) - H * 0.4;
+    const bandH = H * 0.22;
+    const g = ctx.createLinearGradient(0, rollY, 0, rollY + bandH);
+    g.addColorStop(0, "rgba(255,255,255,0)");
+    g.addColorStop(0.5, "rgba(255,255,255,0.075)");
+    g.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, rollY, W, bandH);
+
+    // A second, fainter darker bar on a slightly different rate, so the two
+    // never line up and the picture always feels unsettled.
+    const darkY = ((time * CONFIG.rollHz * 0.62) % 1) * (H + H * 0.5) - H * 0.5;
+    const g2 = ctx.createLinearGradient(0, darkY, 0, darkY + bandH * 1.6);
+    g2.addColorStop(0, "rgba(0,0,0,0)");
+    g2.addColorStop(0.5, "rgba(0,0,0,0.16)");
+    g2.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = g2;
+    ctx.fillRect(0, darkY, W, bandH * 1.6);
+  }
+
+  // ---------------- loop ----------------
+  let last = performance.now();
+  let ready = false;
+  const start = performance.now();
+  let dropAcc = 0;
+  let nextGlitch = 0;
+  let glitchT = -1;
+  const counterEl = document.getElementById("counter");
+
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.max(1, Math.floor(window.innerWidth));
+    H = Math.max(1, Math.floor(window.innerHeight));
+    U = Math.min(W, H);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    paintBars();
+    drops.length = 0;
+  }
+  window.addEventListener("resize", resize, { passive: true });
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = (now - start) / 1000;
+
+    // Dropouts at a rate, plus a burst during a glitch.
+    dropAcc += dt * CONFIG.dropoutRate * (glitchT >= 0 ? 4 : 1);
+    while (dropAcc >= 1) { dropAcc -= 1; spawnDrop(); }
+
+    if (glitchT < 0 && time >= nextGlitch) {
+      glitchT = 0;
+      nextGlitch = time + rand(CONFIG.glitchEvery[0], CONFIG.glitchEvery[1]);
+    }
+    let glitch = 0;
+    if (glitchT >= 0) {
+      glitchT += dt;
+      const t = glitchT / CONFIG.glitchSeconds;
+      // Snap on, ease off.
+      glitch = t < 0.2 ? t / 0.2 : Math.pow(Math.max(0, 1 - (t - 0.2) / 0.8), 0.7);
+      if (glitchT >= CONFIG.glitchSeconds) glitchT = -1;
+    }
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.drawImage(bars, 0, 0, W, H);
+    drawTape(time, glitch);
+
+    // The deck's counter, as an OSD in the corner.
+    const t = Math.floor(time);
+    const hh = Math.floor(t / 3600);
+    const mm = String(Math.floor((t % 3600) / 60)).padStart(2, "0");
+    const ss = String(t % 60).padStart(2, "0");
+    if (counterEl) counterEl.textContent = `${hh}:${mm}:${ss}`;
+
+    if (!ready) { ready = true; document.body.classList.add("ready"); }
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  nextGlitch = 3.5;
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
