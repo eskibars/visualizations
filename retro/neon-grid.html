@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Neon Grid</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0118; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 128% 104% at 50% 46%,
+        rgba(0,0,0,0) 44%, rgba(0,0,0,.30) 82%, rgba(0,0,0,.74) 100%);
+    }
+    .scanlines {
+      pointer-events: none; position: fixed; inset: 0; opacity: .5;
+      background: repeating-linear-gradient(0deg,
+        rgba(0,0,0,.22) 0 1px, rgba(0,0,0,0) 1px 3px);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(255, 150, 220, .34);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="scanlines"></div>
+  <div class="vignette"></div>
+  <div class="caption">outrun · 1984</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  NEON GRID — the classic outrun horizon, drawn honestly. A
+  //  striped sun setting behind a grid plain, receding to a
+  //  vanishing point; the grid scrolls toward the viewer, the sun
+  //  sinks, and the whole palette slides from magenta through
+  //  orange as it goes down. Mountains and a sea line sit on the
+  //  horizon; stars come out above.
+  //
+  //  Construction notes
+  //  ------------------
+  //  The sun (with its cut stripes), the mountains, the sea and the
+  //  sky gradient are painted into a per-resize backdrop at the
+  //  current sunset phase and repainted only when the phase has
+  //  moved enough to see. The grid is the only thing drawn every
+  //  frame, as lines: the verticals converge on the vanishing point
+  //  and the horizontals are spaced by a power law, which is all it
+  //  takes to read as a plane in perspective.
+  // ============================================================
+  const CONFIG = {
+    //  Bright hairlines on near-black. A 1.6 store keeps them crisp on a big
+    //  display and is still cheap, because the grid is lines rather than fill.
+    dprCap: 1.6,
+
+    horizon: 0.52,
+    sunR: 0.20,              // fraction of min(W,H)
+    sunDrop: 0.16,           // how far the sun sinks below the horizon at the end
+
+    gridCols: 22,
+    gridRows: 30,
+    gridScroll: 0.34,        // rows per second toward the viewer
+    gridGlow: 0.42,
+
+    mountainCount: 14,
+    starCount: 220,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  const TAU = Math.PI * 2;
+
+  const horizonY = () => H * CONFIG.horizon;
+
+  //  Sunset phase 0..1 runs from high magenta noon-ish light down to a deep
+  //  violet night. Every colour in the scene is a lerp between two stops, so
+  //  the whole frame changes together rather than element by element.
+  const PHASES = [
+    { t: 0.00, skyTop: [24, 6, 48],   skyBot: [86, 22, 92],  sunCore: [255, 214, 120], sunEdge: [255, 70, 150], grid: [255, 60, 190], sea: [40, 8, 66] },
+    { t: 0.42, skyTop: [40, 8, 66],   skyBot: [156, 40, 104], sunCore: [255, 236, 150], sunEdge: [255, 96, 120], grid: [255, 84, 190], sea: [48, 10, 74] },
+    { t: 0.68, skyTop: [28, 6, 58],   skyBot: [214, 84, 88],  sunCore: [255, 244, 176], sunEdge: [255, 120, 90],  grid: [255, 110, 170], sea: [34, 8, 62] },
+    { t: 1.00, skyTop: [12, 2, 34],   skyBot: [76, 20, 92],   sunCore: [255, 230, 170], sunEdge: [200, 60, 140],  grid: [220, 70, 220], sea: [18, 4, 42] },
+  ];
+
+  function phaseAt(t) {
+    let i = 0;
+    while (i < PHASES.length - 2 && t > PHASES[i + 1].t) i++;
+    const a = PHASES[i], b = PHASES[i + 1];
+    const k = clamp((t - a.t) / Math.max(1e-6, b.t - a.t), 0, 1);
+    const mix = (p, q) => [
+      Math.round(lerp(p[0], q[0], k)),
+      Math.round(lerp(p[1], q[1], k)),
+      Math.round(lerp(p[2], q[2], k)),
+    ];
+    return {
+      skyTop: mix(a.skyTop, b.skyTop),
+      skyBot: mix(a.skyBot, b.skyBot),
+      sunCore: mix(a.sunCore, b.sunCore),
+      sunEdge: mix(a.sunEdge, b.sunEdge),
+      grid: mix(a.grid, b.grid),
+      sea: mix(a.sea, b.sea),
+      t,
+    };
+  }
+
+  const rgb = (c, a) => a === undefined
+    ? `rgb(${c[0]}, ${c[1]}, ${c[2]})`
+    : `rgba(${c[0]}, ${c[1]}, ${c[2]}, ${a.toFixed(3)})`;
+
+  // ---------------- stars and mountains ----------------
+  let stars = [];
+  let mountains = [];
+
+  function seedScene() {
+    stars = [];
+    for (let i = 0; i < CONFIG.starCount; i++) {
+      stars.push({
+        x: Math.random(), y: Math.random(),
+        r: rand(0.5, 1.7) * (U / 1080),
+        a: rand(0.15, 0.75),
+        ph: rand(0, TAU),
+      });
+    }
+    mountains = [];
+    const hy = horizonY();
+    //  Two ranges, far and near, each a jagged silhouette. Generated once per
+    //  resize so the skyline does not crawl.
+    for (const band of [{ d: 0, h: 0.10 }, { d: 1, h: 0.055 }]) {
+      const pts = [];
+      const n = CONFIG.mountainCount + band.d * 8;
+      for (let i = 0; i <= n; i++) {
+        const x = (i / n) * W;
+        const jitter = Math.abs(Math.sin(i * 1.7 + band.d * 3.1) * Math.cos(i * 0.6 + band.d));
+        const y = hy - band.h * H * (0.35 + jitter * 0.9) * (band.d ? 0.72 : 1);
+        pts.push({ x, y });
+      }
+      mountains.push({ pts, depth: band.d });
+    }
+  }
+
+  // ---------------- backdrop ----------------
+  let backdrop = null;
+  let backdropPhase = -1;
+  const PHASE_STEP = 0.0035;
+
+  function paintBackdrop(pal) {
+    if (!backdrop) backdrop = document.createElement('canvas');
+    const lw = Math.max(1, Math.floor(W * DPR));
+    const lh = Math.max(1, Math.floor(H * DPR));
+    if (backdrop.width !== lw || backdrop.height !== lh) {
+      backdrop.width = lw;
+      backdrop.height = lh;
+    }
+    const g = backdrop.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+    const hy = horizonY();
+    const cx = W * 0.5;
+    const R = U * CONFIG.sunR;
+
+    // Sky.
+    const sky = g.createLinearGradient(0, 0, 0, hy);
+    sky.addColorStop(0, rgb(pal.skyTop));
+    sky.addColorStop(0.62, rgb(mixRgb(pal.skyTop, pal.skyBot, 0.55)));
+    sky.addColorStop(1, rgb(pal.skyBot));
+    g.fillStyle = sky;
+    g.fillRect(0, 0, W, hy);
+
+    // Stars, fading in as the sun goes down.
+    const starVis = clamp((pal.t - 0.25) / 0.75, 0, 1);
+    if (starVis > 0.01) {
+      g.save();
+      for (const s of stars) {
+        // Only above the sun's own height, and thinning toward the horizon.
+        const sy = s.y * hy * 0.82;
+        const a = s.a * starVis * (1 - sy / (hy * 0.9));
+        if (a <= 0.02) continue;
+        g.fillStyle = `rgba(232, 240, 255, ${a.toFixed(3)})`;
+        g.fillRect(s.x * W, sy, s.r, s.r);
+      }
+      g.restore();
+    }
+
+    //  The sun: a disc with horizontal stripes cut out of its lower half.
+    //
+    //  Three things have to be right or the whole look collapses. The stripes
+    //  must be *cut* from the disc, not drawn over it. They must only affect the
+    //  part of the disc that is below the horizon line — otherwise they show as
+    //  stripes floating in the sky above the sea. And the sun must not be drawn
+    //  below the horizon at all, because the grid plane starts there.
+    const sunY = hy - R * 0.30 + pal.t * R * CONFIG.sunDrop * 2;
+    const sunGrad = g.createLinearGradient(cx, sunY - R, cx, sunY + R);
+    sunGrad.addColorStop(0, rgb(pal.sunCore));
+    sunGrad.addColorStop(0.45, rgb(mixRgb(pal.sunCore, pal.sunEdge, 0.55)));
+    sunGrad.addColorStop(1, rgb(pal.sunEdge));
+    g.save();
+    // Clip to the disc AND to the sky above the horizon.
+    g.beginPath();
+    g.arc(cx, sunY, R, 0, TAU);
+    g.clip();
+    g.beginPath();
+    g.rect(0, 0, W, hy);
+    g.clip();
+    g.fillStyle = sunGrad;
+    g.fillRect(cx - R, sunY - R, R * 2, R * 2);
+    // Stripes, cut from the disc and widening downward. The lowest stripes are
+    // the widest, which is what gives the disc its dissolving edge.
+    g.globalCompositeOperation = 'destination-out';
+    for (let i = 0; i < 14; i++) {
+      const t = i / 13;
+      const sy = sunY - R * 0.02 + t * R * 0.98;
+      const h = R * (0.008 + t * t * 0.10);
+      g.fillRect(cx - R, sy, R * 2, h);
+    }
+    g.globalCompositeOperation = 'source-over';
+    g.restore();
+
+    // Sun glow, behind everything on the horizon. Kept tight: a wide glow over
+    // the whole sea band washed out the grid below it, which is the one thing
+    // this piece exists to show.
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    const glow = g.createRadialGradient(cx, sunY, R * 0.7, cx, sunY, R * 1.9);
+    glow.addColorStop(0, rgb(pal.sunEdge, 0.24));
+    glow.addColorStop(0.45, rgb(pal.sunEdge, 0.07));
+    glow.addColorStop(1, rgb(pal.sunEdge, 0));
+    g.fillStyle = glow;
+    g.fillRect(0, 0, W, hy + H * 0.06);
+    g.restore();
+
+    // Mountains, far then near.
+    for (const m of mountains) {
+      const shade = m.depth ? 0.34 : 0.62;
+      g.fillStyle = `rgb(${Math.round(pal.skyTop[0] * shade + 6)}, ${Math.round(pal.skyTop[1] * shade + 2)}, ${Math.round(pal.skyTop[2] * shade + 16)})`;
+      g.beginPath();
+      g.moveTo(0, hy);
+      for (const p of m.pts) g.lineTo(p.x, p.y);
+      g.lineTo(W, hy);
+      g.closePath();
+      g.fill();
+      // A lit rim on the sun's side, which is what makes them read as ranges.
+      g.save();
+      g.globalCompositeOperation = 'lighter';
+      g.strokeStyle = rgb(pal.sunEdge, m.depth ? 0.05 : 0.11);
+      g.lineWidth = Math.max(1, U * 0.0018);
+      g.beginPath();
+      g.moveTo(m.pts[0].x, m.pts[0].y);
+      for (const p of m.pts) g.lineTo(p.x, p.y);
+      g.stroke();
+      g.restore();
+    }
+
+    //  A thin dark sea at the horizon, where the sun's own reflection sits. It
+    //  is deliberately narrow: the grid plane starts here, and a wide band would
+    //  push the grid away from the horizon it is supposed to converge on.
+    const seaBot = hy + H * 0.020;
+    const sea = g.createLinearGradient(0, hy, 0, seaBot);
+    sea.addColorStop(0, rgb(mixRgb(pal.sea, pal.sunEdge, 0.22)));
+    sea.addColorStop(1, rgb(mixRgb(pal.sea, [0, 0, 0], 0.30)));
+    g.fillStyle = sea;
+    g.fillRect(0, hy, W, seaBot - hy + 1);
+
+    // The sun's reflection on that water: a column of short dashes.
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < 10; i++) {
+      const t = i / 9;
+      const y = hy + t * (seaBot - hy);
+      const len = U * (0.008 + t * 0.028) * (0.45 + Math.random() * 0.9);
+      g.fillStyle = rgb(pal.sunCore, 0.16 * (1 - t * 0.7));
+      g.fillRect(cx - len / 2, y, len, Math.max(1, U * 0.0014));
+    }
+    g.restore();
+
+    //  The ground plane the grid is drawn on.
+    //
+    //  This fill is load-bearing, not cosmetic. The backdrop is blitted onto the
+    //  main canvas every frame with drawImage, and drawImage leaves the
+    //  destination untouched wherever the source is transparent. Without an
+    //  opaque fill here, the region below the sea stayed transparent, so each
+    //  frame's grid lines were composited over the previous frame's instead of
+    //  replacing them, and the whole plane saturated into a flat pink slab.
+    const ground = g.createLinearGradient(0, seaBot, 0, H);
+    ground.addColorStop(0, rgb(mixRgb(pal.sea, [0, 0, 0], 0.40)));
+    ground.addColorStop(0.35, rgb(mixRgb(pal.sea, [0, 0, 0], 0.62)));
+    ground.addColorStop(1, rgb(mixRgb(pal.sea, [0, 0, 0], 0.80)));
+    g.fillStyle = ground;
+    g.fillRect(0, seaBot, W, H - seaBot);
+
+    backdropPhase = pal.t;
+  }
+
+  function mixRgb(a, b, t) {
+    return [
+      Math.round(lerp(a[0], b[0], t)),
+      Math.round(lerp(a[1], b[1], t)),
+      Math.round(lerp(a[2], b[2], t)),
+    ];
+  }
+
+  // ---------------- grid ----------------
+  //  Perspective grid below the sea line. The verticals converge on the vanishing
+  //  point; the horizontals are spaced by a power law so they crowd toward the
+  //  horizon and open up near the viewer, which is what a ground plane looks like.
+  function drawGrid(time, pal) {
+    const hy = horizonY() + H * 0.020;
+    const vpx = W * 0.5;
+    const bottom = H * 1.02;
+    const rows = CONFIG.gridRows;
+
+    ctx.save();
+    ctx.lineCap = 'round';
+
+    // Horizontals: scroll toward the viewer and wrap.
+    const scroll = (time * CONFIG.gridScroll) % 1;
+    for (let i = 0; i <= rows; i++) {
+      //  u is the row's normalised depth; squaring it is the perspective. The
+      //  scroll offset is added before the squaring so the rows accelerate as
+      //  they approach, which is what sells the motion.
+      let u = (i + scroll) / rows;
+      if (u > 1) u -= 1;
+      const depth = Math.pow(u, 2.1);
+      const y = lerp(hy, bottom, depth);
+      if (y < hy - 1) continue;
+      //  Opacity rises with depth rather than falling: rows near the horizon are
+      //  the faint ones. The first version had this inverted, so the grid was
+      //  brightest as a solid slab at the bottom of the frame.
+      const fade = Math.pow(depth, 0.55);
+      const a = CONFIG.gridGlow * (0.16 + fade * 0.84);
+      ctx.strokeStyle = rgb(pal.grid, a);
+      ctx.lineWidth = Math.max(0.9, U * (0.0014 + fade * 0.0030));
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(W, y);
+      ctx.stroke();
+    }
+
+    // Verticals: fixed x on the horizon, fanning out to the frame's edges.
+    const cols = CONFIG.gridCols;
+    for (let k = -cols; k <= cols; k++) {
+      const t = k / cols;
+      //  The far x sits on a narrow band around the vanishing point; the near x
+      //  is spread across a much wider span. The ratio is the perspective.
+      const xFar = vpx + t * W * 0.10;
+      const xNear = vpx + t * W * 1.55;
+      const a = CONFIG.gridGlow * (0.55 - Math.abs(t) * 0.28);
+      if (a <= 0.02) continue;
+      ctx.strokeStyle = rgb(pal.grid, a);
+      ctx.lineWidth = Math.max(0.7, U * 0.0014);
+      ctx.beginPath();
+      ctx.moveTo(xFar, hy);
+      ctx.lineTo(xNear, bottom);
+      ctx.stroke();
+    }
+
+    // The horizon line itself, brightest of all.
+    ctx.strokeStyle = rgb(pal.grid, 0.85);
+    ctx.lineWidth = Math.max(1.2, U * 0.0022);
+    ctx.beginPath();
+    ctx.moveTo(0, hy);
+    ctx.lineTo(W, hy);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // ---------------- loop ----------------
+  let last = performance.now();
+  let ready = false;
+  const start = performance.now();
+  const CYCLE = 26;          // s per sunset pass
+
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.max(1, Math.floor(window.innerWidth));
+    H = Math.max(1, Math.floor(window.innerHeight));
+    U = Math.min(W, H);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    seedScene();
+    backdropPhase = -1;
+  }
+  window.addEventListener('resize', resize, { passive: true });
+
+  function frame(now) {
+    const time = (now - start) / 1000;
+    last = now;
+    //  A triangle wave, so the sun sinks and then rises again rather than
+    //  snapping back to the top of the cycle.
+    const raw = (time % CYCLE) / CYCLE;
+    const phase = raw < 0.5 ? raw * 2 : (1 - raw) * 2;
+
+    const pal = phaseAt(phase);
+    if (backdropPhase < 0 || Math.abs(phase - backdropPhase) >= PHASE_STEP) paintBackdrop(pal);
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.drawImage(backdrop, 0, 0, W, H);
+    drawGrid(time, pal);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
