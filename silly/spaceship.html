@@ -267,7 +267,9 @@
           bloomStrength: 0.25,
         },
         vignetteStrength: 0.45,
-        dpiCap: 2.0,                // cap devicePixelRatio for performance
+        // 2x means 4x the fill; the porthole is mostly dark starfield, so a
+        // 1.5 backing store is indistinguishable and far cheaper on a tablet.
+        dpiCap: 1.5,                // cap devicePixelRatio for performance
       };
 
       // ====== ELEMENTS / CANVAS SETUP ======

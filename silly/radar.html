@@ -5,7 +5,9 @@
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Radar</title>
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+    /* No remote webfont: the page has to render identically offline, and every
+       other visualization here is self-contained. ui-monospace resolves to the
+       platform's terminal face, which suits a CRT scope. */
     html,body{ margin:0; height:100%; overflow:hidden; background:#020a02; }
     canvas{ display:block; width:100vw; height:100vh; }
     .scanlines{
@@ -44,7 +46,7 @@
 (() => {
   // -------------------- Config --------------------
   const CFG = {
-    dprCap: 2,
+    dprCap: 1.6,
     sweepSpeed: 0.55,         // revolutions per second
     trailLength: 0.6,         // fraction of circle the glow trail covers
     rings: 4,                 // concentric range rings
@@ -156,7 +158,7 @@
 
     // Cardinal labels
     ctx.fillStyle = 'rgba(0, 255, 60, 0.30)';
-    ctx.font = '13px "Share Tech Mono", monospace';
+    ctx.font = '13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     const labels = ['N', 'E', 'S', 'W'];
@@ -172,7 +174,7 @@
 
     // Range labels
     ctx.fillStyle = 'rgba(0, 255, 60, 0.18)';
-    ctx.font = '10px "Share Tech Mono", monospace';
+    ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
     ctx.textAlign = 'left';
     for (let i = 1; i <= CFG.rings; i++) {
       const rr = (i / CFG.rings) * R;
@@ -266,7 +268,7 @@
       if (b.label && alpha > 0.25) {
         ctx.globalAlpha = alpha * 0.6;
         ctx.fillStyle = '#0f6';
-        ctx.font = '10px "Share Tech Mono", monospace';
+        ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
         ctx.textAlign = 'left';
         ctx.fillText(b.label, px + b.size + 5, py - 4);
       }
@@ -279,7 +281,7 @@
   function drawHUD(time, sweepAngle) {
     ctx.save();
     ctx.fillStyle = 'rgba(0, 255, 60, 0.35)';
-    ctx.font = '12px "Share Tech Mono", monospace';
+    ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 
     // Top-left info
     ctx.textAlign = 'left';

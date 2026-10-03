@@ -79,7 +79,7 @@
       // HiDPI handling
       let W=0, H=0, DPR=1;
       function resize(){
-        DPR = Math.max(1, Math.min(2.5, window.devicePixelRatio || 1));
+        DPR = Math.max(1, Math.min(1.5, window.devicePixelRatio || 1));
         W = Math.floor(window.innerWidth);
         H = Math.floor(window.innerHeight);
         canvas.width = Math.floor(W * DPR);

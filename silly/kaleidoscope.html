@@ -21,7 +21,7 @@
 (() => {
   // -------------------- Config --------------------
   const CFG = {
-    dprCap: 2,
+    dprCap: 1.6,
     segments: 12,          // number of mirror slices
     holdTime: 10.0,        // seconds to hold each pattern
     transitionTime: 1.5,   // seconds for crossfade
@@ -41,12 +41,68 @@
   // -------------------- Offscreen pattern canvases --------------------
   let patternA = null; // current pattern (offscreen canvas)
   let patternB = null; // next pattern (offscreen canvas)
+  //
+  // The kaleidoscope itself is cached. It is a pure function of (pattern,
+  // rotation, alpha), so re-running a dozen rotated full-canvas drawImage calls
+  // every frame merely redraws an identical image — the single most expensive
+  // thing this page does. Instead each (pattern, rotation) is rasterized once
+  // into an offscreen canvas and then blitted, so a steady frame costs one
+  // drawImage. Cached alpha replays cannot be reused (the pattern's colours are
+  // partly transparent, so scaling the cached image would fade it toward black
+  // rather than toward the background), so only alpha >= 0.99 is cached.
+  const CACHE_MAX = 6;
+  let rotCache = [];
 
   function createOffscreen(size) {
     const c = document.createElement('canvas');
     c.width = size;
     c.height = size;
     return c;
+  }
+
+  function clearRotCache() {
+    rotCache.length = 0;
+  }
+
+  // Rasterize one full kaleidoscope at the given rotation, at the current scale.
+  function bakeKaleidoscope(pattern, rotation) {
+    const bw = Math.max(1, Math.ceil(W * DPR));
+    const bh = Math.max(1, Math.ceil(H * DPR));
+    const c = createOffscreen(1);
+    c.width = bw;
+    c.height = bh;
+    const g = c.getContext('2d');
+    const sliceAngle = (Math.PI * 2) / CFG.segments;
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+    g.translate(W / 2, H / 2);
+    g.rotate(rotation);
+    for (let i = 0; i < CFG.segments; i++) {
+      g.save();
+      g.rotate(i * sliceAngle);
+      if (i % 2 === 1) g.scale(1, -1);
+      g.drawImage(pattern, -pattern.width / 2, -pattern.height / 2);
+      g.restore();
+    }
+    return c;
+  }
+
+  function bakedAt(pattern, rotation) {
+    //  The rotation drifts continuously, so keying the cache on the exact angle
+    //  would miss every frame and cost a full re-bake each time. Instead the
+    //  kaleidoscope is baked at a quantized base angle and the caller blits it
+    //  with the small residual rotation — one rotated blit (cheap) instead of
+    //  CFG.segments of them (expensive). A half-degree quantum is far below what
+    //  the eye can resolve in a rotating radial symmetry.
+    const QUANTUM = (Math.PI * 2) / 720;
+    const base = Math.floor(rotation / QUANTUM) * QUANTUM;
+    const key = base.toFixed(6);
+    for (const e of rotCache) {
+      if (e.pattern === pattern && e.key === key) return { canvas: e.canvas, base };
+    }
+    const canvas = bakeKaleidoscope(pattern, base);
+    rotCache.push({ pattern, key, canvas });
+    if (rotCache.length > CACHE_MAX) rotCache.shift();
+    return { canvas, base };
   }
 
   // -------------------- Random palette --------------------
@@ -193,6 +249,25 @@
   // -------------------- Draw kaleidoscope from a pattern --------------------
   function drawKaleidoscope(pattern, rotation, alpha) {
     if (!pattern) return;
+
+    // The common case — a held still frame — is a single blit of a cached
+    // rasterization instead of CFG.segments rotated full-canvas draws.
+    if (alpha >= 0.99) {
+      const baked = bakedAt(pattern, rotation);
+      const residual = rotation - baked.base;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      if (residual !== 0) {
+        ctx.translate(W / 2, H / 2);
+        ctx.rotate(residual);
+        ctx.drawImage(baked.canvas, -W / 2, -H / 2, W, H);
+      } else {
+        ctx.drawImage(baked.canvas, 0, 0, W, H);
+      }
+      ctx.restore();
+      return;
+    }
+
     const cx = W / 2;
     const cy = H / 2;
     const sliceAngle = (Math.PI * 2) / CFG.segments;
@@ -244,6 +319,7 @@
     // Regenerate patterns at new size
     patternA = generatePattern(Math.floor(R * 2));
     patternB = generatePattern(Math.floor(R * 2));
+    clearRotCache();
     state = STATE.HOLDING;
     stateTimer = 0;
   }

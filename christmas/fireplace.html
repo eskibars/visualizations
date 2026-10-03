@@ -255,7 +255,7 @@
   // -------------------- Canvas sizing --------------------
   function resize() {
     const rect = opening.getBoundingClientRect();
-    const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    const dpr = Math.max(1, Math.min(1.6, window.devicePixelRatio || 1));
     canvas.width = Math.floor(rect.width * dpr);
     canvas.height = Math.floor(rect.height * dpr);
     canvas._dpr = dpr;
@@ -272,6 +272,7 @@
     buf: null,
     img: null,
     imgData: null,
+    glow: null,
     palette: null,
     intensity: 1.0,
     paused: false
@@ -305,6 +306,10 @@
     sim.img.width = sim.w;
     sim.img.height = sim.h;
     sim.imgData = sim.img.getContext('2d').createImageData(sim.w, sim.h);
+    // Scratch buffer for the glow passes; see drawFire().
+    sim.glow = document.createElement('canvas');
+    sim.glow.width = sim.w;
+    sim.glow.height = sim.h;
   }
 
   function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
@@ -549,7 +554,9 @@
     }
     ctx.save();
     ctx.globalCompositeOperation = 'source-over';
-    ctx.filter = 'blur(6px)';
+    //  No ctx.filter here: the puff is already a radial gradient that fades to
+    //  zero alpha, so a per-particle blur added cost without changing how it
+    //  reads. The gradient is widened slightly to keep the softness.
     for (let i = smoke.length - 1; i >= 0; i--) {
       const s = smoke[i];
       if (!sim.paused){
@@ -562,12 +569,13 @@
 
       const a = s.a * (1 - age);
       ctx.globalAlpha = a;
-      const gr = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, s.r);
-      gr.addColorStop(0, 'rgba(120,140,160,.35)');
-      gr.addColorStop(0.5,'rgba(80,95,110,.18)');
+      const r = s.r * 1.35;
+      const gr = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, r);
+      gr.addColorStop(0, 'rgba(120,140,160,.30)');
+      gr.addColorStop(0.45,'rgba(80,95,110,.13)');
       gr.addColorStop(1, 'rgba(0,0,0,0)');
       ctx.fillStyle = gr;
-      ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, Math.PI*2); ctx.fill();
     }
     ctx.restore();
   }
@@ -713,27 +721,45 @@
     const fireW = w*0.76;
     const fireH = h*0.86;
 
+    //  Glow passes.
+    //
+    //  The sim buffer is 240x150. Applying ctx.filter blur to the *upscaled*
+    //  destination made each pass a full-resolution Gaussian — four of them per
+    //  frame, over most of the screen — which was by far the most expensive work
+    //  on this page. Blurring the small buffer first and then upscaling looks the
+    //  same (the upscale is itself a low-pass filter) for a small fraction of the
+    //  pixels. Radii are converted from destination pixels into sim pixels so the
+    //  softness is unchanged at any window size.
+    const upscale = fireW / sim.w;                    // destination px per sim px
+    const gctx = sim.glow.getContext('2d');
+    const blurredFire = (radiusDst) => {
+      const r = radiusDst / upscale;
+      gctx.filter = 'none';
+      gctx.globalCompositeOperation = 'source-over';
+      gctx.clearRect(0, 0, sim.w, sim.h);
+      gctx.filter = r > 0.15 ? `blur(${r.toFixed(2)}px)` : 'none';
+      gctx.drawImage(sim.img, 0, 0);
+      gctx.filter = 'none';
+      return sim.glow;
+    };
+
     // Wide ambient glow (diffuse light on walls)
     ctx.globalCompositeOperation = 'screen';
     ctx.globalAlpha = 0.35;
-    ctx.filter = 'blur(28px)';
-    ctx.drawImage(sim.img, fireX - 20, fireY - 10, fireW + 40, fireH + 10);
+    ctx.drawImage(blurredFire(28), fireX - 20, fireY - 10, fireW + 40, fireH + 10);
 
     // Medium glow (flame halo)
     ctx.globalAlpha = 0.50;
-    ctx.filter = 'blur(12px)';
-    ctx.drawImage(sim.img, fireX, fireY, fireW, fireH);
+    ctx.drawImage(blurredFire(12), fireX, fireY, fireW, fireH);
 
     // Core flame — soft enough to hide pixels, sharp enough for detail
     ctx.globalAlpha = 0.92;
     ctx.globalCompositeOperation = 'lighter';
-    ctx.filter = 'blur(4px)';
-    ctx.drawImage(sim.img, fireX, fireY, fireW, fireH);
+    ctx.drawImage(blurredFire(4), fireX, fireY, fireW, fireH);
 
     // Bright inner core for hottest areas
     ctx.globalAlpha = 0.30;
-    ctx.filter = 'blur(2px)';
-    ctx.drawImage(sim.img, fireX + fireW*0.1, fireY + fireH*0.1, fireW*0.8, fireH*0.8);
+    ctx.drawImage(blurredFire(2), fireX + fireW*0.1, fireY + fireH*0.1, fireW*0.8, fireH*0.8);
 
     // Tone it down a hair for realism
     ctx.globalCompositeOperation = 'source-over';

@@ -62,7 +62,7 @@
   // High DPI
   let W=0,H=0,DPR=1;
   function resize(){
-    DPR = Math.min(2, window.devicePixelRatio || 1);
+    DPR = Math.min(1.6, window.devicePixelRatio || 1);
     W = Math.floor(innerWidth);
     H = Math.floor(innerHeight);
     canvas.width  = Math.floor(W * DPR);

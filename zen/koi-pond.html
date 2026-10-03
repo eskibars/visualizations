@@ -306,17 +306,22 @@
 
     if (shadowPass) {
       ctx.save();
-      ctx.globalAlpha = 0.22 * f.depth;
       ctx.fillStyle = '#02070a';
-      ctx.beginPath();
       const ox = 10 * S * f.depth, oy = 14 * S * f.depth;
-      ctx.moveTo(left[0].x + ox, left[0].y + oy);
-      for (let i = 0; i < n; i++) ctx.lineTo(left[i].x + ox, left[i].y + oy);
-      for (let i = n - 1; i >= 0; i--) ctx.lineTo(right[i].x + ox, right[i].y + oy);
-      ctx.closePath();
-      ctx.filter = 'blur(4px)';
-      ctx.fill();
-      ctx.filter = 'none';
+      //  A blurred shadow fill costs the page a full-surface filter pass per
+      //  koi per frame. Stacking a few progressively larger translucent copies
+      //  of the same outline reads as an equally soft shadow for a fraction of
+      //  the work, because none of them needs a filter.
+      for (let layer = 0; layer < 3; layer++) {
+        const grow = layer * 2.2 * S * f.depth;
+        ctx.globalAlpha = 0.09 * f.depth;
+        ctx.beginPath();
+        ctx.moveTo(left[0].x + ox, left[0].y + oy + grow);
+        for (let i = 0; i < n; i++) ctx.lineTo(left[i].x + ox, left[i].y + oy + grow);
+        for (let i = n - 1; i >= 0; i--) ctx.lineTo(right[i].x + ox, right[i].y + oy + grow);
+        ctx.closePath();
+        ctx.fill();
+      }
       ctx.restore();
       return;
     }

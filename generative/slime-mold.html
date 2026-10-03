@@ -256,8 +256,17 @@
   }
 
   // -------------------- render --------------------
+  //
+  //  A bounded recomposite (only the cells the agents just wrote) would be
+  //  wrong here: the diffusion pass rewrites every cell and decays the whole
+  //  field each frame, and putImageData is clipped to the canvas, so a
+  //  shrinking bound would leave stale pixels and freeze the outer margin. The
+  //  full pass over the sim grid is cheap next to stepping 320k agents, which is
+  //  what actually limits this page; adapt() below trims the agent count to hold
+  //  the frame budget on slower devices.
   function render() {
     const d = img.data;
+
     for (let i = 0, n = W * H; i < n; i++) {
       let v = trail[i] / 26;
       v = v / (1 + v);                    // soft knee
@@ -269,6 +278,7 @@
       d[o + 2] = lut[l + 2];
       d[o + 3] = 255;
     }
+
     offCtx.putImageData(img, 0, 0);
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';

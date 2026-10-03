@@ -21,7 +21,10 @@
 (() => {
   // -------------------- Config --------------------
   const CFG = {
-    dprCap: 2,
+    //  A 2x backing store costs 4x the fill of 1x, which is the difference
+    //  between a comfortable and an unusable frame rate on a low-power device.
+    //  This scene is hazy and low-contrast, so 1.5 is visually lossless here.
+    dprCap: 1.5,
     horizonY: 0.68,
     lakeY: 0.70,
     mountainCount: 7,

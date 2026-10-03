@@ -472,10 +472,35 @@
       to{ transform:translateX(-50%) }
     }
 
-    /* Responsive fallback */
-    @media (max-aspect-ratio: 4/3){
-      .screen{ grid-template-columns: 1fr; }
-      .right{ min-height: 52vh; }
+    /* Responsive fallback.
+       Stack only when the viewport is genuinely narrow or portrait, where two
+       columns cannot be legible. A merely short viewport keeps its two columns
+       and is scaled to fit by --fit (set from JS), because reflowing to a single
+       tall column needs MORE scaling than the two-column layout does. */
+    @media (max-aspect-ratio: 4/3), (max-width: 900px){
+      html,body{ overflow:hidden; }
+      .screen{
+        grid-template-columns: 1fr;
+        grid-template-rows: auto auto;
+        transform-origin: 0 0;
+        transform: scale(var(--fit, 1));
+        height: auto;
+        min-height: 0;
+        width: min(100vw, 1100px);
+        max-width: none;
+      }
+      .right{ min-height: 0; }
+    }
+
+    /* Short viewports keep the two-column console, scaled down. */
+    @media (min-aspect-ratio: 4/3) and (max-height: 880px){
+      html,body{ overflow:hidden; }
+      .screen{
+        transform-origin: 0 0;
+        transform: scale(var(--fit, 1));
+        height: auto;
+        min-height: 0;
+      }
     }
   </style>
 </head>
@@ -1103,12 +1128,77 @@
       setAlert("GREEN");
       setInterval(tick, CONFIG.updateMs);
       tick();
+      fitToViewport();
+      requestAnimationFrame(fitToViewport);
 
       // Recreate nodes on resize (keeps things crisp if browser re-renders)
       window.addEventListener("resize", () => {
         // no heavy work; just refresh the marquee + nodes
         createNodes();
+        fitToViewport();
       }, { passive:true });
+
+      // ---- Fit the console to short or tablet-shaped viewports -------------
+      //
+      // The stacked layout is taller than a tablet viewport, so scale it down
+      // rather than letting a fullscreen console scroll. Measuring starts from
+      // scale 1, otherwise each pass would compound the previous transform.
+      // `var` rather than `let`: the boot sequence calls fitToViewport() above
+      // this declaration, and a `let` would still be in its temporal dead zone.
+      var fittedKey = "";
+      function fitToViewport(){
+        const screen = document.querySelector(".screen");
+        if (!screen) return;
+        const stackAt = window.matchMedia("(max-aspect-ratio: 4/3), (max-width: 900px)").matches;
+        const needsFit =
+          stackAt || window.matchMedia("(max-height: 880px)").matches;
+        const clear = () => {
+          screen.style.removeProperty("--fit");
+          screen.style.removeProperty("margin-left");
+          screen.style.removeProperty("margin-top");
+          fittedKey = "";
+        };
+        if (!needsFit){ clear(); return; }
+
+        const vw = window.innerWidth, vh = window.innerHeight, pad = 12;
+        screen.style.marginLeft = "0px";
+        screen.style.marginTop = "0px";
+        screen.style.setProperty("--fit", "1");
+
+        let fit = 1;
+        for (let i = 0; i < 5; i++){
+          screen.style.setProperty("--fit", String(fit));
+          const r = screen.getBoundingClientRect();
+          if (!r.height || !r.width) return;
+          const over = Math.max(r.height / (vh - pad), r.width / (vw - pad), 1);
+          if (over <= 1.001) break;
+          fit = Math.max(0.25, fit / over);
+        }
+        screen.style.setProperty("--fit", String(fit));
+        fittedKey = vw + "x" + vh + "x" + Math.round(screen.scrollHeight);
+
+        const r = screen.getBoundingClientRect();
+        screen.style.marginLeft = Math.max(0, (vw - r.width) / 2) + "px";
+        screen.style.marginTop = Math.max(0, (vh - r.height) / 2) + "px";
+      }
+      function refitIfContentChanged(){
+        const screen = document.querySelector(".screen");
+        if (!screen) return;
+        const key = window.innerWidth + "x" + window.innerHeight + "x" + Math.round(screen.scrollHeight);
+        if (key === fittedKey) return;
+        fitToViewport();
+      }
+      if (window.ResizeObserver){
+        const screenEl = document.querySelector(".screen");
+        if (screenEl){
+          let pending = false;
+          new ResizeObserver(() => {
+            if (pending) return;
+            pending = true;
+            requestAnimationFrame(() => { pending = false; refitIfContentChanged(); });
+          }).observe(screenEl);
+        }
+      }
 
       // Optional: click to cycle alert state (useful during setup; harmless on kiosk)
       document.addEventListener("click", () => {

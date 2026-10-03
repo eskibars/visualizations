@@ -127,6 +127,20 @@
         a: rand(0.15, 0.7),
       });
     }
+    buildPalBuckets();
+  }
+
+  // Indices grouped by palette colour. The render loop draws one palette colour
+  // at a time so `fillStyle` is set four times per frame instead of once per
+  // star; this only changes when the galaxy is reseeded.
+  let palBuckets = null;
+  function buildPalBuckets() {
+    const N = CONFIG.stars;
+    palBuckets = [[], [], [], []];
+    for (let i = 0; i < N; i++) {
+      const p = S_h[i];
+      if (palBuckets[p]) palBuckets[p].push(i);
+    }
   }
 
   const PALETTE = [
@@ -229,20 +243,41 @@
     const N = CONFIG.stars;
     const precess = Math.sin(time * CONFIG.precession) * 0.10;
 
-    // dim stars: cheap rects
-    for (let i = 0; i < N; i++) {
-      const theta = S_t[i] + S_o[i] * time;
-      const r = S_r[i] * R;
-      const px = cx + Math.cos(theta + precess * S_r[i]) * r;
-      const py = cy + Math.sin(theta + precess * S_r[i]) * r * squash;
-      if (px < -4 || px > W + 4 || py < -4 || py > H + 4) continue;
-      const col = PALETTE[S_h[i]];
-      const tw = 0.82 + 0.18 * Math.sin(time * (1.5 + S_o[i] * 8) + S_t[i] * 7);
-      const a = S_b[i] * tw;
-      const s = S_s[i] * DPR;
-      ctx.fillStyle = `rgba(${col[0]},${col[1]},${col[2]},${a.toFixed(3)})`;
-      ctx.fillRect(px, py, s, s);
+    // Dim stars: tiny additive rects.
+    //
+    // This loop used to build a fresh `rgba(r,g,b,a)` template string per star
+    // per frame — 30k string allocations (and 30k CSS colour parses) every
+    // frame, which cost far more than the 1-2 px rects it was drawing. The
+    // palette has only four entries, and with additive blending the alpha is
+    // exactly a channel scale, so each palette colour is now drawn at full
+    // intensity under a globalAlpha. Same result, no allocations.
+    const TO_PALETTE = [0, 1, 2, 3];
+    if (!palBuckets) buildPalBuckets();
+    let lastAlpha = -1;
+    for (let p = 0; p < PALETTE.length; p++) {
+      const pal = PALETTE[p];
+      const ids = palBuckets[p];
+      if (!ids || !ids.length) continue;
+      ctx.fillStyle = `rgb(${pal[0]},${pal[1]},${pal[2]})`;
+      for (let k = 0; k < ids.length; k++) {
+        const i = ids[k];
+        const theta = S_t[i] + S_o[i] * time;
+        const r = S_r[i] * R;
+        const px = cx + Math.cos(theta + precess * S_r[i]) * r;
+        const py = cy + Math.sin(theta + precess * S_r[i]) * r * squash;
+        if (px < -4 || px > W + 4 || py < -4 || py > H + 4) continue;
+        const tw = 0.82 + 0.18 * Math.sin(time * (1.5 + S_o[i] * 8) + S_t[i] * 7);
+        // Quantized so the alpha only changes in visible steps; without this the
+        // globalAlpha setter would be touched for every single star.
+        const a = S_b[i] * tw;
+        const q = a < 0.02 ? 0 : Math.min(0.98, ((a * 24) | 0) / 24);
+        if (q === 0) continue;
+        if (q !== lastAlpha) { ctx.globalAlpha = q; lastAlpha = q; }
+        const s = S_s[i] * DPR;
+        ctx.fillRect(px, py, s, s);
+      }
     }
+    ctx.globalAlpha = 1;
 
     // bright stars: glow sprites
     const BN = CONFIG.brightStars;

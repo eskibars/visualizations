@@ -54,12 +54,54 @@
 
   let W=0, H=0, DPR=1;
   function resize() {
-    DPR = Math.min(2, window.devicePixelRatio || 1);
+    DPR = Math.min(1.6, window.devicePixelRatio || 1);
     W = Math.floor(window.innerWidth);
     H = Math.floor(window.innerHeight);
     canvas.width  = Math.floor(W * DPR);
     canvas.height = Math.floor(H * DPR);
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    backdropDirty = true;
+  }
+
+  // ------------------------------------------------------------
+  // Static backdrop cache
+  //
+  // sky + hills + ground never change shape or size; only the sky gradient
+  // drifts very slightly with time. Painting them fresh cost four fullscreen
+  // gradient fills, an 80-point hill polygon, and 120 `overlay`-blended grass
+  // strokes every single frame — a large fixed cost that had nothing to do with
+  // the animation. They are painted into an offscreen canvas instead and blitted
+  // as one image per frame, and repainted only when the sky drift has moved
+  // enough to matter or the window is resized.
+  let backdrop = null;
+  let backdropDirty = true;
+  let backdropDrift = -1;
+  const BACKDROP_DRIFT_STEP = 0.0025;   // in the same units fbm() returns
+
+  function drawScene(g, t){
+    drawSky(g, t);
+    drawDistantHills(g, t);
+    drawGround(g, t);
+  }
+
+  function ensureBackdrop(t){
+    const drift = fbm(t*0.02, 0.7, 101) * 0.04;
+    const changed = Math.abs(drift - backdropDrift) >= BACKDROP_DRIFT_STEP;
+    if (!backdropDirty && !changed) return;
+
+    if (!backdrop) backdrop = document.createElement('canvas');
+    const needW = Math.max(1, Math.floor(W * DPR));
+    const needH = Math.max(1, Math.floor(H * DPR));
+    if (backdrop.width !== needW || backdrop.height !== needH) {
+      backdrop.width = needW;
+      backdrop.height = needH;
+    }
+    const bg = backdrop.getContext('2d');
+    bg.setTransform(DPR, 0, 0, DPR, 0, 0);
+    bg.clearRect(0, 0, W, H);
+    drawScene(bg, t);
+    backdropDirty = false;
+    backdropDrift = drift;
   }
   window.addEventListener("resize", resize, { passive:true });
   resize();
@@ -206,100 +248,101 @@
     ctx.fillRect(0,0,W,H);
   }
 
-  function drawSky(t){
+  function drawSky(g, t){
     // Deep dawn-to-morning vibe with subtle drift
     const drift = fbm(t*0.02, 0.7, 101) * 0.04;
-    const g = ctx.createLinearGradient(0,0,0,H);
-    g.addColorStop(0.00, `rgb(10,16,26)`);
-    g.addColorStop(0.38+drift, `rgb(15,24,34)`);
-    g.addColorStop(0.70, `rgb(18,24,20)`);
-    g.addColorStop(1.00, `rgb(10,12,10)`);
-    ctx.fillStyle = g;
-    ctx.fillRect(0,0,W,H);
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+    const grad = g.createLinearGradient(0,0,0,H);
+    grad.addColorStop(0.00, `rgb(10,16,26)`);
+    grad.addColorStop(0.38+drift, `rgb(15,24,34)`);
+    grad.addColorStop(0.70, `rgb(18,24,20)`);
+    grad.addColorStop(1.00, `rgb(10,12,10)`);
+    g.fillStyle = grad;
+    g.fillRect(0,0,W,H);
 
     // Sun glow (soft, off-center for realism)
     const sx = W*0.68, sy = H*0.22;
     const sunR = Math.min(W,H)*0.22;
-    const sg = ctx.createRadialGradient(sx,sy,0, sx,sy,sunR);
+    const sg = g.createRadialGradient(sx,sy,0, sx,sy,sunR);
     sg.addColorStop(0.0, "rgba(255,240,210,0.22)");
     sg.addColorStop(0.3, "rgba(255,210,140,0.12)");
     sg.addColorStop(1.0, "rgba(255,180,110,0)");
-    ctx.fillStyle = sg;
-    ctx.fillRect(0,0,W,H);
+    g.fillStyle = sg;
+    g.fillRect(0,0,W,H);
 
     // Subtle cloud haze near horizon
     const hz = horizonY();
-    const hg = ctx.createLinearGradient(0,hz-60,0,hz+120);
+    const hg = g.createLinearGradient(0,hz-60,0,hz+120);
     hg.addColorStop(0, "rgba(255,255,255,0)");
     hg.addColorStop(0.5, `rgba(180,200,190,${0.08*CONFIG.haze})`);
     hg.addColorStop(1, "rgba(255,255,255,0)");
-    ctx.fillStyle = hg;
-    ctx.fillRect(0,hz-70,W,220);
+    g.fillStyle = hg;
+    g.fillRect(0,hz-70,W,220);
   }
 
-  function drawDistantHills(t){
+  function drawDistantHills(g, t){
     const hz = horizonY();
-    ctx.save();
-    ctx.globalAlpha = 0.75;
-    ctx.beginPath();
-    ctx.moveTo(0, hz+70);
+    g.save();
+    g.globalAlpha = 0.75;
+    g.beginPath();
+    g.moveTo(0, hz+70);
 
     const steps = 80;
     for(let i=0;i<=steps;i++){
       const x = (i/steps)*W;
       const n = fbm(i*0.07, t*0.02, 200) * 0.55;
       const y = hz + 55 + n*35;
-      ctx.lineTo(x,y);
+      g.lineTo(x,y);
     }
-    ctx.lineTo(W, H);
-    ctx.lineTo(0, H);
-    ctx.closePath();
+    g.lineTo(W, H);
+    g.lineTo(0, H);
+    g.closePath();
 
-    const g = ctx.createLinearGradient(0,hz,0,hz+220);
-    g.addColorStop(0, "rgba(20,30,26,0.65)");
-    g.addColorStop(1, "rgba(10,14,12,0.95)");
-    ctx.fillStyle = g;
-    ctx.fill();
-    ctx.restore();
+    const grad = g.createLinearGradient(0,hz,0,hz+220);
+    grad.addColorStop(0, "rgba(20,30,26,0.65)");
+    grad.addColorStop(1, "rgba(10,14,12,0.95)");
+    g.fillStyle = grad;
+    g.fill();
+    g.restore();
   }
 
-  function drawGround(t){
+  function drawGround(g, t){
     const gy = groundLineY();
-    const g = ctx.createLinearGradient(0,gy,0,H);
-    g.addColorStop(0, "rgb(9,14,10)");
-    g.addColorStop(0.6, "rgb(7,10,8)");
-    g.addColorStop(1, "rgb(4,6,5)");
-    ctx.fillStyle = g;
-    ctx.fillRect(0,gy,W,H-gy);
+    const grad = g.createLinearGradient(0,gy,0,H);
+    grad.addColorStop(0, "rgb(9,14,10)");
+    grad.addColorStop(0.6, "rgb(7,10,8)");
+    grad.addColorStop(1, "rgb(4,6,5)");
+    g.fillStyle = grad;
+    g.fillRect(0,gy,W,H-gy);
 
     // Soft grass texture
-    ctx.save();
-    ctx.globalAlpha = 0.18;
-    ctx.globalCompositeOperation = "overlay";
+    g.save();
+    g.globalAlpha = 0.18;
+    g.globalCompositeOperation = "overlay";
     const stripes = 120;
     for(let i=0;i<stripes;i++){
       const x = (i/stripes)*W;
       const n = fbm(i*0.15, t*0.2, 310);
       const y0 = gy + lerp(0, (H-gy)*0.82, (i/stripes)) + n*8;
-      ctx.beginPath();
-      ctx.moveTo(x, y0);
-      ctx.lineTo(x + n*10, y0 + 40 + Math.abs(n)*45);
-      ctx.strokeStyle = "rgba(140,170,120,0.18)";
-      ctx.lineWidth = 1;
-      ctx.stroke();
+      g.beginPath();
+      g.moveTo(x, y0);
+      g.lineTo(x + n*10, y0 + 40 + Math.abs(n)*45);
+      g.strokeStyle = "rgba(140,170,120,0.18)";
+      g.lineWidth = 1;
+      g.stroke();
     }
-    ctx.restore();
+    g.restore();
 
     // Near-ground fog/mist
-    ctx.save();
-    ctx.globalAlpha = 0.20 * CONFIG.haze;
-    const mg = ctx.createLinearGradient(0, gy-10, 0, H);
+    g.save();
+    g.globalAlpha = 0.20 * CONFIG.haze;
+    const mg = g.createLinearGradient(0, gy-10, 0, H);
     mg.addColorStop(0, "rgba(180,210,195,0)");
     mg.addColorStop(0.25, "rgba(160,190,170,0.10)");
     mg.addColorStop(1, "rgba(120,160,140,0.03)");
-    ctx.fillStyle = mg;
-    ctx.fillRect(0, gy-30, W, H-gy+40);
-    ctx.restore();
+    g.fillStyle = mg;
+    g.fillRect(0, gy-30, W, H-gy+40);
+    g.restore();
   }
 
   function colorForTree(z, trunkTint, hueShift, alpha=1){
@@ -420,6 +463,38 @@
   }
   }
 
+  //  Canopy sprites.
+  //
+  //  The canopy used to be 3-4 additive ellipses per branch tip, each with its
+  //  own `rgba()` string that the 2D backend had to parse and rasterize — the
+  //  single hottest loop on this page (it saturated the surface several times
+  //  over per frame). A pre-rendered soft radial sprite hides the `d`/`b` soft
+  //  term of the recursive branches entirely, so one blit costs the same as the
+  //  cluster it replaces and the canopy reading is unchanged: overlapping blobs
+  //  still accumulate additively, which is what built the depth in the first
+  //  place. Leaf colour still comes from leafColor(), so depth fog is preserved.
+  const LEAF_SPRITE_R = 64;
+  const leafSprites = new Map();
+  function leafSprite(r,g,b){
+    const key = r + ',' + g + ',' + b;
+    let s = leafSprites.get(key);
+    if (s) return s;
+    const S = LEAF_SPRITE_R;
+    const c = document.createElement('canvas');
+    c.width = c.height = S * 2;
+    const g2 = c.getContext('2d');
+    const grad = g2.createRadialGradient(S, S, 0, S, S, S);
+    // Opaque core fading to nothing, so a blit is soft without any blur filter.
+    grad.addColorStop(0,    `rgba(${r},${g},${b},1)`);
+    grad.addColorStop(0.35, `rgba(${r},${g},${b},0.62)`);
+    grad.addColorStop(0.7,  `rgba(${r},${g},${b},0.20)`);
+    grad.addColorStop(1,    `rgba(${r},${g},${b},0)`);
+    g2.fillStyle = grad;
+    g2.fillRect(0, 0, S * 2, S * 2);
+    leafSprites.set(key, c);
+    return c;
+  }
+
   function drawLeaves(endpoints, z, growth, t){
     if (growth < 0.42) return;
 
@@ -443,18 +518,21 @@
       // per-blob contribution low so the canopy stays green rather than
       // saturating.
       const a = (0.030 + 0.045*dens) * lerp(0.35, 1.0, (1-fog)) * (0.75 + 0.25*Math.sin(wobble + i*0.3));
-      ctx.fillStyle = leafColor(z, a);
+      if (a <= 0.004) continue;
 
-      // blob cluster
-      const blobs = 2 + Math.floor(2*dens);
-      for (let b=0;b<blobs;b++){
-        const ox = (vnoise2(i*1.7, b*2.3, 990)-0.5) * r0*1.2;
-        const oy = (vnoise2(i*2.1, b*1.9, 991)-0.5) * r0*1.2;
-        ctx.beginPath();
-        ctx.ellipse(x+ox, y+oy, r0*puff, r0*0.75*puff, (b*0.6+wobble)*0.5, 0, Math.PI*2);
-        ctx.fill();
-      }
+      // leafColor returns rgba(...) with the alpha already applied; the sprite
+      // carries its own falloff, so only the channels are needed here.
+      const col = leafColor(z, a);
+      const m = /rgba\((\d+),(\d+),(\d+)/.exec(col);
+      const sprite = leafSprite(+m[1], +m[2], +m[3]);
+
+      // One sprite at the mean cluster radius, scaled by the same puff and
+      // wobble terms as before.
+      const radius = r0 * puff * 1.55;
+      ctx.globalAlpha = a;
+      ctx.drawImage(sprite, x - radius, (y + Math.sin(wobble + i*0.3) * r0 * 0.18) - radius, radius * 2, radius * 2);
     }
+    ctx.globalAlpha = 1;
     ctx.restore();
   }
 
@@ -651,11 +729,11 @@
     // Clear
     ctx.clearRect(0,0,W,H);
 
-    // Layers
-    drawSky(t);
+    // Layers. The sky, hills and ground are blitted from a cached offscreen
+    // canvas (see ensureBackdrop); only the trees and atmospherics are redrawn.
+    ensureBackdrop(t);
+    ctx.drawImage(backdrop, 0, 0, W, H);
     drawSunRays(t);
-    drawDistantHills(t);
-    drawGround(t);
 
     // Trees
     for (const tr of trees){

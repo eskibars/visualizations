@@ -153,65 +153,112 @@
       tilt: rand(-0.06, 0.06),
       lean: rand(-0.05, 0.05),
       squash: rand(0.72, 0.84),
+      stemLean: rand(-0.7, 0.7),
       face: -1,
       candle: null,
       glowScale: rand(0.92, 1.1),
     }, opts || {});
   }
 
+  //  Mouth outline. Its two edges are parabolas that meet at the mouth's
+  //  corners and bow apart toward the centre, so the cut always closes to
+  //  a point at each end. Bowing `top` above `corner` gives a grin,
+  //  below it a frown. A parabola segment is exactly a quadratic Bezier,
+  //  so every span of the outline is one curve rather than a string of
+  //  samples — about a dozen path vertices whatever the mouth's size,
+  //  which keeps the per-frame rasterization cost where it was.
+  //
+  //  Teeth are rectangular tabs hanging from the upper edge. A tab is
+  //  bounded by the mouth outline itself, so it can never tear the cut
+  //  edge open or float loose on the rind the way a compositing punch
+  //  (destination-out) did; its depth is a fraction of the mouth's local
+  //  thickness, so it can never poke out through the lower lip either.
+  //
+  //  o: corner, top, bot   y offsets in r units
+  //     hw                 half width in r units
+  //     teeth              { at, w } tabs, in half-width units
+  function mouthPath(g, x, y, r, o) {
+    const hw = o.hw * r;
+    const yC = y + o.corner * r, yT = y + o.top * r, yB = y + o.bot * r;
+    const xl = x - hw;
+    const X = (s) => x + hw * s;
+    const topAt = (s) => yC + (1 - s * s) * (yT - yC);
+    const botAt = (s) => yC + (1 - s * s) * (yB - yC);
+    // emit the edge across [s0, s1] as the exact quadratic for its parabola
+    const edge = (fn, s0, s1) => {
+      const sm = (s0 + s1) / 2;
+      const cx = 2 * X(sm) - (X(s0) + X(s1)) / 2;
+      const cy = 2 * fn(sm) - (fn(s0) + fn(s1)) / 2;
+      g.quadraticCurveTo(cx, cy, X(s1), fn(s1));
+    };
+    const toothDepth = (s) => 0.8 * (1 - s * s) * (yB - yT);
+
+    g.moveTo(xl, yC);
+    edge(botAt, -1, 1);                    // lower lip: corner to corner
+    let cur = 1;                           // upper lip, right back to left
+    for (const t of (o.teeth || []).slice().sort((a, b) => b.at - a.at)) {
+      const sa = t.at - t.w / 2, sb = t.at + t.w / 2;
+      edge(topAt, cur, sb);
+      g.lineTo(X(sb), topAt(sb) + toothDepth(sb));
+      g.lineTo(X(sa), topAt(sa) + toothDepth(sa));
+      g.lineTo(X(sa), topAt(sa));
+      cur = sa;
+    }
+    edge(topAt, cur, -1);
+    g.closePath();
+  }
+
+  //  Every design shares one layout grid: eye centres on y-0.16r, the
+  //  mouth inside the band y+0.10r .. y+0.44r, nothing past |x| 0.40r.
+  //  The face origin sits at baseY-0.464r and the body is 0.46r wide and
+  //  0.49r tall about it, so no feature crowds the silhouette or is
+  //  clipped by it. A grin mouth is 0.29r deep at its centre: at real
+  //  jack-o'-lantern proportions (a 3in mouth on an 8in pumpkin) that
+  //  reads as a cut mouth rather than a drawn-on smile line.
+  const FACE = { eyeY: -0.16, grin: { corner: 0.16, top: 0.13, bot: 0.42, hw: 0.40 } };
+
   function drawFace(g, x, y, r, kind, lit) {
     // g: context already translated/rotated to the pumpkin face
     g.fillStyle = `rgba(255, 196, 88, ${lit})`;
     g.strokeStyle = 'rgba(64, 22, 4, .8)';   // cut rind reads as an edge
     g.lineWidth = Math.max(1, r * 0.035);
-    const e = r * 0.05;
-    if (kind === 0) {          // classic grinning triangles
-      g.beginPath();
-      g.moveTo(x - r * 0.40, y - r * 0.16);
-      g.quadraticCurveTo(x - r * 0.26, y - r * 0.46, x - r * 0.10, y - r * 0.30);
-      g.lineTo(x - r * 0.16, y - r * 0.14);
-      g.closePath(); g.fill(); g.stroke();
-      g.beginPath();
-      g.moveTo(x + r * 0.40, y - r * 0.18);
-      g.quadraticCurveTo(x + r * 0.24, y - r * 0.48, x + r * 0.10, y - r * 0.30);
-      g.lineTo(x + r * 0.17, y - r * 0.13);
-      g.closePath(); g.fill(); g.stroke();
-      // swooping grin with two teeth
-      g.beginPath();
-      g.moveTo(x - r * 0.46, y + r * 0.16);
-      g.quadraticCurveTo(x, y + r * 0.30, x + r * 0.46, y + r * 0.12);
-      g.quadraticCurveTo(x + r * 0.28, y + r * 0.46, x, y + r * 0.42);
-      g.quadraticCurveTo(x - r * 0.28, y + r * 0.46, x - r * 0.46, y + r * 0.16);
-      g.closePath(); g.fill(); g.stroke();
-      // teeth notches punched back to dark
-      g.globalCompositeOperation = 'destination-out';
-      g.fillRect(x - r * 0.30, y + r * 0.14, r * 0.11, r * 0.15);
-      g.fillRect(x + r * 0.06, y + r * 0.24, r * 0.11, r * 0.14);
-      g.globalCompositeOperation = 'source-over';
-    } else if (kind === 1) {   // hollow-eyed scowl
-      g.beginPath(); g.ellipse(x - r * 0.30, y - r * 0.22, r * 0.16, r * 0.13, -0.35, 0, Math.PI * 2); g.fill(); g.stroke();
-      g.beginPath(); g.ellipse(x + r * 0.30, y - r * 0.22, r * 0.16, r * 0.13, 0.35, 0, Math.PI * 2); g.fill(); g.stroke();
-      g.beginPath();
-      g.moveTo(x - r * 0.40, y + r * 0.28);
-      g.quadraticCurveTo(x - r * 0.12, y + r * 0.08, x, y + r * 0.26);
-      g.quadraticCurveTo(x + r * 0.12, y + r * 0.08, x + r * 0.40, y + r * 0.28);
-      g.quadraticCurveTo(x + r * 0.18, y + r * 0.42, x, y + r * 0.34);
-      g.quadraticCurveTo(x - r * 0.18, y + r * 0.42, x - r * 0.40, y + r * 0.28);
-      g.closePath(); g.fill(); g.stroke();
-    } else {                   // crooked toothy grin
-      g.beginPath(); g.ellipse(x - r * 0.28, y - r * 0.24, r * 0.11, r * 0.15, 0, 0, Math.PI * 2); g.fill(); g.stroke();
-      g.beginPath(); g.ellipse(x + r * 0.28, y - r * 0.24, r * 0.11, r * 0.15, 0, 0, Math.PI * 2); g.fill(); g.stroke();
-      g.beginPath();
-      g.moveTo(x - r * 0.42, y + r * 0.14);
-      for (let i = 0; i <= 6; i++) {
-        const fx = x - r * 0.42 + (i / 6) * r * 0.84;
-        g.lineTo(fx, y + r * (0.14 + 0.22 * Math.sin(i * 2.4)));
+    g.lineJoin = 'round';
+    const ey = y + r * FACE.eyeY;
+    if (kind === 0) {          // classic triangles over a two-toothed grin
+      for (const s of [-1, 1]) {
+        g.beginPath();
+        g.moveTo(x + s * r * 0.22, y - r * 0.30);
+        g.lineTo(x + s * r * 0.11, y - r * 0.05);
+        g.lineTo(x + s * r * 0.33, y - r * 0.09);
+        g.closePath(); g.fill(); g.stroke();
       }
-      g.quadraticCurveTo(x, y + r * 0.52, x - r * 0.42, y + r * 0.14);
-      g.closePath(); g.fill(); g.stroke();
-      g.globalCompositeOperation = 'destination-out';
-      g.fillRect(x - r * 0.08, y + r * 0.10, r * 0.10, r * 0.13);
-      g.globalCompositeOperation = 'source-over';
+      g.beginPath();
+      mouthPath(g, x, y, r, Object.assign({}, FACE.grin, {
+        teeth: [{ at: -0.22, w: 0.15 }, { at: 0.22, w: 0.15 }],
+      }));
+      g.fill(); g.stroke();
+    } else if (kind === 1) {   // hollow-eyed scowl: toothless frown
+      for (const s of [-1, 1]) {
+        g.beginPath();
+        g.ellipse(x + s * r * 0.26, ey, r * 0.14, r * 0.11, s * 0.35, 0, Math.PI * 2);
+        g.fill(); g.stroke();
+      }
+      g.beginPath();
+      // the grin's cut flipped over: flat lower lip, a tall bow above it,
+      // so the two mouth designs keep the same construction and weight
+      mouthPath(g, x, y, r, { corner: 0.42, top: 0.12, bot: 0.40, hw: 0.38 });
+      g.fill(); g.stroke();
+    } else {                   // three-toothed grin
+      for (const s of [-1, 1]) {
+        g.beginPath();
+        g.ellipse(x + s * r * 0.25, ey, r * 0.105, r * 0.135, 0, 0, Math.PI * 2);
+        g.fill(); g.stroke();
+      }
+      g.beginPath();
+      mouthPath(g, x, y, r, Object.assign({}, FACE.grin, {
+        teeth: [{ at: -0.44, w: 0.13 }, { at: 0, w: 0.13 }, { at: 0.44, w: 0.13 }],
+      }));
+      g.fill(); g.stroke();
     }
   }
 
@@ -257,14 +304,28 @@
         ctx.ellipse(cx + dx * r * 0.72, baseY - h * 0.52, Math.abs(dx) * r * 0.62 + r * 0.1, h * 0.5, 0, -Math.PI * 0.46, Math.PI * 0.46);
         ctx.stroke();
       }
-      // curved woody stem
-      ctx.strokeStyle = '#42511f';
-      ctx.lineCap = 'round';
-      ctx.lineWidth = r * 0.13;
+      // chestnut stalk: short, thick and near-vertical, with the
+      // base sunk into the crown so it reads as grown, not laid on
+      const sBase = baseY - h * 0.98, sMid = baseY - h * 1.15, sTop = baseY - h * 1.30;
+      const bw = r * 0.095, tw = r * 0.045;
+      const sway = p.stemLean * r * 0.16;
+      ctx.fillStyle = '#46551f';
       ctx.beginPath();
-      ctx.moveTo(cx + r * p.lean * 6, baseY - h * 1.02);
-      ctx.quadraticCurveTo(cx + r * 0.1 + p.lean * r, baseY - h * 1.28, cx + r * 0.3 + p.lean * r * 2, baseY - h * 1.34);
-      ctx.stroke();
+      ctx.moveTo(cx - bw, sBase);
+      ctx.quadraticCurveTo(cx - bw * 0.85, sMid, cx + sway - tw, sTop);
+      ctx.lineTo(cx + sway + tw, sTop);
+      ctx.quadraticCurveTo(cx + bw * 0.85, sMid, cx + bw, sBase);
+      ctx.closePath();
+      ctx.fill();
+      // moonward sliver on the stalk, matching the body sheen
+      ctx.fillStyle = 'rgba(158, 176, 98, .30)';
+      ctx.beginPath();
+      ctx.moveTo(cx + bw * 0.30, sBase - h * 0.02);
+      ctx.quadraticCurveTo(cx + bw * 0.40, sMid, cx + sway + tw * 0.20, sTop);
+      ctx.lineTo(cx + sway + tw, sTop);
+      ctx.quadraticCurveTo(cx + bw * 0.85, sMid, cx + bw, sBase - h * 0.02);
+      ctx.closePath();
+      ctx.fill();
     }
     ctx.restore();
 
@@ -670,7 +731,7 @@
         // light spill pooled on the ground in front
         stamp(glowAmber, p.x, p.baseY + p.r * 0.16, p.r * 3.8, 0.22 * f);
         // the candle itself, peeking through the face
-        stamp(glowFlame, p.x, p.baseY - p.r * 0.5, p.r * 1.7, 0.5 * f);
+        stamp(glowFlame, p.x, p.baseY - p.r * 0.42, p.r * 1.7, 0.5 * f);
         ctx.restore();
       }
     }

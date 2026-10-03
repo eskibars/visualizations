@@ -342,25 +342,44 @@
       setInterval(updateClock, 250);
 
       // --- noise texture (no external assets)
+      //
+      //  The flicker used to regenerated 220x220 of noise, PNG-encode it with
+      //  toDataURL(), and hand the result to CSS as a data URL every 900 ms. The
+      //  encode (and the image re-decode on the style change) was the most
+      //  expensive thing this page did, and it repeated forever for an
+      //  imperceptible difference between one noise field and the next. A small
+      //  pool of tiles is built once and then cycled, so the steady-state cost is
+      //  just a style swap between already-decoded images.
       const noiseCanvas = document.createElement('canvas');
       const nctx = noiseCanvas.getContext('2d', { willReadFrequently: true });
+      // 220 px of noise, mapped 1:1 by background-size, so it is DPR-independent:
+      // no backing-store scaling is needed or wanted here.
       const NOISE_SIZE = 220;
+      const NOISE_TILES = 4;
+      const noiseUrls = [];
+      let noiseIdx = 0;
 
-      function regenNoise(){
+      function buildNoiseTiles(){
         noiseCanvas.width = NOISE_SIZE;
         noiseCanvas.height = NOISE_SIZE;
-        const img = nctx.createImageData(NOISE_SIZE, NOISE_SIZE);
-        const d = img.data;
-        for (let i = 0; i < d.length; i += 4) {
-          const v = (Math.random() * 255) | 0;
-          d[i] = v; d[i+1] = v; d[i+2] = v;
-          d[i+3] = (Math.random() * 80) | 0;
+        for (let t = 0; t < NOISE_TILES; t++) {
+          const img = nctx.createImageData(NOISE_SIZE, NOISE_SIZE);
+          const d = img.data;
+          for (let i = 0; i < d.length; i += 4) {
+            const v = (Math.random() * 255) | 0;
+            d[i] = v; d[i+1] = v; d[i+2] = v;
+            d[i+3] = (Math.random() * 80) | 0;
+          }
+          nctx.putImageData(img, 0, 0);
+          noiseUrls.push(`url(${noiseCanvas.toDataURL('image/png')})`);
         }
-        nctx.putImageData(img, 0, 0);
-        noiseEl.style.backgroundImage = `url(${noiseCanvas.toDataURL('image/png')})`;
       }
-      regenNoise();
-      setInterval(regenNoise, 900);
+      buildNoiseTiles();
+      noiseEl.style.backgroundImage = noiseUrls[0];
+      setInterval(() => {
+        noiseIdx = (noiseIdx + 1) % noiseUrls.length;
+        noiseEl.style.backgroundImage = noiseUrls[noiseIdx];
+      }, 900);
 
       // --- terminal buffer + typing
       const MAX_LINES = 240;          // history kept in the buffer
@@ -370,13 +389,21 @@
       // ``overflow:hidden`` with no scrolling, so we must only render as many
       // lines as fit: otherwise the newest output sits below the fold and the
       // screen appears frozen on stale text.
+      //
+      // Both the computed line-height and the box height were being read on
+      // every render, which forces a fresh layout each time. They only change on
+      // resize, so they are cached here and invalidated there.
+      let capCache = 0;
       function visibleLineCapacity(){
+        if (capCache > 0) return capCache;
         const lh = parseFloat(getComputedStyle(term).lineHeight);
         const lineHeight = Number.isFinite(lh) && lh > 0 ? lh : 20;
         // One line is reserved for the blinking cursor, which is rendered on
         // its own row after the log text.
-        return Math.max(4, Math.floor(term.clientHeight / lineHeight) - 1);
+        capCache = Math.max(4, Math.floor(term.clientHeight / lineHeight) - 1);
+        return capCache;
       }
+      window.addEventListener('resize', () => { capCache = 0; }, { passive: true });
 
       function escapeHtml(s){
         return s

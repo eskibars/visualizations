@@ -520,8 +520,10 @@
       user-select:none;
     }
 
-    /* Responsive scaling for kiosks */
-    @media (max-width: 1100px){
+    /* Narrow screens (phones): a three-column console cannot be scaled down far
+       enough to stay legible, so stack it and allow scrolling. Everything else
+       uses the scaled console below. */
+    @media (max-width: 760px){
       .wrap{grid-template-columns: 1fr; grid-template-rows:auto; overflow:auto}
       #warp,#power,#react,#env,#nav,#log{grid-column:1; grid-row:auto}
       .termBody{height:220px}
@@ -547,18 +549,26 @@
       .termBody{height:120px}
     }
 
-    /* Very short screens (768-880px). Even tightened, the full panel set needs
-       more height than this, so let the rows size to their content and allow
-       the page to scroll rather than cropping panel contents. */
-    @media (max-height: 880px){
-      body{overflow:auto}
+    /* Short or tablet-shaped screens (<=880px tall, or portrait). Below the
+       height these panels need, no amount of tightening fits them, and letting
+       the page scroll is wrong for a fullscreen console: the operator is left
+       looking at the top third of a dashboard.
+       So the console keeps its three-column shape and is scaled to fit by --fit,
+       with its width and the centring offsets set from JS where the real content
+       size is known. This keeps the whole layout visible and proportional on any
+       viewport; the surrounding space reads as deliberate framing because the
+       console is centred in it. */
+    @media (min-width: 761px) and (max-height: 880px), (min-width: 761px) and (max-aspect-ratio: 1/1){
+      html,body{ overflow:hidden; }
       .wrap{
-        height:auto;
-        min-height:100%;
-        grid-template-rows:auto auto auto auto;
-        overflow:visible;
+        transform-origin: 0 0;
+        transform: scale(var(--fit, 1));
+        height: auto;
+        min-height: 0;
+        max-width: none;
+        grid-template-rows: auto auto auto auto;
+        overflow: visible;
       }
-      .termBody{height:150px}
     }
   </style>
 </head>
@@ -940,7 +950,9 @@
       const bgCtx = bg.getContext("2d", { alpha: true });
       let stars = [];
       function resizeBg(){
-        const dpr = Math.min(2, window.devicePixelRatio || 1);
+        // The starfield is soft glows on black; 2x buys no visible sharpness
+        // and costs 4x the fill on a low-power device.
+        const dpr = Math.min(1.5, window.devicePixelRatio || 1);
         bg.width = Math.floor(window.innerWidth * dpr);
         bg.height = Math.floor(window.innerHeight * dpr);
         bg.style.width = window.innerWidth + "px";
@@ -1057,7 +1069,8 @@
         let idx = 0;
 
         function resize(){
-          const dpr = Math.min(2, window.devicePixelRatio || 1);
+          // Sparklines are a few hundred pixels of line; they stay crisp at 1.5.
+          const dpr = Math.min(1.5, window.devicePixelRatio || 1);
           canvas.width = Math.floor(canvas.clientWidth * dpr);
           canvas.height = Math.floor(canvas.clientHeight * dpr);
         }
@@ -1725,14 +1738,103 @@
       });
 
       // ===== Resize handling =====
+      //
+      // On short or portrait screens the wrapped layout is taller than the
+      // viewport, so fit it by scaling. Measuring has to happen with the current
+      // scale cleared first, otherwise each resize would compound the previous
+      // transform and the console would shrink to nothing.
+      function fitToViewport(){
+        const wrap = document.getElementById("wrap");
+        if (!wrap) return;
+        const clearFit = () => {
+          wrap.style.removeProperty("--fit");
+          wrap.style.removeProperty("width");
+          wrap.style.removeProperty("margin-left");
+          wrap.style.removeProperty("margin-top");
+          fittedKey = "";
+        };
+        // Phones use the stacked scrolling layout instead (see the stylesheet).
+        if (window.innerWidth <= 760){ clearFit(); return; }
+        const needsFit = window.innerHeight <= 880 || window.innerWidth <= window.innerHeight;
+        if (!needsFit){ clearFit(); return; }
+
+        const vw = window.innerWidth, vh = window.innerHeight, pad = 14;
+        // Author at (approximately) the viewport width so the three columns fill
+        // the screen and type stays at its natural size; only the overflow is
+        // then scaled away. Measuring starts from scale 1, otherwise every
+        // resize would compound the previous transform.
+        const designW = Math.max(900, Math.min(2200, vw));
+        wrap.style.marginLeft = "0px";
+        wrap.style.marginTop = "0px";
+        wrap.style.width = designW + "px";
+        wrap.style.setProperty("--fit", "1");
+
+        // Converge on a scale that fits. The bounds come from the rendered
+        // rect, so this does not depend on which layout property happens to
+        // report the untransformed content height.
+        let fit = 1;
+        for (let i = 0; i < 5; i++){
+          wrap.style.setProperty("--fit", String(fit));
+          const r = wrap.getBoundingClientRect();
+          if (!r.height || !r.width) return;
+          const over = Math.max(r.height / (vh - pad), r.width / (vw - pad), 1);
+          if (over <= 1.001) break;
+          fit = Math.max(0.25, fit / over);
+        }
+        wrap.style.setProperty("--fit", String(fit));
+
+        // Remember what this fit was computed against. Panels fill in over the
+        // next few frames (the gauge, the sparklines, the first log lines), and
+        // the observer below re-runs the fit when that changes the layout.
+        fittedKey = designW + "x" + vw + "x" + vh + "x" + Math.round(wrap.scrollHeight);
+
+        // Centre what is left over so the space around the console reads as
+        // deliberate framing rather than dead pixels.
+        const r = wrap.getBoundingClientRect();
+        wrap.style.marginLeft = Math.max(0, (vw - r.width) / 2) + "px";
+        wrap.style.marginTop = Math.max(0, (vh - r.height) / 2) + "px";
+      }
+
+      let fittedKey = "";
+      function refitIfContentChanged(){
+        const wrap = document.getElementById("wrap");
+        if (!wrap) return;
+        const vw = window.innerWidth, vh = window.innerHeight;
+        const designW = Math.max(900, Math.min(2200, vw));
+        const key = designW + "x" + vw + "x" + vh + "x" + Math.round(wrap.scrollHeight);
+        if (key === fittedKey) return;
+        fitToViewport();
+      }
+
       function onResize(){
+        // Fit LAST: buildGauge() and the sparkline resizes change the panel
+        // heights, so measuring before them would under-estimate the content
+        // and leave the console overflowing.
         resizeBg();
         sparkEnvObj.resize();
         sparkShieldObj.resize();
         sparkNavObj.resize();
         buildGauge();
+        fitToViewport();
       }
       window.addEventListener("resize", onResize);
+
+      // The console fills in asynchronously (gauge, sparklines, log stream), so
+      // the fit is kept in step with the layout rather than computed once.
+      if (window.ResizeObserver){
+        const wrapEl = document.getElementById("wrap");
+        if (wrapEl){
+          let pending = false;
+          const ro = new ResizeObserver(() => {
+            if (pending) return;
+            pending = true;
+            // Defer out of the observer callback: fitting mutates layout, and
+            // mutating inside the notification triggers the loop warning.
+            requestAnimationFrame(() => { pending = false; refitIfContentChanged(); });
+          });
+          ro.observe(wrapEl);
+        }
+      }
 
       // ===== Boot =====
       initTelemetry();
@@ -1747,6 +1849,9 @@
       addLog(`PROPULSION: TARGET WARP ${fmt(telemetry.warpTarget,2)} • MODE ${telemetry.mode}`, "dim");
 
       onResize();
+      // Once more after the first paint: the gauge and log stream settle one
+      // frame later, and the fit has to see their final heights.
+      requestAnimationFrame(fitToViewport);
       requestAnimationFrame(drawBg);
       requestAnimationFrame(frame);
 

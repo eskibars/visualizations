@@ -57,7 +57,7 @@
       const rand  = (a, b) => a + Math.random() * (b - a);
       const easeInOut = t => (t < 0.5) ? 2*t*t : 1 - Math.pow(-2*t + 2, 2)/2;
 
-      const DPR = () => Math.max(1, Math.min(2.5, window.devicePixelRatio || 1)); // cap for TVs
+      const DPR = () => Math.max(1, Math.min(1.5, window.devicePixelRatio || 1)); // cap for TVs
 
       let W = 0, H = 0, dpr = DPR();
       function resize() {

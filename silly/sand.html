@@ -49,12 +49,12 @@
   const canvas = document.getElementById("c");
   const ctx = canvas.getContext("2d");
 
-  let DPR = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+  let DPR = Math.max(1, Math.min(1.6, window.devicePixelRatio || 1));
   function resize(){
     canvas.width = Math.floor(innerWidth * DPR);
     canvas.height = Math.floor(innerHeight * DPR);
   }
-  addEventListener("resize", () => { DPR = Math.max(1, Math.min(2, window.devicePixelRatio || 1)); resize(); });
+  addEventListener("resize", () => { DPR = Math.max(1, Math.min(1.6, window.devicePixelRatio || 1)); resize(); });
   resize();
 
   function fit(){

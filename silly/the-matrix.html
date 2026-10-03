@@ -92,7 +92,9 @@
     const CONFIG = {
       // Performance levers
       fpsCap: 60,          // 0 = uncapped; 60 or 30 can lower CPU
-      maxDPR: 2.0,         // cap devicePixelRatio
+      // Glyph rain is high-frequency detail, but a 2x store costs 4x the fill
+      // for a 1x-visible gain on a tablet panel. 1.5 keeps the columns sharp.
+      maxDPR: 1.5,         // cap devicePixelRatio
       fontSize: 18,        // base glyph size (px)
       colSpacing: 1.0,     // 1.0 = dense, 1.3 = airy
       fade: null,          // null = use CSS var --fade; or set number like 0.10
