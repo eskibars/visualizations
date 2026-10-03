@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Cell Division</title>
+  <style>
+    html,body{ margin:0; height:100%; overflow:hidden; background:#01040a; }
+    canvas{ display:block; width:100vw; height:100vh; }
+    .vignette{
+      pointer-events:none; position:fixed; inset:0;
+      background:
+        radial-gradient(100% 80% at 50% 46%, rgba(0,0,0,0) 42%, rgba(0,0,0,0.55) 84%, rgba(0,0,0,0.9) 100%);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+<script>
+(() => {
+  // Immunofluorescence on a black field: DNA labelled blue, tubulin green.
+  // One cell in the middle carries the whole cycle; smaller ones drift behind
+  // it, each frozen at their own stage, so the field is never uniform.
+  const CFG = {
+    dprCap: 2,
+    cycleSeconds: 26,      // how long one full interphase → division takes
+    chromosomeCount: 14,
+    backgroundCells: 8,
+    dustCount: 90,
+  };
+
+  const TAU = Math.PI * 2;
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1;
+
+  const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const randSign = () => (Math.random() < 0.5 ? -1 : 1);
+
+  // Smooth 0→1 ramp, used for every stage transition.
+  const smooth = (a, b, x) => {
+    const t = clamp((x - a) / (b - a), 0, 1);
+    return t * t * (3 - 2 * t);
+  };
+
+  // ------------------------------------------------------------- cell outline
+
+  // The membrane is the union of two discs. Moving them apart is exactly how a
+  // cell becomes two cells, so the pinch comes for free and stays smooth.
+  function outlineRadius(theta, r, d) {
+    const uy = Math.sin(theta);
+    let t = 0;
+    for (let i = 0; i < 2; i++) {
+      const c = i === 0 ? d : -d;
+      const b = c * uy;
+      const disc = b * b - (c * c - r * r);
+      if (disc >= 0) {
+        const root = b + Math.sqrt(disc);
+        if (root > t) t = root;
+      }
+    }
+    return t;
+  }
+
+  // Sample the outline and smooth it, so the waist creases soften into a neck.
+  const OUT_STEPS = 84;
+  const outline = new Float64Array(OUT_STEPS);
+  let xSquash = 1;   // cells stretch along the spindle axis, not in every direction
+  function buildOutline(r, d, wobble, phase) {
+    for (let i = 0; i < OUT_STEPS; i++) {
+      const theta = (i / OUT_STEPS) * TAU;
+      // 3-lobed breathing keeps the membrane from looking like a maths curve.
+      const organic = 1 + wobble * (
+        Math.sin(theta * 3 + phase) * 0.6 + Math.sin(theta * 5 - phase * 1.7) * 0.4);
+      outline[i] = outlineRadius(theta, r, d) * organic;
+    }
+    for (let pass = 0; pass < 5; pass++) {
+      let prev = outline[OUT_STEPS - 1];
+      let cur = outline[0];
+      for (let i = 0; i < OUT_STEPS; i++) {
+        const next = outline[(i + 1) % OUT_STEPS];
+        const smoothed = (prev + cur * 2 + next) * 0.25;
+        prev = cur; cur = next;
+        outline[i] = smoothed;
+      }
+    }
+  }
+
+  function traceOutline(cx, cy) {
+    ctx.beginPath();
+    for (let i = 0; i < OUT_STEPS; i++) {
+      const theta = (i / OUT_STEPS) * TAU;
+      const x = cx + (Math.cos(theta) * outline[i]) / xSquash;
+      const y = cy + Math.sin(theta) * outline[i];
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+  }
+
+  // ------------------------------------------------------------------- cells
+
+  function makeChromosomes(n) {
+    return Array.from({ length: n }, (_, i) => ({
+      a: rand(0, TAU),                 // where it idles inside the nucleus
+      jitter: rand(0.6, 1.3),
+      wob: rand(0, TAU),
+      spin: rand(0.6, 1.6) * randSign(),
+      plate: (i - (n - 1) / 2),       // slot along the metaphase plate
+      length: rand(0.82, 1.2),
+    }));
+  }
+
+  function makeCell(hero) {
+    const cell = {
+      hero,
+      x: rand(0.1, 0.9),
+      y: rand(0.1, 0.9),
+      radius: hero ? Math.min(W, H) * 0.27 : rand(22, 96),
+      phase: Math.random(),
+      speed: hero ? 1 / CFG.cycleSeconds : rand(0.022, 0.045),
+      vx: rand(-0.01, 0.01),
+      vy: rand(-0.01, 0.01),
+      spin: rand(0, TAU),
+      wobble: rand(0.02, 0.05),
+      chrom: makeChromosomes(hero ? CFG.chromosomeCount : 6 + (Math.random() * 6 | 0)),
+      nucleoli: Array.from({ length: 1 + (Math.random() * 2 | 0) }, () => ({
+        a: rand(0, TAU), r: rand(0.2, 0.62), s: rand(0.06, 0.12),
+      })),
+      dim: hero ? 1 : rand(0.22, 0.5),
+      tint: 196,
+    };
+    if (hero) { cell.x = 0.5; cell.y = 0.5; }
+    return cell;
+  }
+
+  let hero = null;
+  let crowd = [];
+  let dust = [];
+
+  // Stage quantities. Each one is a plain function of cycle time u ∈ [0,1).
+  const condense = (u) => smooth(0.22, 0.44, u);        // threads → rods
+  const gathered = (u) => smooth(0.30, 0.47, u);         // drift → equator
+  const parted = (u) => smooth(0.56, 0.71, u);           // sisters separate
+  const reclosed = (u) => smooth(0.70, 0.9, u);          // nuclei re-form
+  const pinched = (u) => Math.max(smooth(0.66, 0.93, u), smooth(0.985, 1, u));
+  const envelope = (u) => 1 - smooth(0.26, 0.42, u) + smooth(0.74, 0.95, u) * 0.95;
+
+  // ---------------------------------------------------------------- drawing
+
+  function drawMembrane(cell, cx, cy, u) {
+    const r = cell.radius;
+    const elong = 1 + 0.14 * smooth(0.3, 0.7, u) + 0.4 * smooth(0.66, 0.95, u);
+    xSquash = elong;
+    const d = r * 0.94 * Math.pow(pinched(u), 0.85);
+    buildOutline(r, d, cell.wobble, u * TAU);
+
+    // Cytoplasm, barely there — the glow has to come from the stains.
+    traceOutline(cx, cy);
+    const fill = ctx.createRadialGradient(cx, cy, r * 0.1, cx, cy, r * 1.9);
+    fill.addColorStop(0, `rgba(30,70,120,${0.16 * cell.dim})`);
+    fill.addColorStop(0.6, `rgba(18,44,80,${0.08 * cell.dim})`);
+    fill.addColorStop(1, 'rgba(6,16,36,0)');
+    ctx.fillStyle = fill;
+    ctx.fill();
+
+    // Membrane rim
+    traceOutline(cx, cy);
+    ctx.strokeStyle = `rgba(120,190,255,${0.5 * cell.dim})`;
+    ctx.lineWidth = Math.max(1, cell.radius * 0.012);
+    ctx.stroke();
+    ctx.strokeStyle = `rgba(220,245,255,${0.22 * cell.dim})`;
+    ctx.lineWidth = Math.max(0.5, cell.radius * 0.005);
+    ctx.stroke();
+  }
+
+  // How far the spindle poles sit from the cell centre, in cell radii.
+  function poleOffset(cell, u) {
+    return cell.radius * (0.5 + 0.78 * smooth(0.45, 0.8, u)) * (1 - 0.86 * reclosed(u));
+  }
+
+  // Where one sister chromatid sits, and which way it points, at cycle time u.
+  function chromatid(cell, ch, u, sign) {
+    const r = cell.radius;
+    const cond = condense(u);
+    const gather = gathered(u);
+    const sep = parted(u);
+    const back = reclosed(u);
+
+    // Idle: a loose thread anywhere in the nucleus.
+    const idleR = r * 0.46;
+    const idleA = ch.a + u * 0.5;
+    const idleX = Math.cos(idleA) * idleR * ch.jitter;
+    const idleY = Math.sin(idleA) * idleR * ch.jitter;
+
+    // Metaphase plate: slots spread along X, at the equator. The two lobes
+    // narrow as the cell pinches, so the plate has to narrow with them.
+    const spread = 0.78 * (1 - 0.36 * pinched(u));
+    const plateX = (ch.plate / (cell.chrom.length / 2)) * r * spread;
+    // Chromatids stop just short of the pole so the spindle keeps some length;
+    // telophase then walks them the rest of the way in.
+    const poleY = sign * poleOffset(cell, u) * (0.84 + 0.16 * back);
+
+    const x = lerp(lerp(idleX, plateX, gather), plateX, back * 0.35);
+    const y = lerp(lerp(idleY, 0, gather), poleY, sep);
+    return { x, y, cond, sign, gather, sep };
+  }
+
+  function drawChromatid(cell, cx, cy, ch, u, sign, tint) {
+    const r = cell.radius;
+    const c = chromatid(cell, ch, u, sign);
+    const cond = c.cond;
+    const gather = c.gather;
+
+    // A condensed chromosome is a short, gently bent rod; a loose one is a
+    // long thread with a couple of lazy kinks in it.
+    const len = r * lerp(0.26, 0.115, cond) * ch.length;
+    const fat = r * lerp(0.005, 0.012, cond);
+    const bend = r * lerp(0.05, 0.018, cond) * ch.jitter;
+    // On the metaphase plate every chromosome stands on the spindle axis.
+    const spin = lerp(ch.wob, Math.PI / 2, gather * 0.92);
+    const cs = Math.cos(spin);
+    const sn = Math.sin(spin);
+
+    ctx.beginPath();
+    for (let i = 0; i <= 20; i++) {
+      const t = i / 20;
+      const along = (t - 0.5) * len;
+      const perp = Math.sin(Math.PI * t) * bend + Math.sin(3.4 * Math.PI * t + ch.wob) * bend * 0.45;
+      const px = cx + c.x + along * cs - perp * sn;
+      const py = cy + c.y + along * sn + perp * cs;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = `hsla(${tint}, 94%, ${lerp(62, 72, cond)}%, ${lerp(0.34, 0.78, cond) * cell.dim})`;
+    ctx.lineWidth = Math.max(0.7, fat);
+    ctx.stroke();
+
+    // Kinetochore, the bright knob the spindle fibres grab.
+    if (gather > 0.35) {
+      ctx.beginPath();
+      ctx.arc(cx + c.x - sign * cs * len * 0.5, cy + c.y - sign * sn * len * 0.5, fat * 1.6, 0, TAU);
+      ctx.fillStyle = `hsla(${tint}, 100%, 86%, ${0.55 * gather * cell.dim})`;
+      ctx.fill();
+    }
+  }
+
+  function drawSpindle(cell, cx, cy, u) {
+    const gather = gathered(u);
+    if (gather < 0.08) return;
+    const r = cell.radius;
+    const poleY = poleOffset(cell, u);
+    const fade = gather * (1 - 0.75 * reclosed(u));
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const sign of [-1, 1]) {
+      // Centrosome
+      ctx.beginPath();
+      ctx.arc(cx, cy + sign * poleY, r * 0.035, 0, TAU);
+      ctx.fillStyle = `rgba(150,255,190,${0.85 * fade * cell.dim})`;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(cx, cy + sign * poleY, r * 0.09, 0, TAU);
+      ctx.fillStyle = `rgba(110,240,170,${0.12 * fade * cell.dim})`;
+      ctx.fill();
+
+      for (const ch of cell.chrom) {
+        const c = chromatid(cell, ch, u, sign);
+        const kx = cx + c.x - sign * r * 0.06;
+        const ky = cy + c.y - sign * r * 0.06;
+        const bow = r * 0.1 * (0.4 + 0.6 * (1 - Math.abs(ch.plate) / (cell.chrom.length / 2 + 1)));
+        ctx.beginPath();
+        ctx.moveTo(cx, cy + sign * poleY);
+        ctx.quadraticCurveTo((cx + kx) / 2 + bow, (cy + sign * poleY + ky) / 2, kx, ky);
+        ctx.strokeStyle = `rgba(120,235,175,${(0.13 + 0.12 * parted(u)) * fade * cell.dim})`;
+        ctx.lineWidth = Math.max(0.5, r * 0.0035);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawNuclei(cell, cx, cy, u) {
+    const env = clamp(envelope(u), 0, 1);
+    if (env < 0.02) return;
+    const r = cell.radius;
+    const split = parted(u) * (1 - 0.86 * reclosed(u));
+    const off = r * 0.3 * split;
+    const nucR = r * lerp(0.44, 0.3, reclosed(u)) * (0.35 + 0.65 * env);
+    const tint = 196;
+
+    for (const sign of [-1, 1]) {
+      // One nucleus until anaphase splits the set in two.
+      if (sign === -1 && env < 0.99 && split < 0.05) break;
+      const nx = cx;
+      const ny = cy + sign * off;
+      const g = ctx.createRadialGradient(nx, ny, 0, nx, ny, nucR);
+      g.addColorStop(0, `hsla(${tint}, 95%, 72%, ${0.2 * env * cell.dim})`);
+      g.addColorStop(0.75, `hsla(${tint}, 95%, 60%, ${0.1 * env * cell.dim})`);
+      g.addColorStop(1, 'hsla(210,95%,50%,0)');
+      ctx.beginPath();
+      ctx.arc(nx, ny, nucR, 0, TAU);
+      ctx.fillStyle = g;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(nx, ny, nucR, 0, TAU);
+      ctx.strokeStyle = `hsla(${tint}, 100%, 78%, ${0.42 * env * cell.dim})`;
+      ctx.lineWidth = Math.max(0.6, r * 0.006);
+      ctx.stroke();
+
+      // Nucleolus, bright and steady while the nucleus is intact.
+      if (env > 0.6) {
+        for (const n of cell.nucleoli) {
+          ctx.beginPath();
+          ctx.arc(nx + Math.cos(n.a) * nucR * n.r, ny + Math.sin(n.a) * nucR * n.r, nucR * n.s, 0, TAU);
+          ctx.fillStyle = `hsla(${tint}, 100%, 86%, ${0.5 * cell.dim})`;
+          ctx.fill();
+        }
+      }
+    }
+  }
+
+  function drawCell(cell, time) {
+    const u = (cell.phase + time * cell.speed) % 1;
+    const cx = cell.x * W;
+    const cy = cell.y * H;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(cell.spin);
+    ctx.translate(-cx, -cy);
+
+    drawMembrane(cell, cx, cy, u);
+    drawNuclei(cell, cx, cy, u);
+    drawSpindle(cell, cx, cy, u);
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const ch of cell.chrom) {
+      drawChromatid(cell, cx, cy, ch, u, 1, cell.tint);
+      drawChromatid(cell, cx, cy, ch, u, -1, cell.tint);
+    }
+    ctx.restore();
+    ctx.restore();
+  }
+
+  // ------------------------------------------------------------------ scene
+
+  function buildScene() {
+    hero = makeCell(true);
+    crowd = Array.from({ length: CFG.backgroundCells }, () => makeCell(false));
+    dust = Array.from({ length: CFG.dustCount }, () => ({
+      x: rand(0, 1), y: rand(0, 1), r: rand(0.4, 1.6),
+      d: Math.pow(Math.random(), 2), phase: rand(0, TAU),
+    }));
+  }
+
+  function resize() {
+    DPR = Math.min(CFG.dprCap, window.devicePixelRatio || 1);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = Math.max(1, Math.floor(W * DPR));
+    canvas.height = Math.max(1, Math.floor(H * DPR));
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    buildScene();
+  }
+  window.addEventListener('resize', resize, { passive: true });
+
+  const pointer = { x: 0, y: 0, tx: 0, ty: 0, on: false };
+  window.addEventListener('pointermove', (e) => {
+    pointer.tx = (e.clientX / W) * 2 - 1;
+    pointer.ty = (e.clientY / H) * 2 - 1;
+    pointer.on = true;
+  }, { passive: true });
+  window.addEventListener('pointerleave', () => { pointer.on = false; }, { passive: true });
+
+  function drawBackdrop(time) {
+    ctx.fillStyle = '#01040a';
+    ctx.fillRect(0, 0, W, H);
+    const g = ctx.createRadialGradient(W * 0.5, H * 0.46, 0, W * 0.5, H * 0.46, Math.max(W, H) * 0.62);
+    g.addColorStop(0, 'rgba(20,44,86,0.5)');
+    g.addColorStop(0.5, 'rgba(10,22,48,0.24)');
+    g.addColorStop(1, 'rgba(2,6,16,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    ctx.globalAlpha = 0.1;
+    ctx.fillStyle = '#8fd4ff';
+    for (const d of dust) {
+      ctx.globalAlpha = 0.05 + d.d * 0.16;
+      ctx.beginPath();
+      ctx.arc(d.x * W + Math.sin(time * 0.2 + d.phase) * 6, d.y * H, d.r * (1 + d.d), 0, TAU);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    pointer.x = lerp(pointer.x, pointer.on ? pointer.tx : 0, 0.05);
+    pointer.y = lerp(pointer.y, pointer.on ? pointer.ty : 0, 0.05);
+
+    for (const c of crowd) {
+      c.x += c.vx * dt * 60 * 0.016;
+      c.y += c.vy * dt * 60 * 0.016;
+      c.spin += dt * 0.04;
+      if (c.x < 0.04) c.x += 0.92; if (c.x > 0.96) c.x -= 0.92;
+      if (c.y < 0.04) c.y += 0.92; if (c.y > 0.96) c.y -= 0.92;
+    }
+    hero.spin = Math.sin(time * 0.13) * 0.25;
+    hero.x = 0.5 + pointer.x * 0.012;
+    hero.y = 0.5 + pointer.y * 0.012;
+
+    drawBackdrop(time);
+    for (const c of crowd) drawCell(c, time);
+    drawCell(hero, time);
+
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
