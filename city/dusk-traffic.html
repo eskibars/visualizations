@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Dusk Traffic</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0a14; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 130% 105% at 50% 46%,
+        rgba(0,0,0,0) 42%, rgba(0,0,0,.32) 82%, rgba(0,0,0,.74) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(255, 200, 150, .28);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">six lanes · still moving</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  DUSK TRAFFIC — an elevated roadway seen from the side, high
+  //  enough that the far city reads as a lit skyline and the road
+  //  reads as a band of streaming light. Headlights come toward
+  //  you in the near lanes, tail-lights leave in the far ones, and
+  //  each vehicle drags a refraction smear along the wet tarmac.
+  //
+  //  Construction notes
+  //  ------------------
+  //  Sky, skyline, bridge deck and the tarmac band are painted
+  //  once per resize into a backdrop layer. Vehicles are drawn as
+  //  small pre-rendered light sprites scaled by lane depth, so the
+  //  per-frame cost is one blit per light plus the smear.
+  // ============================================================
+  const CONFIG = {
+    //  Mostly small additive sprites over a static backdrop, so a 2x store
+    //  buys no visible sharpness and costs 4x the fill.
+    dprCap: 1.6,
+
+    horizon: 0.46,
+    deckY: 0.62,            // top surface of the bridge deck
+    deckH: 0.155,           // visible face height
+
+    lanes: 6,
+    lanePad: 0.16,          // vertical padding inside the deck band
+
+    speedNear: 300,         // px/s at 1600w
+    speedFar: 130,
+    spawnRate: 2.6,         // vehicles per second across all lanes
+
+    smear: 1.0,             // wet-road reflection strength
+    lampEvery: 0.085,       // fraction of width between deck lamps
+
+    skylineBlocks: 46,
+    windowsPerBlock: 5,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function pick(a) { return a[(Math.random() * a.length) | 0]; }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  // ---------------- sprites ----------------
+  function lightSprite(r, g, b, hard) {
+    const s = 64;
+    const c = document.createElement('canvas');
+    c.width = c.height = s;
+    const x = c.getContext('2d');
+    const grad = x.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    grad.addColorStop(0, `rgba(255,255,255,${hard ? 0.95 : 0.8})`);
+    grad.addColorStop(0.18, `rgba(${r},${g},${b},${hard ? 0.85 : 0.55})`);
+    grad.addColorStop(0.55, `rgba(${r},${g},${b},0.16)`);
+    grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    x.fillStyle = grad;
+    x.fillRect(0, 0, s, s);
+    return c;
+  }
+
+  let sprHead, sprTail, sprHeadFar, sprTailFar, sprLamp, sprGlowWarm;
+
+  function buildSprites() {
+    sprHead = lightSprite(255, 244, 214, true);
+    sprTail = lightSprite(255, 70, 52, true);
+    sprHeadFar = lightSprite(255, 236, 200, false);
+    sprTailFar = lightSprite(230, 74, 60, false);
+    sprLamp = lightSprite(255, 206, 138, false);
+    sprGlowWarm = lightSprite(255, 168, 96, false);
+  }
+
+  function stamp(sprite, x, y, size, alpha) {
+    if (alpha <= 0.004 || size <= 0.2) return;
+    ctx.globalAlpha = Math.min(1, alpha);
+    ctx.drawImage(sprite, x - size / 2, y - size / 2, size, size);
+    ctx.globalAlpha = 1;
+  }
+
+  // ---------------- backdrop ----------------
+  let backdrop = null;
+
+  function deckTop() { return H * CONFIG.deckY; }
+  function deckBottom() { return H * (CONFIG.deckY + CONFIG.deckH); }
+  function laneY(i) {
+    const top = deckTop(), bottom = deckBottom();
+    const pad = (bottom - top) * CONFIG.lanePad;
+    const span = (bottom - top) - pad * 2;
+    return top + pad + span * ((i + 0.5) / CONFIG.lanes);
+  }
+
+  function paintBackdrop() {
+    if (!backdrop) backdrop = document.createElement('canvas');
+    backdrop.width = Math.max(1, Math.floor(W * DPR));
+    backdrop.height = Math.max(1, Math.floor(H * DPR));
+    const g = backdrop.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    const hy = H * CONFIG.horizon;
+
+    // Dusk gradient: the last warm band low, cooling upward.
+    const sky = g.createLinearGradient(0, 0, 0, hy);
+    sky.addColorStop(0, '#0b1030');
+    sky.addColorStop(0.35, '#1d1a3c');
+    sky.addColorStop(0.66, '#4a2a44');
+    sky.addColorStop(0.86, '#8b4237');
+    sky.addColorStop(1, '#c9702f');
+    g.fillStyle = sky;
+    g.fillRect(0, 0, W, hy);
+
+    // A few high clouds catching the last light.
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < 12; i++) {
+      const cx = rand(-0.1, 1.1) * W;
+      const cy = rand(0.08, 0.72) * hy;
+      const rw = rand(0.06, 0.20) * W;
+      const rh = rand(0.006, 0.018) * H;
+      const cg = g.createRadialGradient(cx, cy, 0, cx, cy, rw);
+      cg.addColorStop(0, `rgba(255, 176, 128, ${rand(0.05, 0.13).toFixed(3)})`);
+      cg.addColorStop(1, 'rgba(255, 150, 110, 0)');
+      g.fillStyle = cg;
+      g.beginPath();
+      g.ellipse(cx, cy, rw, rh, 0, 0, Math.PI * 2);
+      g.fill();
+    }
+    g.restore();
+
+    // Sun gone; a low haze line right on the horizon.
+    const haze = g.createLinearGradient(0, hy - H * 0.09, 0, hy + 2);
+    haze.addColorStop(0, 'rgba(255, 150, 80, 0)');
+    haze.addColorStop(0.7, 'rgba(255, 158, 92, 0.16)');
+    haze.addColorStop(1, 'rgba(255, 176, 118, 0.30)');
+    g.fillStyle = haze;
+    g.fillRect(0, hy - H * 0.09, W, H * 0.09 + 2);
+
+    // Distant skyline: two depth bands of blocks with lit windows.
+    const paintSkyline = (count, baseY, maxH, tint, litProb, alpha) => {
+      let x = -W * 0.02;
+      while (x < W * 1.02) {
+        const bw = rand(0.012, 0.045) * W;
+        const bh = rand(0.18, 1.0) * maxH;
+        const by = baseY - bh;
+        g.fillStyle = tint;
+        g.globalAlpha = alpha;
+        g.fillRect(x, by, bw, bh);
+        // A cap detail on some blocks, so the skyline is not a bar chart.
+        if (Math.random() < 0.30) {
+          g.fillRect(x + bw * 0.38, by - rand(0.006, 0.02) * H, bw * 0.24, rand(0.006, 0.02) * H);
+        }
+        // Windows.
+        const cols = Math.max(2, Math.round(bw / (W * 0.009)));
+        const rows = Math.max(2, Math.round(bh / (H * 0.022)));
+        for (let c = 0; c < cols; c++) {
+          for (let r = 0; r < rows; r++) {
+            if (Math.random() > litProb) continue;
+            const wx = x + bw * ((c + 0.5) / cols);
+            const wy = by + bh * ((r + 0.5) / rows);
+            g.globalAlpha = alpha * rand(0.5, 1.0);
+            g.fillStyle = pick([
+              'rgba(255, 214, 150, 0.9)',
+              'rgba(255, 190, 120, 0.8)',
+              'rgba(210, 226, 255, 0.7)',
+              'rgba(255, 236, 190, 0.85)',
+            ]);
+            g.fillRect(wx, wy, Math.max(1, W * 0.0022), Math.max(1, H * 0.0055));
+          }
+        }
+        x += bw + rand(0.001, 0.004) * W;
+      }
+      g.globalAlpha = 1;
+    };
+
+    paintSkyline(CONFIG.skylineBlocks, hy + 2, H * 0.20, '#141330', 0.22, 0.85);
+    paintSkyline(Math.round(CONFIG.skylineBlocks * 0.7), hy + 5, H * 0.14, '#0d0d24', 0.34, 0.95);
+
+    // Water/air gap below the skyline down to the bridge.
+    const gap = g.createLinearGradient(0, hy, 0, deckTop());
+    gap.addColorStop(0, '#0a0a1c');
+    gap.addColorStop(1, '#05050e');
+    g.fillStyle = gap;
+    g.fillRect(0, hy, W, deckTop() - hy);
+
+    // Bridge deck: a dark parapet catching a rim of warm light on top.
+    const dt = deckTop(), db = deckBottom();
+    const deck = g.createLinearGradient(0, dt, 0, db);
+    deck.addColorStop(0, '#1b1b26');
+    deck.addColorStop(0.14, '#12121b');
+    deck.addColorStop(1, '#08080e');
+    g.fillStyle = deck;
+    g.fillRect(0, dt, W, db - dt);
+
+    g.fillStyle = 'rgba(255, 196, 132, 0.34)';
+    g.fillRect(0, dt, W, Math.max(1, H * 0.0022));
+    g.fillStyle = 'rgba(255, 176, 110, 0.12)';
+    g.fillRect(0, dt + Math.max(1, H * 0.0022), W, Math.max(1, H * 0.0016));
+
+    // Lane dividers: faint dashed paint, plus a wet sheen band per lane.
+    for (let i = 1; i < CONFIG.lanes; i++) {
+      const y = (laneY(i - 1) + laneY(i)) / 2;
+      g.strokeStyle = 'rgba(226, 236, 255, 0.055)';
+      g.lineWidth = Math.max(1, H * 0.0014);
+      g.setLineDash([W * 0.014, W * 0.011]);
+      g.beginPath();
+      g.moveTo(0, y);
+      g.lineTo(W, y);
+      g.stroke();
+    }
+    g.setLineDash([]);
+
+    // Wet sheen on the tarmac: a broad warm band low in the deck, where the
+    // sunset still reflects, plus one brighter streak per lane. Without this
+    // the deck face reads as a void rather than as a road.
+    const sheenT = g.createLinearGradient(0, dt, 0, db);
+    sheenT.addColorStop(0, 'rgba(255, 168, 104, 0.09)');
+    sheenT.addColorStop(0.30, 'rgba(140, 120, 148, 0.05)');
+    sheenT.addColorStop(0.62, 'rgba(90, 104, 140, 0.06)');
+    sheenT.addColorStop(1, 'rgba(40, 48, 80, 0.03)');
+    g.fillStyle = sheenT;
+    g.fillRect(0, dt, W, db - dt);
+
+    for (let i = 0; i < CONFIG.lanes; i++) {
+      const y = laneY(i);
+      const band = g.createLinearGradient(0, y - H * 0.010, 0, y + H * 0.014);
+      band.addColorStop(0, 'rgba(255, 210, 160, 0)');
+      band.addColorStop(0.42, 'rgba(255, 206, 158, 0.055)');
+      band.addColorStop(1, 'rgba(180, 200, 255, 0.03)');
+      g.fillStyle = band;
+      g.fillRect(0, y - H * 0.010, W, H * 0.024);
+    }
+
+    // Guardrail along the near edge of the deck: a lit line with posts, which
+    // gives the road a bottom and stops the frame ending in empty black.
+    const railY = db - (db - dt) * 0.10;
+    g.strokeStyle = 'rgba(196, 208, 232, 0.20)';
+    g.lineWidth = Math.max(1, H * 0.0016);
+    g.beginPath();
+    g.moveTo(0, railY);
+    g.lineTo(W, railY);
+    g.stroke();
+    for (let x = 0; x < W * 1.02; x += W * 0.019) {
+      g.strokeStyle = 'rgba(150, 162, 190, 0.16)';
+      g.beginPath();
+      g.moveTo(x, railY);
+      g.lineTo(x, db + (H - db) * 0.10);
+      g.stroke();
+    }
+
+    // Deck lamps: poles over the road with a warm pool under each.
+    for (let x = 0; x < W * 1.05; x += W * CONFIG.lampEvery) {
+      const lx = x + rand(-W * 0.004, W * 0.004);
+      const topY = dt - H * 0.052;
+      g.strokeStyle = 'rgba(120, 124, 140, 0.55)';
+      g.lineWidth = Math.max(1, W * 0.0012);
+      g.beginPath();
+      g.moveTo(lx, dt);
+      g.lineTo(lx, topY);
+      g.stroke();
+      g.fillStyle = 'rgba(255, 214, 152, 0.85)';
+      g.beginPath();
+      g.arc(lx, topY, Math.max(1.2, W * 0.0018), 0, Math.PI * 2);
+      g.fill();
+    }
+
+    // The lit face of the far side of the deck, below the road.
+    const face = g.createLinearGradient(0, db, 0, H);
+    face.addColorStop(0, '#06060c');
+    face.addColorStop(1, '#020205');
+    g.fillStyle = face;
+    g.fillRect(0, db, W, H - db);
+  }
+
+  // ---------------- vehicles ----------------
+  //  A vehicle is a pair of lights at one of three depths. Near lanes are
+  //  brighter, faster and larger; far lanes are dim, slow and small, which is
+  //  what makes the six lanes read as a road rather than as stripes.
+  const cars = [];
+
+  function spawn() {
+    const lane = (Math.random() * CONFIG.lanes) | 0;
+    const depth = lane / (CONFIG.lanes - 1);              // 0 = near
+    const away = lane % 2 === 0;                          // even lanes leave
+    const speed = lerp(CONFIG.speedNear, CONFIG.speedFar, depth) * U / 1000;
+    cars.push({
+      lane,
+      depth,
+      away,
+      // Near lanes sit lower in the band; far lanes higher.
+      y: laneY(CONFIG.lanes - 1 - lane) + rand(-2, 2),
+      x: away ? -W * 0.06 : W * 1.06,
+      dir: away ? 1 : -1,
+      v: speed * rand(0.78, 1.24),
+      scale: lerp(1.15, 0.38, depth),
+      // A little vertical wobble, as suspension does on an elevated road.
+      bob: rand(0, Math.PI * 2),
+      bobA: rand(0.4, 1.6),
+      gap: rand(0.55, 0.95),        // relative to lane width
+    });
+  }
+
+  function updateCars(dt, time) {
+    for (let i = cars.length - 1; i >= 0; i--) {
+      const c = cars[i];
+      c.x += c.dir * c.v * dt;
+      if (c.x < -W * 0.12 || c.x > W * 1.12) { cars.splice(i, 1); continue; }
+    }
+  }
+
+  function drawCars(time) {
+    const dt = deckTop();
+    for (const c of cars) {
+      const bob = Math.sin(time * 3.4 + c.bob) * c.bobA * c.scale;
+      const y = c.y + bob;
+      const near = 1 - c.depth;
+
+      // Wet-road smear: duplicated along the surface beneath each light,
+      // stretched vertically and dimmed. Two copies give it a falloff.
+      if (CONFIG.smear > 0) {
+        const sm = sprGlowWarm;
+        const col = c.away ? sprTailFar : sprHeadFar;
+        const smearA = 0.16 * near * CONFIG.smear;
+        stamp(sm, c.x - c.dir * 5 * c.scale, y + H * 0.020 * c.scale, 30 * c.scale, smearA);
+        stamp(col, c.x - c.dir * 2 * c.scale, y + H * 0.011 * c.scale, 16 * c.scale, smearA * 1.1);
+      }
+
+      const head = c.away ? sprTail : sprHead;
+      const headS = (c.away ? 28 : 34) * c.scale * (U / 900);
+      const a = 0.5 + 0.5 * near;
+      // The far light is the one you see from behind; near lights are brighter.
+      stamp(head, c.x, y, headS, a);
+      // A second light offsets along the lane for the other side of the car.
+      stamp(head, c.x - c.dir * 12 * c.scale, y + 1.4 * c.scale, headS * 0.86, a * 0.8);
+
+      // Body: a dark shape only for near lanes, where it would be visible.
+      if (near > 0.55) {
+        ctx.save();
+        ctx.globalAlpha = 0.32 * near;
+        ctx.fillStyle = '#04040a';
+        const bw = 46 * c.scale * (U / 900);
+        const bh = 13 * c.scale * (U / 900);
+        ctx.beginPath();
+        ctx.roundRect ? ctx.roundRect(c.x - bw / 2, y - bh * 0.72, bw, bh, bh * 0.35)
+                      : ctx.rect(c.x - bw / 2, y - bh * 0.72, bw, bh);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+  }
+
+  // ---------------- loop ----------------
+  let spawnAcc = 0;
+  let last = performance.now();
+  let ready = false;
+
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.max(1, Math.floor(window.innerWidth));
+    H = Math.max(1, Math.floor(window.innerHeight));
+    U = Math.min(W, H);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    buildSprites();
+    paintBackdrop();
+    cars.length = 0;
+    // Pre-fill so the road is already busy on the first frame.
+    for (let i = 0; i < 26; i++) {
+      spawn();
+      const c = cars[cars.length - 1];
+      c.x = rand(-W * 0.05, W * 1.05);
+    }
+  }
+  window.addEventListener('resize', resize, { passive: true });
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    spawnAcc += dt * CONFIG.spawnRate * 3.0;   // 3 vehicles per spawn event
+    while (spawnAcc >= 1) { spawnAcc -= 1; spawn(); }
+
+    updateCars(dt, time);
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.drawImage(backdrop, 0, 0, W, H);
+
+    // Glow from the deck onto the underside of the sky, then the cars.
+    stamp(sprGlowWarm, W * 0.5, deckTop() - H * 0.05, W * 0.9, 0.07);
+    drawCars(time);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
