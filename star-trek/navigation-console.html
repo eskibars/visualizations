@@ -1,0 +1,854 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Navigation Console</title>
+  <style>
+    html, body {
+      margin: 0; height: 100%; overflow: hidden; background: #02040a;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: #bfe6ff;
+    }
+    canvas { display: block; width: 100vw; height: 100vh; }
+
+    /* ---- layout ----
+       The console is authored in grid areas and scaled to fit by --fit, set
+       from JS against the rendered rect. That keeps the whole instrument panel
+       visible on a short or portrait viewport instead of scrolling a console. */
+    .screen {
+      position: absolute; inset: 0;
+      display: grid;
+      grid-template-columns: 34% 1fr 25%;
+      grid-template-rows: auto 1fr;
+      grid-template-areas:
+        "head head head"
+        "nav  plot  side";
+      gap: 1.0vw;
+      padding: 1.1vw;
+      transform-origin: 0 0;
+      transform: scale(var(--fit, 1));
+    }
+    .screen > * { min-height: 0; min-width: 0; }
+
+    .head { grid-area: head; display: flex; align-items: center; justify-content: space-between; gap: 1.2vw;
+      padding: .7vw 1vw; border-radius: .9vw;
+      background: linear-gradient(180deg, rgba(8,20,52,.80), rgba(5,13,38,.72));
+      border: 1px solid rgba(86,236,252,.22); box-shadow: 0 0 26px rgba(20,120,200,.18) inset; }
+    .head h1 { margin: 0; font-size: clamp(12px, 1.05vw, 20px); letter-spacing: .20em; text-transform: uppercase; color: #7fe4ff; }
+    .head .sub { margin: .25em 0 0; font: 500 clamp(9px, .70vw, 13px)/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: #6f8db4; letter-spacing: .10em; text-transform: uppercase; }
+    .pills { display: flex; gap: .7vw; flex-wrap: wrap; }
+    .pill { display: inline-flex; align-items: center; gap: .5em; padding: .4em .8em; border-radius: 999px;
+      background: rgba(8,18,44,.78); border: 1px solid rgba(86,236,252,.24);
+      font: 600 clamp(9px, .70vw, 13px)/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .10em; text-transform: uppercase; white-space: nowrap; }
+    .dot { width: .6em; height: .6em; border-radius: 999px; background: #4ee6c8; box-shadow: 0 0 10px rgba(78,230,200,.7); }
+
+    /* ---- panel body fills its panel ----
+       A grid item does not stretch its own children by default, so without this
+       the three panels sit at content height and the console leaves two thirds
+       of the frame empty. The body is the flex child that must grow. */
+    .panel { position: relative; overflow: hidden; border-radius: .9vw;
+      display: flex; flex-direction: column;
+      background: linear-gradient(180deg, rgba(8,20,52,.74), rgba(5,12,34,.66));
+      border: 1px solid rgba(86,236,252,.18); }
+    .panel > .title { display: flex; align-items: center; justify-content: space-between; flex: 0 0 auto;
+      padding: .55vw .8vw; border-bottom: 1px solid rgba(86,236,252,.14);
+      font: 700 clamp(9px, .72vw, 13px)/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .16em; text-transform: uppercase; color: #86dcff; }
+    .panel > .title .hint { color: #5d7ba0; font-weight: 600; letter-spacing: .12em; }
+
+    .nav { grid-area: nav; display: flex; flex-direction: column; }
+    .nav .body { flex: 1; min-height: 0; padding: .5vw .8vw .8vw; display: flex; flex-direction: column; gap: .45vw; }
+    .row { display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: .6em;
+      font: 600 clamp(9px, .70vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .06em; }
+    .nav .body .spacer { flex: 1 1 auto; min-height: 0; }
+    .nav .body .sep { height: 1px; background: rgba(86,236,252,.14); margin: .35em 0; }
+    .row .k { color: #6f8bd0; text-transform: uppercase; }
+    .row .v { color: #dcf3ff; font-variant-numeric: tabular-nums; }
+    .row.warn .v { color: #ffc46b; }
+
+    .bar { height: .55vw; min-height: 5px; border-radius: 999px; background: rgba(20,40,80,.7); overflow: hidden; margin: .1em 0 .35em; }
+    .bar > i { display: block; height: 100%; background: linear-gradient(90deg, #2b8cff, #6fe0ff); border-radius: 999px; }
+
+    .plot { grid-area: plot; display: flex; flex-direction: column; }
+    .plot .body { flex: 1; min-height: 0; position: relative; }
+    .plot canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+    .side { grid-area: side; display: flex; flex-direction: column; }
+    .side .body { flex: 1; min-height: 0; padding: .5vw .8vw .8vw; display: flex; flex-direction: column; gap: .5vw; overflow: hidden; }
+
+    .helm { display: grid; grid-template-columns: repeat(3, 1fr); gap: .3vw; }
+    .key { padding: .42vw .2vw; border-radius: .35vw; text-align: center;
+      background: rgba(14,32,70,.85); border: 1px solid rgba(86,236,252,.20);
+      font: 700 clamp(8px, .62vw, 12px)/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .08em; color: #9fd8ff; }
+    .key.lit { background: rgba(30,90,150,.95); border-color: rgba(120,240,255,.55); color: #eafcff;
+      box-shadow: 0 0 14px rgba(90,220,255,.35); }
+
+    .contacts { display: flex; flex-direction: column; gap: .3vw;
+      font: 600 clamp(8px, .64vw, 12px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .06em; }
+    .contacts .c { display: flex; justify-content: space-between; gap: .5em; padding: .12em 0;
+      border-bottom: 1px dashed rgba(86,236,252,.12); }
+    .contacts .c .id { color: #8fb8e8; }
+    .contacts .c .st { color: #4ee6c8; }
+
+    /* CRT grain, scanlines and vignette, as the other consoles in this set use. */
+    .fx { pointer-events: none; position: absolute; inset: 0; z-index: 30; }
+    .scan { background: repeating-linear-gradient(0deg, rgba(0,0,0,.16) 0 1px, rgba(0,0,0,0) 1px 3px); mix-blend-mode: multiply; }
+    .vig { background: radial-gradient(ellipse 120% 100% at 50% 46%, rgba(0,0,0,0) 45%, rgba(0,0,0,.45) 86%, rgba(0,0,0,.78) 100%); }
+
+    /* Numerals on the plot are drawn by the canvas, so no font is needed here. */
+    /*  Portrait viewports: a three-column console is a landscape instrument, so
+        scaling it down to fit leaves most of a tall frame empty. Re-flow to two
+        rows instead -- plot across the middle at full width (it is the part
+        worth the space), nav and helm side by side beneath it. */
+    @media (min-width: 781px) and (max-aspect-ratio: 1/1) {
+      .screen {
+        grid-template-columns: 1fr 1fr;
+        grid-template-rows: auto minmax(0, 1.6fr) minmax(0, 1fr);
+        grid-template-areas:
+          "head head"
+          "plot plot"
+          "nav  side";
+      }
+    }
+
+    @media (max-width: 780px) {
+      /* Phones: stack and scroll rather than scale to illegibility. */
+      .screen { position: static; grid-template-columns: 1fr; grid-template-rows: auto;
+        grid-template-areas: "head" "plot" "nav" "side"; transform: none; height: auto; }
+      .plot .body { min-height: 48vh; }
+      .nav, .side { min-height: 40vh; }
+      html, body { overflow: auto; }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="bg"></canvas>
+
+  <div class="screen" id="screen">
+    <header class="head">
+      <div>
+        <h1>Navigation Console · Astrogator</h1>
+        <p class="sub" id="shipLine">U.S.S. ORION · NX-91872 · HELM &amp; NAVIGATION</p>
+      </div>
+      <div class="pills">
+        <span class="pill"><span class="dot"></span><span id="modeText">CONDITION GREEN</span></span>
+        <span class="pill">COURSE <span id="courseText">000°</span></span>
+        <span class="pill">WARP <span id="warpText">2.57</span></span>
+      </div>
+    </header>
+
+    <section class="panel nav">
+      <div class="title"><span>Flight Vector</span><span class="hint" id="legText">LEG 1 / 6</span></div>
+      <div class="body">
+        <div class="row"><span class="k">Heading</span><span class="v" id="hdg">000.0°</span></div>
+        <div class="row"><span class="k">Yaw rate</span><span class="v" id="yaw">+0.00 °/s</span></div>
+        <div class="row"><span class="k">Pitch</span><span class="v" id="pitch">+0.0°</span></div>
+        <div class="row"><span class="k">Velocity</span><span class="v" id="vel">0.00 c</span></div>
+        <div class="bar"><i id="velBar" style="width:0%"></i></div>
+        <div class="row"><span class="k">Impulse</span><span class="v" id="imp">63%</span></div>
+        <div class="row"><span class="k">Deflector load</span><span class="v" id="def">71%</span></div>
+        <div class="bar"><i id="defBar" style="width:71%"></i></div>
+        <div class="row"><span class="k">ETA to waypoint</span><span class="v" id="eta">--:--:--</span></div>
+        <div class="row warn"><span class="k">Closest approach</span><span class="v" id="cpa">-- km</span></div>
+        <div class="sep"></div>
+        <div class="row"><span class="k">Deflector lobe</span><span class="v" id="lobe">--</span></div>
+        <div class="row"><span class="k">Turn authority</span><span class="v" id="auth">--</span></div>
+        <div class="row"><span class="k">Inertial damping</span><span class="v" id="damp">--</span></div>
+        <div class="row"><span class="k">Nav lock</span><span class="v" id="lock">--</span></div>
+        <div class="spacer"></div>
+        <div class="row"><span class="k">Course ahead</span><span class="v" id="legHdg">---.-°</span></div>
+      </div>
+    </section>
+
+    <section class="panel plot">
+      <div class="title"><span>Plot · Local Space</span><span class="hint" id="rangeText">RANGE 1.0 AU</span></div>
+      <div class="body"><canvas id="plot"></canvas></div>
+    </section>
+
+    <section class="panel side">
+      <div class="title"><span>Helm</span><span class="hint">MANUAL</span></div>
+      <div class="body">
+        <div class="helm" id="helm"></div>
+        <div class="row" style="margin-top:.2em"><span class="k">Autopilot</span><span class="v" id="autoText">ENGAGED</span></div>
+        <div class="row"><span class="k">Relative bearing</span><span class="v" id="rel">---.-°</span></div>
+        <div class="row"><span class="k">Drift</span><span class="v" id="drift">0.00</span></div>
+        <div class="sep"></div>
+        <div class="row"><span class="k">Turn rate cmd</span><span class="v" id="turnCmd">--</span></div>
+        <div class="row"><span class="k">Rudder</span><span class="v" id="rudder">--</span></div>
+        <div class="bar"><i id="rudBar" style="width:50%"></i></div>
+        <div class="sep"></div>
+        <div class="contacts" id="contactList"></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="fx scan"></div>
+  <div class="fx vig"></div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  NAVIGATION CONSOLE — the astrogator's station of the same
+  //  ship as the engineering and systems consoles. The plot is a
+  //  local-space display: the ship flies a course through a field
+  //  of stars and two planets, the deflector throws a forward lobe,
+  //  and the waypoint runs down on the nose. The left column reads
+  //  out the flight vector, the right column runs the helm.
+  //
+  //  Construction notes
+  //  ------------------
+  //  The plot is the only canvas; everything else is DOM, which
+  //  keeps the numbers crisp and the frame cost to one canvas
+  //  clear plus a handful of text updates. Star and body positions
+  //  are generated once at load, so the plot pans under the ship
+  //  rather than twinkling.
+  // ============================================================
+  const CFG = {
+    //  A console full of hairlines, so it wants resolution; the per-frame work
+    //  is one canvas clear plus strokes, which a 1.6 store comfortably covers.
+    dprCap: 1.6,
+
+    /* ---- layout ---- */
+    designWidth: 1600,     // the console is authored at this width, then scaled
+    pad: 14,
+
+    /* ---- flight ---- */
+    legs: 6,
+    legSeconds: [26, 46],
+    cruiseWarp: [1.4, 7.6],
+    turnRate: 3.4,          // deg/s at the tightest, scaled by the turn size
+
+    /* ---- plot ---- */
+    stars: 260,
+    planets: 2,
+    trailLen: 190,
+    rangeAU: 1.0,
+  };
+
+  const el = (id) => document.getElementById(id);
+  const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const TAU = Math.PI * 2;
+
+  /* ---------------- plot ---------------- */
+  const plot = el('plot');
+  const pctx = plot.getContext('2d');
+  let pw = 1, ph = 1, pdpr = 1;
+
+  function sizePlot() {
+    const r = plot.getBoundingClientRect();
+    pdpr = Math.min(CFG.dprCap, window.devicePixelRatio || 1);
+    pw = Math.max(1, Math.round(r.width));
+    ph = Math.max(1, Math.round(r.height));
+    plot.width = Math.round(pw * pdpr);
+    plot.height = Math.round(ph * pdpr);
+    pctx.setTransform(pdpr, 0, 0, pdpr, 0, 0);
+  }
+
+  /* ---- background field ---- */
+  const stars = [];
+  const planets = [];
+  const contacts = [];
+  function seedField() {
+    stars.length = 0;
+    for (let i = 0; i < CFG.stars; i++) {
+      stars.push({
+        x: rand(-1.4, 1.4), y: rand(-1.4, 1.4),
+        r: rand(0.5, 1.9),
+        a: rand(0.20, 0.85),
+        hue: Math.random() < 0.22 ? rand(190, 215) : rand(30, 55),
+      });
+    }
+    planets.length = 0;
+    for (let i = 0; i < CFG.planets; i++) {
+      planets.push({
+        x: rand(-1.1, 1.1), y: rand(-0.9, 0.9),
+        r: rand(0.055, 0.115),
+        hue: rand(18, 42),
+        ring: Math.random() < 0.5,
+        phase: rand(0, TAU),
+      });
+    }
+    contacts.length = 0;
+    for (let i = 0; i < 5; i++) {
+      contacts.push({
+        id: 'CNT-' + String(410 + i * 7),
+        x: rand(-0.95, 0.95), y: rand(-0.85, 0.85),
+        phase: rand(0, TAU),
+      });
+    }
+  }
+
+  /* ---- the ship ---- */
+  const ship = {
+    heading: rand(0, 360),      // degrees, 0 = up
+    target: rand(0, 360),
+    warp: 2.2,
+    targetWarp: 2.2,
+    // position in plot units, relative to the field
+    x: 0, y: 0,
+    trail: [],
+    leg: 0,
+    legLeft: 0,
+    yawRate: 0,
+    deflector: 71,
+  };
+
+  function planLeg() {
+    // Turn to a new heading, hold it, then choose another. The turn is what the
+    // display is really showing, so a leg is mostly turned away on the first
+    // third and cruised for the rest.
+    const delta = rand(-95, 95);
+    ship.target = (ship.heading + delta + 360) % 360;
+    ship.targetWarp = rand(CFG.cruiseWarp[0], CFG.cruiseWarp[1]);
+    ship.legLeft = rand(CFG.legSeconds[0], CFG.legSeconds[1]);
+    ship.leg = (ship.leg % CFG.legs) + 1;
+    el('legText').textContent = `LEG ${ship.leg} / ${CFG.legs}`;
+  }
+
+  function angleDiff(a, b) {
+    let d = (b - a) % 360;
+    if (d > 180) d -= 360;
+    if (d < -180) d += 360;
+    return d;
+  }
+
+  function updateShip(dt) {
+    const diff = angleDiff(ship.heading, ship.target);
+    const prev = ship.heading;
+    // Ease into the turn: a ship does not snap to a new heading.
+    const step = clamp(diff * dt * 0.9, -1, 1) * Math.min(Math.abs(diff), CFG.turnRate * dt * (1 + Math.abs(diff) / 60));
+    ship.heading = (ship.heading + step + 360) % 360;
+    ship.yawRate = step / Math.max(dt, 1e-4);
+
+    ship.legLeft -= dt;
+    if (ship.legLeft <= 0) planLeg();
+
+    ship.warp = lerp(ship.warp, ship.targetWarp, dt * 0.35);
+    // Deflector loads up with speed and eases back on a turn.
+    const wantDef = 46 + ship.warp * 6.5 + Math.abs(ship.yawRate) * 1.6;
+    ship.deflector = lerp(ship.deflector, wantDef, dt * 0.8);
+
+    // Integrate position in plot units: faster warp, more ground covered.
+    const speed = ship.warp * 0.030;
+    const rad = (ship.heading * Math.PI) / 180;
+    ship.x += Math.sin(rad) * speed * dt;
+    ship.y += Math.cos(rad) * speed * dt;
+
+    ship.trail.push({ x: ship.x, y: ship.y });
+    if (ship.trail.length > CFG.trailLen) ship.trail.shift();
+  }
+
+  /* ---------------- plot drawing ---------------- */
+  function drawPlot(time) {
+    const cx = pw / 2, cy = ph / 2;
+    const scale = Math.min(pw, ph) * 0.42;      // plot units -> px
+
+    pctx.setTransform(pdpr, 0, 0, pdpr, 0, 0);
+    // Ground.
+    const bg = pctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(pw, ph) * 0.75);
+    bg.addColorStop(0, '#06142c');
+    bg.addColorStop(0.62, '#030a1a');
+    bg.addColorStop(1, '#01040c');
+    pctx.fillStyle = bg;
+    pctx.fillRect(0, 0, pw, ph);
+
+    // The ship's heading is always up, so the field rotates under it. That is
+    // what makes this a navigation display rather than a map.
+    const rot = (-ship.heading * Math.PI) / 180;
+
+    pctx.save();
+    pctx.translate(cx, cy);
+
+    // Range rings, labelled in the corner rather than on the rings.
+    pctx.strokeStyle = 'rgba(86, 200, 255, 0.13)';
+    pctx.lineWidth = 1;
+    for (let i = 1; i <= 4; i++) {
+      const r = (scale * i) / 4;
+      pctx.beginPath();
+      pctx.arc(0, 0, r, 0, TAU);
+      pctx.stroke();
+    }
+    // Cardinal ticks, rotating with the field so they read as real bearings.
+    pctx.save();
+    pctx.rotate(rot);
+    pctx.strokeStyle = 'rgba(86, 200, 255, 0.20)';
+    pctx.fillStyle = 'rgba(120, 200, 240, 0.50)';
+    pctx.font = '600 10px ui-monospace, Menlo, monospace';
+    pctx.textAlign = 'center';
+    pctx.textBaseline = 'middle';
+    for (let i = 0; i < 36; i++) {
+      const a = (i / 36) * TAU;
+      const long = i % 9 === 0;
+      const r0 = scale * (long ? 0.965 : 0.985);
+      pctx.beginPath();
+      pctx.moveTo(Math.sin(a) * r0 * 1.02, -Math.cos(a) * r0 * 1.02);
+      pctx.lineTo(Math.sin(a) * scale * 1.02, -Math.cos(a) * scale * 1.02);
+      pctx.stroke();
+      if (long) {
+        const lab = ['N', 'E', 'S', 'W'][i / 9];
+        pctx.fillText(lab, Math.sin(a) * scale * 1.12, -Math.cos(a) * scale * 1.12);
+      }
+    }
+    pctx.restore();
+
+    // Field: stars and planets, offset from the ship and rotated.
+    pctx.save();
+    pctx.rotate(rot);
+    const ox = -ship.x * scale * 1.6;
+    const oy = -ship.y * scale * 1.6;
+
+    for (const s of stars) {
+      //  Wrap the field into a torus centred on the ship, so it is endless. The
+      //  modulo has to be centred (result in [-lim, lim)); the first version
+      //  offset it by a constant and pushed most stars off the plot entirely.
+      const lim = scale * 1.24;
+      let x = s.x * scale * 1.5 + ox;
+      let y = s.y * scale * 1.5 + oy;
+      x = (((x + lim) % (lim * 2)) + lim * 2) % (lim * 2) - lim;
+      y = (((y + lim) % (lim * 2)) + lim * 2) % (lim * 2) - lim;
+      const d = Math.hypot(x, y);
+      if (d > scale * 1.02) continue;
+      const tw = 0.75 + 0.25 * Math.sin(time * 1.6 + s.x * 30 + s.y * 17);
+      pctx.fillStyle = `hsla(${s.hue}, 80%, 82%, ${(s.a * tw).toFixed(3)})`;
+      pctx.fillRect(x, y, s.r, s.r);
+    }
+
+    for (const p of planets) {
+      const lim = scale * 1.30;
+      let x = p.x * scale * 1.35 + ox;
+      let y = p.y * scale * 1.35 + oy;
+      x = (((x + lim) % (lim * 2)) + lim * 2) % (lim * 2) - lim;
+      y = (((y + lim) % (lim * 2)) + lim * 2) % (lim * 2) - lim;
+      const rr = p.r * scale;
+      const d = Math.hypot(x, y);
+      if (d > scale * 1.08) continue;
+      // Planet: a lit hemisphere facing the ship, with a terminator.
+      const lit = Math.atan2(-y, -x);
+      const g = pctx.createRadialGradient(
+        x + Math.cos(lit) * rr * 0.45, y + Math.sin(lit) * rr * 0.45, rr * 0.05,
+        x, y, rr
+      );
+      g.addColorStop(0, `hsla(${p.hue}, 78%, 74%, 0.98)`);
+      g.addColorStop(0.45, `hsla(${p.hue - 8}, 68%, 48%, 0.95)`);
+      g.addColorStop(0.82, `hsla(${p.hue - 18}, 58%, 24%, 0.90)`);
+      g.addColorStop(1, 'rgba(0,0,0,0.86)');
+      pctx.fillStyle = g;
+      pctx.beginPath(); pctx.arc(x, y, rr, 0, TAU); pctx.fill();
+      if (p.ring) {
+        pctx.save();
+        pctx.translate(x, y);
+        pctx.rotate(lit + Math.PI / 2);
+        pctx.strokeStyle = `hsla(${p.hue + 12}, 60%, 70%, 0.40)`;
+        pctx.lineWidth = Math.max(1, rr * 0.14);
+        pctx.beginPath();
+        pctx.ellipse(0, 0, rr * 1.9, rr * 0.44, 0, 0, TAU);
+        pctx.stroke();
+        pctx.restore();
+      }
+      // Vector marker, as a plot would draw on a body.
+      pctx.strokeStyle = 'rgba(120, 230, 255, 0.45)';
+      pctx.lineWidth = 1;
+      pctx.beginPath();
+      pctx.moveTo(x - rr * 1.7, y); pctx.lineTo(x - rr * 1.25, y);
+      pctx.moveTo(x + rr * 1.25, y); pctx.lineTo(x + rr * 1.7, y);
+      pctx.moveTo(x, y - rr * 1.7); pctx.lineTo(x, y - rr * 1.25);
+      pctx.moveTo(x, y + rr * 1.25); pctx.lineTo(x, y + rr * 1.7);
+      pctx.stroke();
+    }
+    pctx.restore();
+
+    // The ship's own trail, drawn ship-relative and unrotated: it is the
+    // ground track, so it belongs to the field, not to the heading-up frame.
+    if (ship.trail.length > 1) {
+      pctx.save();
+      pctx.rotate(rot);
+      pctx.beginPath();
+      const n = ship.trail.length;
+      for (let i = 0; i < n; i++) {
+        const t = ship.trail[i];
+        const x = (t.x - ship.x) * scale * 1.6;
+        const y = (t.y - ship.y) * scale * 1.6;
+        if (i === 0) pctx.moveTo(x, y); else pctx.lineTo(x, y);
+      }
+      pctx.strokeStyle = 'rgba(110, 224, 255, 0.42)';
+      pctx.lineWidth = 1.6;
+      pctx.stroke();
+      pctx.restore();
+    }
+
+    // Deflector lobe: a forward fan, tightest at high warp.
+    pctx.save();
+    const lobe = 0.30 + (1 - clamp(ship.warp / 9, 0, 1)) * 0.42;
+    const reach = scale * (0.34 + ship.warp * 0.055);
+    const lg = pctx.createRadialGradient(0, 0, 0, 0, 0, reach);
+    lg.addColorStop(0, 'rgba(90, 220, 255, 0.30)');
+    lg.addColorStop(0.55, 'rgba(70, 180, 255, 0.10)');
+    lg.addColorStop(1, 'rgba(40, 120, 220, 0)');
+    pctx.fillStyle = lg;
+    pctx.beginPath();
+    pctx.moveTo(0, 0);
+    pctx.arc(0, 0, reach, -Math.PI / 2 - lobe, -Math.PI / 2 + lobe);
+    pctx.closePath();
+    pctx.fill();
+    pctx.restore();
+
+    // Waypoint: runs down the nose, then resets. Its bearing is the target
+    // heading, so it slides across as the ship turns.
+    const relBearing = angleDiff(ship.heading, ship.target);
+    const wpR = lerp(scale * 1.02, scale * 0.08, clamp(ship.legLeft / CFG.legSeconds[1], 0, 1));
+    const wpa = (relBearing * Math.PI) / 180;
+    const wx = Math.sin(wpa) * wpR;
+    const wy = -Math.cos(wpa) * wpR;
+    pctx.save();
+    pctx.strokeStyle = 'rgba(120, 255, 220, 0.85)';
+    pctx.lineWidth = 1.6;
+    pctx.beginPath();
+    pctx.moveTo(wx - 8, wy); pctx.lineTo(wx - 3, wy);
+    pctx.moveTo(wx + 3, wy); pctx.lineTo(wx + 8, wy);
+    pctx.moveTo(wx, wy - 8); pctx.lineTo(wx, wy - 3);
+    pctx.moveTo(wx, wy + 3); pctx.lineTo(wx, wy + 8);
+    pctx.stroke();
+    pctx.beginPath();
+    pctx.arc(wx, wy, 11 + Math.sin(time * 2.2) * 2, 0, TAU);
+    pctx.strokeStyle = 'rgba(120, 255, 220, 0.30)';
+    pctx.stroke();
+    // A dashed line from the nose to the waypoint, which is the whole point of
+    // the display: how far off course the ship is right now.
+    pctx.setLineDash([4, 5]);
+    pctx.strokeStyle = 'rgba(120, 255, 220, 0.35)';
+    pctx.beginPath();
+    pctx.moveTo(0, -scale * 0.06);
+    pctx.lineTo(wx, wy);
+    pctx.stroke();
+    pctx.setLineDash([]);
+    pctx.restore();
+
+    // Course line ahead of the ship.
+    pctx.strokeStyle = 'rgba(140, 240, 255, 0.55)';
+    pctx.lineWidth = 1.2;
+    pctx.beginPath();
+    pctx.moveTo(0, -scale * 0.05);
+    pctx.lineTo(0, -scale * 0.62);
+    pctx.stroke();
+
+    // Contacts: drifting markers with range readouts, which is what fills a
+    // navigation plot and gives the eye something to check the left column's
+    // numbers against.
+    pctx.save();
+    pctx.rotate(rot);
+    pctx.font = '600 9px ui-monospace, Menlo, monospace';
+    pctx.textAlign = 'left';
+    pctx.textBaseline = 'middle';
+    for (const c of contacts) {
+      const lim = scale * 1.05;
+      let x = c.x * scale * 1.35 + ox;
+      let y = c.y * scale * 1.35 + oy;
+      x = (((x + lim) % (lim * 2)) + lim * 2) % (lim * 2) - lim;
+      y = (((y + lim) % (lim * 2)) + lim * 2) % (lim * 2) - lim;
+      const d = Math.hypot(x, y);
+      if (d > scale * 1.0) continue;
+      const pulse = 0.55 + 0.45 * Math.sin(time * 1.8 + c.phase);
+      pctx.strokeStyle = `rgba(255, 210, 120, ${(0.35 + 0.35 * pulse).toFixed(3)})`;
+      pctx.lineWidth = 1.2;
+      pctx.beginPath();
+      pctx.rect(x - 4, y - 4, 8, 8);
+      pctx.stroke();
+      pctx.fillStyle = `rgba(255, 224, 160, ${(0.45 + 0.35 * pulse).toFixed(3)})`;
+      pctx.fillText(c.id, x + 8, y);
+    }
+    pctx.restore();
+
+    // The ship, always at the centre and always pointing up.
+    pctx.save();
+    pctx.translate(0, 0);
+    pctx.fillStyle = 'rgba(220, 248, 255, 0.95)';
+    pctx.beginPath();
+    pctx.moveTo(0, -9);
+    pctx.lineTo(6, 7);
+    pctx.lineTo(0, 4);
+    pctx.lineTo(-6, 7);
+    pctx.closePath();
+    pctx.fill();
+    pctx.strokeStyle = 'rgba(90, 220, 255, 0.60)';
+    pctx.lineWidth = 1.1;
+    pctx.beginPath();
+    pctx.arc(0, 0, 17, 0, TAU);
+    pctx.stroke();
+    pctx.restore();
+
+    pctx.restore();
+  }
+
+  /* ---------------- helm keys ---------------- */
+  function buildHelm() {
+    const host = el('helm');
+    const keys = ['YAW L', 'YAW R', 'ROLL L', 'ROLL R', 'PITCH U', 'PITCH D', 'IMPULSE', 'WARP', 'HOLD'];
+    host.replaceChildren();
+    keys.forEach((k, i) => {
+      const d = document.createElement('div');
+      d.className = 'key';
+      d.textContent = k;
+      d.dataset.i = String(i);
+      host.appendChild(d);
+    });
+  }
+
+  const contactEls = [];
+  function buildContacts() {
+    const host = el('contactList');
+    host.replaceChildren();
+    contactEls.length = 0;
+    for (let i = 0; i < contacts.length; i++) {
+      const row = document.createElement('div');
+      row.className = 'c';
+      const id = document.createElement('span');
+      id.className = 'id';
+      const st = document.createElement('span');
+      st.className = 'st';
+      id.textContent = contacts[i].id;
+      st.textContent = '--- km';
+      row.append(id, st);
+      host.appendChild(row);
+      contactEls.push({ id, st });
+    }
+  }
+
+  /* ---------------- fit ----------------
+     The console is authored at designWidth and scaled to fit, against the
+     rendered rect so the fit does not depend on which layout property reports
+     the untransformed size. Phones get the stacked scrolling layout instead. */
+  let fittedKey = '';
+  function isStacked() {
+    return window.matchMedia('(max-width: 780px)').matches;
+  }
+  function fit() {
+    const screen = el('screen');
+    if (!screen) return;
+    if (isStacked()) {
+      screen.style.removeProperty('--fit');
+      screen.style.removeProperty('margin-left');
+      screen.style.removeProperty('margin-top');
+      fittedKey = '';
+      return;
+    }
+    const vw = window.innerWidth, vh = window.innerHeight, pad = CFG.pad;
+    const portrait = window.innerWidth <= window.innerHeight;
+    //  Author at a width that suits the frame. A landscape console is authored
+    //  wide (its three columns want the width); the portrait re-flow is two
+    //  columns and wants a narrower design, so it scales UP to fill the height.
+    const designW = portrait
+      ? Math.max(760, Math.min(vw, 1000))
+      : Math.max(1100, Math.min(CFG.designWidth * 1.25, Math.max(vw, 1100)));
+    screen.style.marginLeft = '0px';
+    screen.style.marginTop = '0px';
+    screen.style.width = designW + 'px';
+    screen.style.setProperty('--fit', '1');
+
+    //  Converge on a scale that fits. It may scale up as well as down: on a
+    //  portrait tablet the two-row layout is taller than the viewport at good
+    //  width but narrower than it, so growing it fills the frame.
+    let s = 1;
+    for (let i = 0; i < 6; i++) {
+      screen.style.setProperty('--fit', String(s));
+      const r = screen.getBoundingClientRect();
+      if (!r.height || !r.width) return;
+      const over = Math.max(r.height / (vh - pad), r.width / (vw - pad));
+      if (over > 0.995 && over < 1.005) break;
+      if (over > 1) s = Math.max(0.25, s / over);
+      else s = Math.min(1.6, s / over);
+    }
+    screen.style.setProperty('--fit', String(s));
+    fittedKey = designW + 'x' + vw + 'x' + vh + 'x' + Math.round(screen.scrollHeight);
+
+    const r = screen.getBoundingClientRect();
+    screen.style.marginLeft = Math.max(0, (vw - r.width) / 2) + 'px';
+    screen.style.marginTop = Math.max(0, (vh - r.height) / 2) + 'px';
+  }
+
+  /* ---------------- background haze ---------------- */
+  const bg = el('bg');
+  const bctx = bg.getContext('2d');
+  const bstars = [];
+  function sizeBg() {
+    const dpr = Math.min(CFG.dprCap, window.devicePixelRatio || 1);
+    bg.width = Math.max(1, Math.floor(window.innerWidth * dpr));
+    bg.height = Math.max(1, Math.floor(window.innerHeight * dpr));
+    bg.style.width = window.innerWidth + 'px';
+    bg.style.height = window.innerHeight + 'px';
+    bctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    bstars.length = 0;
+    const n = Math.floor((window.innerWidth * window.innerHeight) / 16000);
+    for (let i = 0; i < n; i++) {
+      bstars.push({
+        x: Math.random() * window.innerWidth,
+        y: Math.random() * window.innerHeight,
+        r: rand(0.4, 1.3),
+        a: rand(0.10, 0.40),
+        ph: rand(0, TAU),
+      });
+    }
+  }
+  function drawBg(time) {
+    const w = window.innerWidth, h = window.innerHeight;
+    bctx.clearRect(0, 0, w, h);
+    bctx.fillStyle = '#02040a';
+    bctx.fillRect(0, 0, w, h);
+    const g = bctx.createRadialGradient(w * 0.34, h * 0.20, 0, w * 0.34, h * 0.20, Math.max(w, h) * 0.7);
+    g.addColorStop(0, 'rgba(18, 62, 120, 0.30)');
+    g.addColorStop(0.5, 'rgba(8, 30, 70, 0.12)');
+    g.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    bctx.fillStyle = g;
+    bctx.fillRect(0, 0, w, h);
+    for (const s of bstars) {
+      const tw = 0.6 + 0.4 * Math.sin(time * 1.2 + s.ph);
+      bctx.fillStyle = `rgba(200, 226, 255, ${(s.a * tw).toFixed(3)})`;
+      bctx.fillRect(s.x, s.y, s.r, s.r);
+    }
+  }
+
+  /* ---------------- readouts ---------------- */
+  let readoutEvery = 0;
+  function updateReadouts(time) {
+    const relBearing = angleDiff(ship.heading, ship.target);
+    el('hdg').textContent = ship.heading.toFixed(1).padStart(5, '0') + '°';
+    el('yaw').textContent = (ship.yawRate >= 0 ? '+' : '') + ship.yawRate.toFixed(2) + ' °/s';
+    // Pitch follows warp, which is a stand-in for the nose coming up on accel.
+    const pitch = clamp((ship.warp - 2.2) * 1.6, -12, 14);
+    el('pitch').textContent = (pitch >= 0 ? '+' : '') + pitch.toFixed(1) + '°';
+    el('vel').textContent = (ship.warp * 0.37).toFixed(2) + ' c';
+    el('velBar').style.width = clamp((ship.warp / 9) * 100, 0, 100) + '%';
+    el('imp').textContent = Math.round(clamp(30 + ship.warp * 9, 0, 99)) + '%';
+    el('def').textContent = Math.round(ship.deflector) + '%';
+    el('defBar').style.width = clamp(ship.deflector, 0, 99) + '%';
+    el('warpText').textContent = ship.warp.toFixed(2);
+    el('courseText').textContent = Math.round(ship.heading).toString().padStart(3, '0') + '°';
+    el('rel').textContent = (relBearing >= 0 ? '+' : '') + relBearing.toFixed(1) + '°';
+    el('drift').textContent = Math.abs(ship.yawRate).toFixed(2);
+    el('legHdg').textContent = ship.target.toFixed(1).padStart(5, '0') + '°';
+    // Deflector lobe width, to match what the plot draws.
+    const lobe = 0.30 + (1 - clamp(ship.warp / 9, 0, 1)) * 0.42;
+    el('lobe').textContent = ((lobe * 2 * 180) / Math.PI).toFixed(0) + '°';
+    el('auth').textContent = clamp(100 - Math.abs(ship.yawRate) * 9, 12, 100).toFixed(0) + '%';
+    el('damp').textContent = ('SYNC ' + (72 + ship.warp * 2.4).toFixed(0) + '%');
+    el('lock').textContent = Math.abs(relBearing) < 4 ? 'ACQUIRED' : 'SEARCHING';
+    el('turnCmd').textContent = (relBearing >= 0 ? 'STBD ' : 'PORT ') + Math.abs(relBearing).toFixed(1) + '°';
+    const rudder = clamp(50 + clamp(-relBearing, -60, 60) * 0.75 - ship.yawRate * 1.6, 0, 100);
+    el('rudder').textContent = (rudder - 50).toFixed(1);
+    el('rudBar').style.width = rudder.toFixed(1) + '%';
+
+    // Contacts, nearest first, recomputed against the ship so the readouts
+    // agree with what the plot draws.
+    if (contactEls.length === contacts.length) {
+      const rows = contacts
+        .map((c) => ({ c, d: Math.hypot(c.x - ship.x, c.y - ship.y) }))
+        .sort((a, b) => a.d - b.d);
+      for (let i = 0; i < rows.length; i++) {
+        contactEls[i].id.textContent = rows[i].c.id;
+        contactEls[i].st.textContent = (rows[i].d * 148300).toFixed(0) + ' km';
+      }
+    }
+
+    // ETA counts down with the leg.
+    const secs = Math.max(0, ship.legLeft);
+    const mm = String(Math.floor(secs / 60)).padStart(2, '0');
+    const ss = String(Math.floor(secs % 60)).padStart(2, '0');
+    el('eta').textContent = `${mm}:${ss}:${String(Math.floor((secs * 100) % 100)).padStart(2, '0')}`;
+
+    // Closest approach: nearest planet in the plot, in km. Pure dressing, but
+    // it should still move, so it is driven by the ship's own position.
+    let best = Infinity;
+    for (const p of planets) best = Math.min(best, Math.hypot(p.x - ship.x, p.y - ship.y));
+    el('cpa').textContent = Math.round(best * 148300).toLocaleString('en-US') + ' km';
+
+    // Helm keys light in a slow pattern, plus whichever key the turn implies.
+    const keys = el('helm').children;
+    const phase = Math.floor(time * 2.2);
+    for (let i = 0; i < keys.length; i++) {
+      let on = (i + phase) % 7 === 0;
+      if (i === 0 && ship.yawRate < -0.35) on = true;
+      if (i === 1 && ship.yawRate > 0.35) on = true;
+      if (i === 7 && ship.warp > 5.5) on = true;
+      keys[i].classList.toggle('lit', on);
+    }
+
+    // Condition tracks how hard the deflector is working.
+    const hard = ship.deflector > 84;
+    el('modeText').textContent = hard ? 'CONDITION YELLOW' : 'CONDITION GREEN';
+    document.querySelector('.head .dot').style.background = hard ? '#ffc46b' : '#4ee6c8';
+    el('autoText').textContent = ship.pourPaused ? 'DISENGAGED' : 'ENGAGED';
+  }
+
+  /* ---------------- boot ---------------- */
+  function resizeAll() {
+    sizeBg();
+    sizePlot();
+    fit();
+  }
+  let relayoutTimer = 0;
+  window.addEventListener('resize', () => {
+    // Canvas sizes must change immediately or the frame stretches; the console
+    // fit is deferred so a window drag does not re-measure dozens of times.
+    sizeBg();
+    sizePlot();
+    clearTimeout(relayoutTimer);
+    relayoutTimer = setTimeout(fit, 140);
+  }, { passive: true });
+
+  // Re-fit when the panels settle, as the readouts change their sizes.
+  let fitObsPending = false;
+  if (window.ResizeObserver) {
+    new ResizeObserver(() => {
+      if (fitObsPending) return;
+      fitObsPending = true;
+      requestAnimationFrame(() => {
+        fitObsPending = false;
+        if (isStacked()) return;
+        const screen = el('screen');
+        const key = window.innerWidth + 'x' + window.innerHeight + 'x' + Math.round(screen.scrollHeight);
+        if (key !== fittedKey) fit();
+      });
+    }).observe(el('screen'));
+  }
+
+  seedField();
+  buildHelm();
+  buildContacts();
+  resizeAll();
+  requestAnimationFrame(() => { fit(); });
+
+  el('shipLine').textContent =
+    `${['U.S.S. ORION', 'U.S.S. VESPER', 'U.S.S. CALYPSO'][(Math.random() * 3) | 0]} · ` +
+    `NX-${10000 + ((Math.random() * 80000) | 0)} · HELM & NAVIGATION`;
+
+  let last = performance.now();
+  const start = last;
+  ship.pourPaused = false;
+  planLeg();
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = (now - start) / 1000;
+
+    updateShip(dt);
+    drawBg(time);
+    drawPlot(time);
+    updateReadouts(time);
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
