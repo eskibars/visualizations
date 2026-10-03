@@ -1,0 +1,609 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Pocket Watch</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #12100c; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 128% 104% at 50% 46%,
+        rgba(0,0,0,0) 42%, rgba(0,0,0,.36) 80%, rgba(0,0,0,.80) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(228, 200, 150, .30);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">wound at eight · still going</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  POCKET WATCH — a key-wound pocket watch lying open on dark
+  //  velvet, running at real time. The movement is drawn from the
+  //  dial side: blued hands, a small seconds sub-dial, and behind
+  //  the glass a visible balance wheel oscillating at four hertz
+  //  with an escape wheel stepping under it. A swinging bow
+  //  chain, dust on the crystal, and a watchmaker's loupe
+  //  glinting at the edge.
+  //
+  //  Construction notes
+  //  ------------------
+  //  The case, dial, numerals, sub-dial and engine-turned guilloche
+  //  are painted once per resize into a backdrop: they are the most
+  //  intricate part of the page and none of them moves. Per frame
+  //  only the hands, the balance, the escape wheel, the chain and
+  //  the crystal glint are redrawn.
+  // ============================================================
+  const CONFIG = {
+    //  Guilloche and numerals are fine detail and genuinely benefit from more
+    //  pixels, but a full 2x store costs 4x the fill, so this is the one page
+    //  here that keeps a high cap. Only the hands animate, so the cost is small.
+    dprCap: 2,
+
+    caseR: 0.30,             // case radius, fraction of min(W,H)
+    bezel: 0.055,            // bezel width, as a fraction of caseR
+    subdialR: 0.20,          // small seconds radius, fraction of caseR
+    subdialAt: { x: 0.0, y: 0.34 },   // offset from centre, in caseR units
+    balanceAt: { x: 0.0, y: -0.185 },
+    balanceR: 0.135,
+
+    jewelCount: 17,
+    chainLinks: 26,
+    dialTicks: 60,
+
+    // A watch runs at 4 Hz for the balance; the sweep second advances in
+    // sixths of a second so the motion reads as continuously sweeping.
+    beatHz: 4,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  // ---------------- sprites ----------------
+  let glowWarm, glowGilt, sheen;
+
+  function radialSprite(size, stops) {
+    const s = size;
+    const c = document.createElement('canvas');
+    c.width = c.height = s;
+    const x = c.getContext('2d');
+    const grad = x.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    for (const [p, col] of stops) grad.addColorStop(p, col);
+    x.fillStyle = grad;
+    x.fillRect(0, 0, s, s);
+    return c;
+  }
+
+  function buildSprites() {
+    glowWarm = radialSprite(128, [
+      [0, 'rgba(255, 232, 178, 0.55)'],
+      [0.35, 'rgba(240, 200, 130, 0.14)'],
+      [1, 'rgba(200, 160, 100, 0)'],
+    ]);
+    glowGilt = radialSprite(128, [
+      [0, 'rgba(255, 246, 214, 0.70)'],
+      [0.28, 'rgba(240, 208, 140, 0.20)'],
+      [1, 'rgba(180, 140, 70, 0)'],
+    ]);
+    sheen = radialSprite(128, [
+      [0, 'rgba(255, 255, 255, 0)'],
+      [0.62, 'rgba(255, 255, 255, 0)'],
+      [0.80, 'rgba(255, 255, 255, 0.16)'],
+      [0.90, 'rgba(255, 255, 255, 0.06)'],
+      [1, 'rgba(255, 255, 255, 0)'],
+    ]);
+  }
+
+  // ---------------- geometry ----------------
+  let caseC = { x: 0, y: 0 };
+  let caseR = 1;
+  let dust = [];
+
+  function layout() {
+    U = Math.min(W, H);
+    caseC = { x: W * 0.5, y: H * 0.5 };
+    caseR = U * CONFIG.caseR;
+    // Dust on the crystal: fixed points chosen once, so it does not crawl.
+    if (!dust.length) {
+      for (let i = 0; i < 26; i++) {
+        const a = Math.random() * Math.PI * 2;
+        const r = Math.sqrt(Math.random());
+        dust.push({ fx: Math.cos(a) * r, fy: Math.sin(a) * r, s: rand(0.0016, 0.0042), a: rand(0.10, 0.34) });
+      }
+    }
+  }
+
+  function polar(r, ang) {
+    return { x: caseC.x + Math.cos(ang) * r, y: caseC.y + Math.sin(ang) * r };
+  }
+
+  // ---------------- backdrop ----------------
+  //  The static half of the watch: velvet, case, bezel, dial, guilloche,
+  //  numerals, sub-dial and jewels.
+  let backdrop = null;
+
+  function guilloche(g, cx, cy, r) {
+    //  Engine-turned dials are a fine sunburst of hairlines, not concentric
+    //  rings: the cutting tool sweeps from the centre outward, so the pattern is
+    //  radial. Rings with a wobble term read as a row of loops and look wrong.
+    const lines = 520;
+    for (let i = 0; i < lines; i++) {
+      const a = (i / lines) * Math.PI * 2;
+      // Each hair is cut at a slightly different length, which is what gives
+      // guilloche its shimmer as the light moves.
+      const len = r * (0.90 + 0.085 * Math.sin(i * 2.7));
+      const inner = r * 0.42;
+      const a1 = 0.010 + 0.016 * (0.5 + 0.5 * Math.sin(i * 1.3));
+      g.strokeStyle = `rgba(196, 164, 106, ${a1.toFixed(3)})`;
+      g.lineWidth = Math.max(0.4, caseR * 0.0032);
+      g.beginPath();
+      g.moveTo(cx + Math.cos(a) * inner, cy + Math.sin(a) * inner);
+      g.lineTo(cx + Math.cos(a) * len, cy + Math.sin(a) * len);
+      g.stroke();
+    }
+  }
+
+  function paintBackdrop() {
+    if (!backdrop) backdrop = document.createElement('canvas');
+    backdrop.width = Math.max(1, Math.floor(W * DPR));
+    backdrop.height = Math.max(1, Math.floor(H * DPR));
+    const g = backdrop.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+    g.clearRect(0, 0, W, H);
+
+    const cx = caseC.x, cy = caseC.y, R = caseR;
+
+    // Velvet beneath: near-black green-brown with a soft pooled light.
+    g.fillStyle = '#12100c';
+    g.fillRect(0, 0, W, H);
+    const pool = g.createRadialGradient(cx, cy * 0.94, 0, cx, cy, U * 0.95);
+    pool.addColorStop(0, 'rgba(92, 74, 44, 0.40)');
+    pool.addColorStop(0.30, 'rgba(58, 46, 28, 0.22)');
+    pool.addColorStop(0.68, 'rgba(26, 22, 16, 0.10)');
+    pool.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    g.fillStyle = pool;
+    g.fillRect(0, 0, W, H);
+
+    // Table shadow under the case.
+    const sh = g.createRadialGradient(cx, cy + R * 0.30, R * 0.55, cx, cy + R * 0.30, R * 1.55);
+    sh.addColorStop(0, 'rgba(0, 0, 0, 0.60)');
+    sh.addColorStop(0.55, 'rgba(0, 0, 0, 0.26)');
+    sh.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    g.fillStyle = sh;
+    g.fillRect(cx - R * 1.7, cy - R * 1.3, R * 3.4, R * 3.4);
+
+    //  Case. Drawn as three concentric rings: an outer gilt band, a dark
+    //  reeded edge, then the bezel that holds the crystal.
+    const ring = (rOuter, rInner, c0, c1, steps) => {
+      const grad = g.createLinearGradient(cx - rOuter, cy - rOuter, cx + rOuter, cy + rOuter);
+      grad.addColorStop(0, c0);
+      grad.addColorStop(0.42, c1);
+      grad.addColorStop(0.55, c0);
+      grad.addColorStop(1, c1);
+      g.fillStyle = grad;
+      g.beginPath();
+      g.arc(cx, cy, rOuter, 0, Math.PI * 2);
+      g.arc(cx, cy, rInner, 0, Math.PI * 2, true);
+      g.fill();
+      if (steps) {
+        // Reeding: fine radial cuts on the band, which is what catches light on
+        // a real case edge.
+        g.save();
+        g.beginPath();
+        g.arc(cx, cy, rOuter, 0, Math.PI * 2);
+        g.arc(cx, cy, rInner, 0, Math.PI * 2, true);
+        g.clip();
+        g.strokeStyle = 'rgba(0, 0, 0, 0.30)';
+        g.lineWidth = Math.max(0.5, R * 0.006);
+        for (let i = 0; i < steps; i++) {
+          const a = (i / steps) * Math.PI * 2;
+          g.beginPath();
+          g.moveTo(cx + Math.cos(a) * rInner, cy + Math.sin(a) * rInner);
+          g.lineTo(cx + Math.cos(a) * rOuter, cy + Math.sin(a) * rOuter);
+          g.stroke();
+        }
+        g.restore();
+      }
+    };
+
+    ring(R, R * 0.955, '#8a6a34', '#c99f52', 240);         // outer gilt
+    ring(R * 0.955, R * 0.885, '#7a5c2c', '#e0bc74', 0);   // polished bevel
+    ring(R * 0.885, R * 0.845, '#5d4520', '#a4813e', 0);   // inner step
+
+    // Dial: cream enamel, very slightly domed (a lighter centre).
+    const dialR = R * 0.845;
+    g.save();
+    g.beginPath();
+    g.arc(cx, cy, dialR, 0, Math.PI * 2);
+    g.clip();
+    const dial = g.createRadialGradient(cx - R * 0.16, cy - R * 0.20, 0, cx, cy, dialR * 1.20);
+    dial.addColorStop(0, '#f4ead2');
+    dial.addColorStop(0.52, '#e8dcc0');
+    dial.addColorStop(0.86, '#d8c9a6');
+    dial.addColorStop(1, '#c2b089');
+    g.fillStyle = dial;
+    g.fillRect(cx - dialR, cy - dialR, dialR * 2, dialR * 2);
+
+    // Guilloche across the outer third of the dial, as a dress watch has.
+    guilloche(g, cx, cy, dialR * 0.985);
+
+    // A minute track: two thin rings.
+    g.strokeStyle = 'rgba(58, 44, 26, 0.55)';
+    g.lineWidth = Math.max(0.7, R * 0.005);
+    g.beginPath(); g.arc(cx, cy, dialR * 0.905, 0, Math.PI * 2); g.stroke();
+    g.strokeStyle = 'rgba(58, 44, 26, 0.32)';
+    g.beginPath(); g.arc(cx, cy, dialR * 0.872, 0, Math.PI * 2); g.stroke();
+
+    // Ticks: heavy at the hours, fine between.
+    for (let i = 0; i < CONFIG.dialTicks; i++) {
+      const ang = (i / CONFIG.dialTicks) * Math.PI * 2 - Math.PI / 2;
+      const hour = i % 5 === 0;
+      const r0 = dialR * (hour ? 0.795 : 0.838);
+      const r1 = dialR * 0.868;
+      g.strokeStyle = hour ? 'rgba(38, 28, 16, 0.88)' : 'rgba(58, 44, 26, 0.46)';
+      g.lineWidth = hour ? Math.max(1.6, R * 0.020) : Math.max(0.7, R * 0.007);
+      g.beginPath();
+      g.moveTo(cx + Math.cos(ang) * r0, cy + Math.sin(ang) * r0);
+      g.lineTo(cx + Math.cos(ang) * r1, cy + Math.sin(ang) * r1);
+      g.stroke();
+    }
+
+    // Roman numerals at the hours. Drawn rather than typeset, so the page needs
+    // no font beyond the platform's serif.
+    const numerals = ['XII', 'I', 'II', 'III', 'IIII', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI'];
+    g.fillStyle = 'rgba(30, 22, 12, 0.92)';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.font = `${Math.round(R * 0.145)}px "Times New Roman", Georgia, serif`;
+    for (let i = 0; i < 12; i++) {
+      const ang = (i / 12) * Math.PI * 2 - Math.PI / 2;
+      const rr = dialR * 0.675;
+      g.fillText(numerals[i], cx + Math.cos(ang) * rr, cy + Math.sin(ang) * rr);
+    }
+
+    //  Maker's name, set high on the dial, and the balance aperture dropped
+    //  to make room for it rather than the text being drawn over the aperture.
+    g.fillStyle = 'rgba(46, 34, 18, 0.80)';
+    g.font = `${Math.round(R * 0.060)}px "Times New Roman", Georgia, serif`;
+    g.fillText('AUTOCLAW', cx, cy - R * 0.470);
+    g.font = `${Math.round(R * 0.040)}px "Times New Roman", Georgia, serif`;
+    g.fillStyle = 'rgba(46, 34, 18, 0.58)';
+    g.fillText('LONDON', cx, cy - R * 0.412);
+
+    // Sub-dial: small seconds, recessed, with its own track and ticks.
+    const sd = { x: cx + CONFIG.subdialAt.x * R, y: cy + CONFIG.subdialAt.y * R };
+    const sdR = CONFIG.subdialR * R;
+    const sdGrad = g.createRadialGradient(sd.x - sdR * 0.3, sd.y - sdR * 0.35, 0, sd.x, sd.y, sdR * 1.15);
+    sdGrad.addColorStop(0, '#efe4ca');
+    sdGrad.addColorStop(0.72, '#ddceac');
+    sdGrad.addColorStop(1, '#bfae88');
+    g.fillStyle = sdGrad;
+    g.beginPath(); g.arc(sd.x, sd.y, sdR, 0, Math.PI * 2); g.fill();
+    g.strokeStyle = 'rgba(58, 44, 26, 0.42)';
+    g.lineWidth = Math.max(0.7, R * 0.006);
+    g.beginPath(); g.arc(sd.x, sd.y, sdR * 0.94, 0, Math.PI * 2); g.stroke();
+    for (let i = 0; i < 60; i += 5) {
+      const ang = (i / 60) * Math.PI * 2 - Math.PI / 2;
+      g.strokeStyle = 'rgba(46, 34, 20, 0.62)';
+      g.lineWidth = Math.max(0.8, R * 0.007);
+      g.beginPath();
+      g.moveTo(sd.x + Math.cos(ang) * sdR * 0.76, sd.y + Math.sin(ang) * sdR * 0.76);
+      g.lineTo(sd.x + Math.cos(ang) * sdR * 0.92, sd.y + Math.sin(ang) * sdR * 0.92);
+      g.stroke();
+    }
+    // A tiny "30" at the bottom of the sub-dial, which is what these dials do.
+    g.fillStyle = 'rgba(46, 34, 18, 0.62)';
+    g.font = `${Math.round(R * 0.042)}px "Times New Roman", Georgia, serif`;
+    g.fillText('30', sd.x, sd.y + sdR * 0.58);
+    g.fillText('60', sd.x, sd.y - sdR * 0.56);
+
+    // Balance aperture: a round window in the dial showing the movement.
+    const ba = { x: cx + CONFIG.balanceAt.x * R, y: cy + CONFIG.balanceAt.y * R };
+    const baR = CONFIG.balanceR * R;
+    const apGrad = g.createRadialGradient(ba.x, ba.y, 0, ba.x, ba.y, baR);
+    apGrad.addColorStop(0, '#0b0906');
+    apGrad.addColorStop(0.72, '#141008');
+    apGrad.addColorStop(1, '#20180c');
+    g.fillStyle = apGrad;
+    g.beginPath(); g.arc(ba.x, ba.y, baR, 0, Math.PI * 2); g.fill();
+    g.strokeStyle = 'rgba(120, 92, 48, 0.60)';
+    g.lineWidth = Math.max(1.0, R * 0.007);
+    g.beginPath(); g.arc(ba.x, ba.y, baR, 0, Math.PI * 2); g.stroke();
+
+    // Jewels: small ruby bearings set in the plate.
+    for (let i = 0; i < CONFIG.jewelCount; i++) {
+      const ang = (i / CONFIG.jewelCount) * Math.PI * 2 + 0.4;
+      const rr = baR * (0.42 + 0.40 * ((i % 5) / 4));
+      const jx = ba.x + Math.cos(ang) * rr * 0.9;
+      const jy = ba.y + Math.sin(ang) * rr * 0.9;
+      g.fillStyle = 'rgba(150, 26, 30, 0.85)';
+      g.beginPath(); g.arc(jx, jy, Math.max(0.8, R * 0.008), 0, Math.PI * 2); g.fill();
+      g.fillStyle = 'rgba(255, 150, 150, 0.45)';
+      g.beginPath(); g.arc(jx - R * 0.002, jy - R * 0.002, Math.max(0.4, R * 0.0035), 0, Math.PI * 2); g.fill();
+    }
+
+    g.restore();
+
+    // Hands are drawn per frame, over the dial.
+
+    // Crystal: a broad diagonal reflection band plus a rim of edge light.
+    g.save();
+    g.beginPath();
+    g.arc(cx, cy, dialR, 0, Math.PI * 2);
+    g.clip();
+    const gl = g.createLinearGradient(cx - dialR, cy - dialR, cx + dialR * 0.6, cy + dialR);
+    gl.addColorStop(0.00, 'rgba(255, 255, 255, 0)');
+    gl.addColorStop(0.36, 'rgba(255, 255, 255, 0.05)');
+    gl.addColorStop(0.46, 'rgba(255, 255, 255, 0.14)');
+    gl.addColorStop(0.52, 'rgba(255, 255, 255, 0.05)');
+    gl.addColorStop(0.68, 'rgba(255, 255, 255, 0)');
+    gl.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    g.fillStyle = gl;
+    g.fillRect(cx - dialR, cy - dialR, dialR * 2, dialR * 2);
+    g.restore();
+
+    // Dust on the crystal, fixed forever.
+    for (const d of dust) {
+      g.fillStyle = `rgba(255, 250, 235, ${d.a.toFixed(3)})`;
+      const px = cx + d.fx * dialR * 0.94;
+      const py = cy + d.fy * dialR * 0.94;
+      g.beginPath(); g.arc(px, py, Math.max(0.5, d.s * U), 0, Math.PI * 2); g.fill();
+    }
+
+    // Bow and chain: the ring at twelve and a few links falling away.
+    g.strokeStyle = '#b8934e';
+    g.lineWidth = Math.max(2.5, R * 0.032);
+    g.beginPath();
+    g.arc(cx, cy - R * 1.035, R * 0.115, 0.16 * Math.PI, 0.84 * Math.PI, true);
+    g.stroke();
+    g.strokeStyle = 'rgba(255, 236, 190, 0.34)';
+    g.lineWidth = Math.max(1, R * 0.010);
+    g.beginPath();
+    g.arc(cx, cy - R * 1.035, R * 0.115, 0.20 * Math.PI, 0.62 * Math.PI, true);
+    g.stroke();
+  }
+
+  // ---------------- per-frame parts ----------------
+  function drawHand(ang, len, width, tail, color, edge) {
+    const cx = caseC.x, cy = caseC.y;
+    const tip = { x: cx + Math.cos(ang) * len, y: cy + Math.sin(ang) * len };
+    const back = { x: cx - Math.cos(ang) * tail, y: cy - Math.sin(ang) * tail };
+    const nx = -Math.sin(ang), ny = Math.cos(ang);
+
+    ctx.save();
+    // Spine: a tapered lozenge rather than a plain line, so the hand has a
+    // shape at both ends and catches light along one edge.
+    ctx.beginPath();
+    ctx.moveTo(back.x, back.y);
+    ctx.lineTo(cx + nx * width * 0.5, cy + ny * width * 0.5);
+    ctx.lineTo(tip.x + nx * width * 0.22, tip.y + ny * width * 0.22);
+    ctx.lineTo(tip.x, tip.y);
+    ctx.lineTo(tip.x - nx * width * 0.22, tip.y - ny * width * 0.22);
+    ctx.lineTo(cx - nx * width * 0.5, cy - ny * width * 0.5);
+    ctx.closePath();
+    const g = ctx.createLinearGradient(back.x, back.y, tip.x, tip.y);
+    g.addColorStop(0, color);
+    g.addColorStop(0.5, edge);
+    g.addColorStop(1, color);
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(20, 14, 8, 0.55)';
+    ctx.lineWidth = Math.max(0.6, caseR * 0.004);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawBalance(time, beat) {
+    const ba = { x: caseC.x + CONFIG.balanceAt.x * caseR, y: caseC.y + CONFIG.balanceAt.y * caseR };
+    const R = CONFIG.balanceR * caseR;
+    // The balance swings sinusoidally at the beat frequency; the escape wheel
+    // steps once per half oscillation.
+    const swing = Math.sin(time * Math.PI * 2 * CONFIG.beatHz) * 0.62;
+
+    ctx.save();
+    ctx.translate(ba.x, ba.y);
+    ctx.rotate(swing);
+
+    // Balance wheel: a gilt rim with three arms.
+    ctx.strokeStyle = 'rgba(226, 196, 132, 0.86)';
+    ctx.lineWidth = Math.max(1.0, R * 0.085);
+    ctx.beginPath(); ctx.arc(0, 0, R * 0.82, 0, Math.PI * 2); ctx.stroke();
+    ctx.lineWidth = Math.max(0.7, R * 0.055);
+    for (let i = 0; i < 3; i++) {
+      const a = (i / 3) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(Math.cos(a) * R * 0.82, Math.sin(a) * R * 0.82);
+      ctx.stroke();
+    }
+    // Hairspring: a spiral, drawn small so it reads as a coil.
+    ctx.strokeStyle = 'rgba(196, 214, 255, 0.60)';
+    ctx.lineWidth = Math.max(0.5, R * 0.030);
+    ctx.beginPath();
+    for (let k = 0; k <= 90; k++) {
+      const t = k / 90;
+      const a = t * Math.PI * 5.2 + swing * 0.5;
+      const rr = R * (0.14 + 0.48 * t);
+      const px = Math.cos(a) * rr, py = Math.sin(a) * rr;
+      if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+    ctx.restore();
+
+    // Centre jewel on the balance cock.
+    ctx.fillStyle = 'rgba(160, 30, 34, 0.9)';
+    ctx.beginPath(); ctx.arc(ba.x, ba.y, Math.max(1, R * 0.10), 0, Math.PI * 2); ctx.fill();
+
+    // Escape wheel: steps in discrete jumps, which is the whole charm of
+    // looking into a movement. Eight teeth, one step per half beat.
+    const step = Math.floor(time * CONFIG.beatHz * 2);
+    const ea = (step / 16) * Math.PI * 2;
+    ctx.save();
+    ctx.translate(ba.x + R * 0.95, ba.y + R * 0.55);
+    ctx.rotate(ea);
+    ctx.strokeStyle = 'rgba(214, 186, 124, 0.72)';
+    ctx.lineWidth = Math.max(0.6, R * 0.045);
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(Math.cos(a) * R * 0.34, Math.sin(a) * R * 0.34);
+      ctx.stroke();
+    }
+    ctx.beginPath(); ctx.arc(0, 0, R * 0.34, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawChain(time) {
+    //  The chain hangs from the bow and swings very slightly, as a watch lying
+    //  on a table does when it has just been set down. It falls away from the
+    //  bow rather than across the dial: at this scale a chain over the face is
+    //  unreadable as a chain and just looks like a smudge on the enamel.
+    const cx = caseC.x;
+    const R = caseR;
+    const y0 = caseC.y - R * 1.150;
+    ctx.save();
+    for (let i = 0; i < CONFIG.chainLinks; i++) {
+      const t = i / (CONFIG.chainLinks - 1);
+      const sway = Math.sin(time * 0.55 + t * 2.6) * R * 0.13 * t;
+      const x = cx - R * 0.52 * t + sway;
+      const y = y0 - R * 0.10 - t * R * 1.35;
+      const ang = Math.atan2(-R * 1.35, -R * 0.52) + Math.cos(time * 0.55 + t * 2.6) * 0.07;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(ang);
+      ctx.strokeStyle = i % 2 ? 'rgba(196, 162, 96, 0.82)' : 'rgba(232, 206, 148, 0.90)';
+      ctx.lineWidth = Math.max(1.3, R * 0.017);
+      ctx.beginPath();
+      ctx.ellipse(0, 0, R * 0.032, R * 0.055, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      // Every other link is seen edge-on, which is a short bar.
+      if (i % 2 === 0) {
+        ctx.beginPath();
+        ctx.moveTo(-R * 0.015, 0);
+        ctx.lineTo(R * 0.015, 0);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+
+  function drawGlint(time) {
+    // Light travelling across the crystal, slowly enough to notice.
+    const t = (time * 0.055) % 1;
+    const cx = caseC.x, cy = caseC.y, R = caseR * 0.845;
+    const ang = t * Math.PI * 2;
+    const dist = R * 0.52;
+    const x = cx + Math.cos(ang) * dist;
+    const y = cy + Math.sin(ang * 0.7) * dist * 0.6;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.24;
+    const s = caseR * 0.85;
+    ctx.drawImage(glowGilt, x - s / 2, y - s / 2, s, s);
+    ctx.restore();
+  }
+
+  // ---------------- loop ----------------
+  let last = performance.now();
+  let ready = false;
+
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.max(1, Math.floor(window.innerWidth));
+    H = Math.max(1, Math.floor(window.innerHeight));
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    buildSprites();
+    layout();
+    dust.length = 0;          // re-scatter for the new crystal size
+    layout();
+    paintBackdrop();
+  }
+  window.addEventListener('resize', resize, { passive: true });
+
+  function frame(now) {
+    const time = now / 1000;
+
+    // Real time, read from the clock, so the watch tells it.
+    const d = new Date();
+    const sec = d.getSeconds() + d.getMilliseconds() / 1000;
+    const min = d.getMinutes() + sec / 60;
+    const hr = (d.getHours() % 12) + min / 60;
+    // A mechanical sweep second advances in small steps, six per second: that
+    // is what separates a watch from a quartz tick.
+    const steppedSec = Math.floor(sec * 6) / 6;
+
+    const secAng = (steppedSec / 60) * Math.PI * 2 - Math.PI / 2;
+    const minAng = (min / 60) * Math.PI * 2 - Math.PI / 2;
+    const hrAng = (hr / 12) * Math.PI * 2 - Math.PI / 2;
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.drawImage(backdrop, 0, 0, W, H);
+
+    drawBalance(time);
+
+    // Hour and minute hands, in the blued-steel palette of a dress watch.
+    const R = caseR;
+    drawHand(hrAng, R * 0.44, R * 0.062, R * 0.075, '#1b2740', '#4d6ba0');
+    drawHand(minAng, R * 0.68, R * 0.044, R * 0.088, '#1b2740', '#5a7cb4');
+
+    // Sweep second on the sub-dial.
+    const sd = {
+      x: caseC.x + CONFIG.subdialAt.x * R,
+      y: caseC.y + CONFIG.subdialAt.y * R,
+    };
+    const sdR = CONFIG.subdialR * R;
+    ctx.save();
+    ctx.strokeStyle = '#8a2a24';
+    ctx.lineWidth = Math.max(1.0, R * 0.011);
+    ctx.beginPath();
+    ctx.moveTo(sd.x - Math.cos(secAng) * sdR * 0.16, sd.y - Math.sin(secAng) * sdR * 0.16);
+    ctx.lineTo(sd.x + Math.cos(secAng) * sdR * 0.80, sd.y + Math.sin(secAng) * sdR * 0.80);
+    ctx.stroke();
+    ctx.fillStyle = '#8a2a24';
+    ctx.beginPath(); ctx.arc(sd.x, sd.y, Math.max(0.9, R * 0.014), 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+
+    // Centre cap over all three hands.
+    ctx.fillStyle = '#c9a55c';
+    ctx.beginPath(); ctx.arc(caseC.x, caseC.y, R * 0.030, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(60, 44, 20, 0.7)';
+    ctx.beginPath(); ctx.arc(caseC.x, caseC.y, R * 0.013, 0, Math.PI * 2); ctx.fill();
+
+    drawChain(time);
+    drawGlint(time);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
