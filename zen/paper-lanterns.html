@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Paper Lanterns</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #05060f; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 128% 104% at 50% 48%,
+        rgba(0,0,0,0) 44%, rgba(0,0,0,.32) 82%, rgba(0,0,0,.76) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(255, 216, 170, .30);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">one for every wish</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  PAPER LANTERNS — a slow release over still water at night.
+  //  Lanterns lift from near the horizon, drift up and to the
+  //  right on a long thermal, and pass out of frame; each one
+  //  carries a candle that flickers, and the whole field of them
+  //  reflects in the water below, stretched and broken by ripples.
+  //
+  //  Construction notes
+  //  ------------------
+  //  The night, the far shore, the water gradient and the moon are
+  //  painted once per resize. Lanterns are emitted from a small
+  //  pre-rendered sprite sheet (three warm variants, so the field
+  //  is not uniform) and the reflection reuses the same sprites
+  //  flipped, squashed and drawn at low alpha behind ripples.
+  // ============================================================
+  const CONFIG = {
+    //  Additive small sprites over a static backdrop; a 2x store buys nothing.
+    dprCap: 1.6,
+
+    horizon: 0.62,
+    emitY: 0.60,             // where lanterns are released, fraction of H
+    emitBand: 0.20,          // width of the release band, fraction of W
+
+    maxLanterns: 46,
+    emitEvery: [0.55, 1.9],  // s between releases
+    riseSpeed: [7, 17],      // px/s at 1080h
+    driftSpeed: [4, 11],
+    swayAmp: [10, 30],
+    lanternRadius: [9, 21],  // px at 1080h
+
+    candleHz: [0.5, 1.4],
+    rippleBands: 26,
+    reflectionSquash: 0.42,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+
+  // ---------------- sprites ----------------
+  //  A lantern is a warm body with a brighter core and a soft halo. Drawn once
+  //  per variant, then blitted, because there are up to 46 of them per frame
+  //  plus their reflections.
+  function lanternSprite(hue) {
+    const s = 96;
+    const c = document.createElement('canvas');
+    c.width = c.height = s;
+    const x = c.getContext('2d');
+    const r = s / 2;
+
+    // Halo: kept deliberately tight. A wide halo swallows the paper body and
+    // the lantern reads as a plain glowing orb.
+    const halo = x.createRadialGradient(r, r, 0, r, r, r);
+    halo.addColorStop(0, `hsla(${hue}, 95%, 74%, 0.34)`);
+    halo.addColorStop(0.34, `hsla(${hue}, 92%, 64%, 0.13)`);
+    halo.addColorStop(0.66, `hsla(${hue}, 88%, 56%, 0.04)`);
+    halo.addColorStop(1, `hsla(${hue}, 85%, 50%, 0)`);
+    x.fillStyle = halo;
+    x.fillRect(0, 0, s, s);
+
+    // Paper body: a rounded lantern shape, taller than wide, and large enough
+    // in the sprite that the silhouette survives downscaling.
+    const bw = r * 0.52, bh = r * 0.62;
+    x.save();
+    x.translate(r, r);
+    const body = x.createLinearGradient(0, -bh, 0, bh);
+    body.addColorStop(0, `hsla(${hue}, 96%, 86%, 0.95)`);
+    body.addColorStop(0.42, `hsla(${hue}, 98%, 74%, 0.98)`);
+    body.addColorStop(0.78, `hsla(${hue - 8}, 92%, 58%, 0.92)`);
+    body.addColorStop(1, `hsla(${hue - 14}, 88%, 46%, 0.80)`);
+    x.fillStyle = body;
+    x.beginPath();
+    if (x.roundRect) x.roundRect(-bw, -bh, bw * 2, bh * 2, [bw * 0.75, bw * 0.75, bw * 0.95, bw * 0.95]);
+    else x.rect(-bw, -bh, bw * 2, bh * 2);
+    x.fill();
+
+    // The candle itself, showing through the paper near the base.
+    const core = x.createRadialGradient(0, bh * 0.34, 0, 0, bh * 0.34, bw * 1.9);
+    core.addColorStop(0, 'rgba(255, 252, 232, 0.95)');
+    core.addColorStop(0.30, `hsla(${hue}, 100%, 82%, 0.50)`);
+    core.addColorStop(1, `hsla(${hue}, 96%, 70%, 0)`);
+    x.fillStyle = core;
+    x.beginPath();
+    x.arc(0, bh * 0.34, bw * 1.9, 0, Math.PI * 2);
+    x.fill();
+
+    // A vertical seam either side, as a paper lantern has ribs.
+    x.strokeStyle = `hsla(${hue - 16}, 70%, 40%, 0.30)`;
+    x.lineWidth = Math.max(0.8, s * 0.010);
+    for (const sx of [-bw * 0.52, bw * 0.52]) {
+      x.beginPath();
+      x.moveTo(sx, -bh * 0.86);
+      x.lineTo(sx, bh * 0.90);
+      x.stroke();
+    }
+    // Rim at top and bottom.
+    x.strokeStyle = `hsla(${hue - 20}, 60%, 34%, 0.38)`;
+    x.lineWidth = Math.max(0.9, s * 0.012);
+    x.beginPath(); x.moveTo(-bw * 0.92, -bh); x.lineTo(bw * 0.92, -bh); x.stroke();
+    x.beginPath(); x.moveTo(-bw * 0.80, bh); x.lineTo(bw * 0.80, bh); x.stroke();
+    x.restore();
+
+    return c;
+  }
+
+  let bodies = [];
+
+  function buildSprites() {
+    bodies = [
+      lanternSprite(28),   // amber
+      lanternSprite(38),   // gold
+      lanternSprite(14),   // deeper orange
+    ];
+  }
+
+  function stamp(sprite, x, y, size, alpha, squashY) {
+    if (alpha <= 0.004 || size <= 0.3) return;
+    ctx.globalAlpha = Math.min(1, alpha);
+    if (squashY && squashY !== 1) {
+      ctx.drawImage(sprite, x - size / 2, y - (size * squashY) / 2, size, size * squashY);
+    } else {
+      ctx.drawImage(sprite, x - size / 2, y - size / 2, size, size);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // ---------------- backdrop ----------------
+  let backdrop = null;
+  function horizonY() { return H * CONFIG.horizon; }
+
+  function paintBackdrop() {
+    if (!backdrop) backdrop = document.createElement('canvas');
+    backdrop.width = Math.max(1, Math.floor(W * DPR));
+    backdrop.height = Math.max(1, Math.floor(H * DPR));
+    const g = backdrop.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+    const hy = horizonY();
+
+    // Night sky.
+    const sky = g.createLinearGradient(0, 0, 0, hy);
+    sky.addColorStop(0, '#04040e');
+    sky.addColorStop(0.42, '#0a0c22');
+    sky.addColorStop(0.78, '#161a38');
+    sky.addColorStop(1, '#2a2340');
+    g.fillStyle = sky;
+    g.fillRect(0, 0, W, hy);
+
+    // Stars, fading as they approach the warm horizon.
+    for (let i = 0; i < 200; i++) {
+      const sx = rand(0, W);
+      const sy = rand(0, hy * 0.92);
+      const a = rand(0.08, 0.55) * (1 - sy / hy);
+      g.fillStyle = `rgba(226, 232, 255, ${a.toFixed(3)})`;
+      g.fillRect(sx, sy, Math.max(1, W * 0.0008), Math.max(1, W * 0.0008));
+    }
+
+    // Moon, high and thin.
+    const mx = W * 0.775, my = H * 0.135, mr = U * 0.024;
+    const halo = g.createRadialGradient(mx, my, 0, mx, my, mr * 7);
+    halo.addColorStop(0, 'rgba(226, 232, 255, 0.26)');
+    halo.addColorStop(0.26, 'rgba(196, 208, 240, 0.07)');
+    halo.addColorStop(1, 'rgba(160, 176, 220, 0)');
+    g.fillStyle = halo;
+    g.fillRect(mx - mr * 7, my - mr * 7, mr * 14, mr * 14);
+    g.fillStyle = 'rgba(238, 242, 255, 0.92)';
+    g.beginPath(); g.arc(mx, my, mr, 0, Math.PI * 2); g.fill();
+    g.fillStyle = 'rgba(206, 214, 240, 0.34)';
+    g.beginPath(); g.arc(mx + mr * 0.22, my + mr * 0.20, mr * 0.17, 0, Math.PI * 2); g.fill();
+
+    // Far shore: a low dark line with warm light pooling above it.
+    const shoreH = H * 0.030;
+    const glow = g.createLinearGradient(0, hy - H * 0.16, 0, hy);
+    glow.addColorStop(0, 'rgba(255, 150, 90, 0)');
+    glow.addColorStop(0.55, 'rgba(206, 116, 66, 0.10)');
+    glow.addColorStop(1, 'rgba(232, 138, 76, 0.26)');
+    g.fillStyle = glow;
+    g.fillRect(0, hy - H * 0.16, W, H * 0.16);
+
+    // Hills silhouetted on the shore.
+    g.fillStyle = '#080712';
+    g.beginPath();
+    g.moveTo(0, hy);
+    for (let i = 0; i <= 60; i++) {
+      const x = (i / 60) * W;
+      const y = hy - shoreH - Math.abs(Math.sin(i * 0.36) * Math.cos(i * 0.19)) * H * 0.028;
+      g.lineTo(x, y);
+    }
+    g.lineTo(W, hy);
+    g.closePath();
+    g.fill();
+
+    // Water.
+    const water = g.createLinearGradient(0, hy, 0, H);
+    water.addColorStop(0, '#151232');
+    water.addColorStop(0.28, '#0c0b22');
+    water.addColorStop(0.68, '#060616');
+    water.addColorStop(1, '#03030c');
+    g.fillStyle = water;
+    g.fillRect(0, hy, W, H - hy);
+
+    // Warm band right under the horizon, from the lanterns already aloft.
+    //  Softened along its lower edge, so it reads as light in the water rather
+    //  than as a painted stripe with a visible boundary.
+    const band = g.createLinearGradient(0, hy, 0, hy + (H - hy) * 0.62);
+    band.addColorStop(0, 'rgba(255, 150, 80, 0.20)');
+    band.addColorStop(0.24, 'rgba(208, 118, 64, 0.10)');
+    band.addColorStop(0.58, 'rgba(160, 82, 46, 0.035)');
+    band.addColorStop(1, 'rgba(120, 60, 34, 0)');
+    g.fillStyle = band;
+    g.fillRect(0, hy, W, (H - hy) * 0.62);
+  }
+
+  // ---------------- lanterns ----------------
+  const lanterns = [];
+  let nextEmit = 0;
+
+  function emit() {
+    const hy = horizonY();
+    const r = rand(CONFIG.lanternRadius[0], CONFIG.lanternRadius[1]) * U / 1080;
+    lanterns.push({
+      x: W * (0.12 + Math.random() * 0.72),
+      y: hy - rand(0, H * 0.02),
+      r,
+      // Rise slowly and gain lift as the lantern warms: the acceleration is
+      // what makes a release look like a release rather than like a constant-
+      // speed elevator.
+      v: rand(CONFIG.riseSpeed[0], CONFIG.riseSpeed[1]) * U / 1080,
+      vy: 0,
+      vx: rand(CONFIG.driftSpeed[0], CONFIG.driftSpeed[1]) * U / 1080 * (Math.random() < 0.25 ? -1 : 1),
+      sway: rand(CONFIG.swayAmp[0], CONFIG.swayAmp[1]) * U / 1080,
+      swayHz: rand(0.10, 0.30),
+      phase: rand(0, Math.PI * 2),
+      sprite: bodies[(Math.random() * bodies.length) | 0],
+      candleHz: rand(CONFIG.candleHz[0], CONFIG.candleHz[1]),
+      candlePhase: rand(0, Math.PI * 2),
+      // A little tumble, as they turn on the thermal.
+      tilt: rand(-0.12, 0.12),
+      life: 0,
+    });
+    if (lanterns.length > CONFIG.maxLanterns) lanterns.shift();
+  }
+
+  function updateLanterns(dt, time) {
+    for (let i = lanterns.length - 1; i >= 0; i--) {
+      const L = lanterns[i];
+      L.life += dt;
+      // Accelerate gently toward the rise speed.
+      L.vy = lerp(L.vy, L.v, dt * 0.32);
+      L.y -= L.vy * dt;
+      L.x += L.vx * dt + Math.cos(time * L.swayHz * Math.PI * 2 + L.phase) * L.sway * dt * 0.24;
+      if (L.y < -H * 0.16 || L.x < -W * 0.2 || L.x > W * 1.2) lanterns.splice(i, 1);
+    }
+  }
+
+  function drawLanterns(time) {
+    const hy = horizonY();
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const L of lanterns) {
+      // Candles flicker; a lantern just released is brightest.
+      const flick = 0.80 + 0.20 * Math.sin(time * L.candleHz * Math.PI * 2 + L.candlePhase);
+      const fresh = clamp(L.life / 1.6, 0, 1);
+      // Fade out as they climb, so nothing pops at the frame edge.
+      const fade = clamp((L.y + H * 0.10) / (H * 0.24), 0, 1);
+      const a = (0.72 + 0.22 * flick) * fresh * fade;
+
+      // Reflection first, below the waterline, squashed and dim.
+      const depth = hy - L.y;
+      if (depth > 0) {
+        const ry = hy + depth * CONFIG.reflectionSquash;
+        if (ry < H + L.r * 4) {
+          const wob = Math.sin(time * 1.9 + L.phase) * L.r * 0.34;
+          const ra = a * 0.24 * clamp(1 - (ry - hy) / (H - hy), 0.05, 1);
+          stamp(L.sprite, L.x + wob, ry, L.r * 3.4, ra * 0.8, 0.30);
+          stamp(L.sprite, L.x + wob * 1.6, ry + L.r * 0.6, L.r * 2.4, ra * 0.5, 0.24);
+        }
+      }
+
+      stamp(L.sprite, L.x, L.y, L.r * 4.6, a);
+    }
+    ctx.restore();
+  }
+
+  // ---------------- ripples ----------------
+  function drawRipples(time) {
+    const hy = horizonY();
+    const span = H - hy;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineWidth = Math.max(1, H * 0.0015);
+    for (let i = 0; i < CONFIG.rippleBands; i++) {
+      const t = i / (CONFIG.rippleBands - 1);
+      const y = hy + span * Math.pow(t, 1.3);
+      const dash = lerp(0.008, 0.042, t) * W;
+      const gap = dash * lerp(2.6, 4.6, t);
+      const alpha = lerp(0.10, 0.035, t);
+      const drift = (time * lerp(5, 18, t)) % (dash + gap);
+      ctx.strokeStyle = `rgba(255, 186, 130, ${alpha.toFixed(3)})`;
+      ctx.beginPath();
+      for (let x = -dash + drift; x < W + dash; x += dash + gap) {
+        const yy = y + Math.sin(x * 0.007 + time * 0.5 + i * 1.1) * lerp(0.5, 2.2, t);
+        ctx.moveTo(x, yy);
+        ctx.lineTo(x + dash, yy);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // ---------------- loop ----------------
+  let last = performance.now();
+  let ready = false;
+  const start = performance.now();
+
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.max(1, Math.floor(window.innerWidth));
+    H = Math.max(1, Math.floor(window.innerHeight));
+    U = Math.min(W, H);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    buildSprites();
+    paintBackdrop();
+    lanterns.length = 0;
+    // Open on a field already aloft, spread over the lower half of the climb,
+    // rather than on an empty sky that fills in over the first minute.
+    for (let i = 0; i < 16; i++) {
+      emit();
+      const L = lanterns[lanterns.length - 1];
+      L.y -= rand(0, H * 0.42);
+      L.life = rand(2, 20);
+      L.vy = L.v;
+    }
+  }
+  window.addEventListener('resize', resize, { passive: true });
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = (now - start) / 1000;
+
+    if (time >= nextEmit) {
+      nextEmit = time + rand(CONFIG.emitEvery[0], CONFIG.emitEvery[1]);
+      emit();
+    }
+    updateLanterns(dt, time);
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.drawImage(backdrop, 0, 0, W, H);
+    drawLanterns(time);
+    drawRipples(time);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
