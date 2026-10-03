@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Surf Line</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #060a12; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 128% 104% at 50% 52%,
+        rgba(0,0,0,0) 44%, rgba(0,0,0,.30) 82%, rgba(0,0,0,.72) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(200, 234, 255, .28);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">sets every eleven seconds</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  SURF LINE — the view from the water out the back, looking at
+  //  a beach break. Swell trains arrive from the horizon, steepen,
+  //  and break: a white crest tumbles down the face, foam floods
+  //  the trough, and the water surges up the sand and drains back.
+  //
+  //  Construction notes
+  //  ------------------
+  //  Waves are drawn as filled ribbons rather than as displaced
+  //  water: the near face and the back are two polygons per wave,
+  //  which is what makes a flat 2D canvas read as a volume of
+  //  moving water. Swell, sky, beach and the sea's own gradient are
+  //  painted once per resize; per frame the page redraws only the
+  //  wave ribbons, their foam and the spray.
+  // ============================================================
+  const CONFIG = {
+    //  Large soft gradients and translucent foam: a 1.6 store is
+    //  indistinguishable from 2 here and much cheaper to fill.
+    dprCap: 1.6,
+
+    horizon: 0.42,
+    sandY: 0.88,             // where the waterline meets the beach
+    waveCount: 5,
+    /*  Wave height as a fraction of the frame's short side, at the shore. The
+        first version used 0.030, which put a 30 px ripple in a 430 px band of
+        sea and read as a stray line rather than as swell. */
+    waveScale: 0.115,
+    setEvery: [8, 15],       // s between sets (a set is a group)
+    setSize: [2, 4],
+    foamParticles: 240,
+    sprayCount: 150,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+
+  const horizonY = () => H * CONFIG.horizon;
+  const sandY = () => H * CONFIG.sandY;
+
+  // ---------------- waves ----------------
+  //  A wave's shape is a function of where it is between the horizon and the
+  //  beach: height grows, face steepens, and at a threshold it breaks. Keeping
+  //  that as one continuous parameter is what stops the set looking like
+  //  separate objects spawning and despawning.
+  const waves = [];
+
+  function spawnWave(delay) {
+    waves.push({
+      z: -0.25 - delay,        // -0.25 at the horizon, 1 at the sand
+      amp: rand(0.55, 1.0),
+      phase: rand(0, Math.PI * 2),
+      breakAt: rand(0.52, 0.68),
+      broke: false,
+      foam: 0,
+      // Each wave is a slightly different shape; a break where every wave is
+      // identical looks like a repeating texture.
+      skew: rand(-0.18, 0.18),
+      period: rand(0.85, 1.25),
+    });
+    if (waves.length > 7) waves.shift();
+  }
+
+  function updateWaves(dt) {
+    // Nearer waves travel faster in screen terms, which is what a perspective
+    // view of a swell train looks like.
+    for (const w of waves) {
+      w.z += dt * (0.070 + Math.max(0, w.z) * 0.115);
+      if (w.z > w.breakAt && !w.broke) { w.broke = true; }
+      if (w.broke) w.foam = clamp(w.foam + dt * 0.9, 0, 1);
+      w.phase += dt * 1.6 * w.period;
+    }
+    for (let i = waves.length - 1; i >= 0; i--) {
+      if (waves[i].z > 1.25) waves.splice(i, 1);
+    }
+  }
+
+  // Screen geometry for a wave at depth z (-0.25 .. 1.25).
+  function waveGeom(w) {
+    const hy = horizonY();
+    const sy = sandY();
+    // Ease the approach so waves bunch up as they shallow, as real swell does.
+    const t = clamp(w.z, 0, 1);
+    const eased = Math.pow(t, 0.78);
+    const y = lerp(hy, sy, eased);
+    // Height grows toward the shore, and again sharply as it breaks.
+    const scale = lerp(0.22, 1.0, eased);
+    const h = U * CONFIG.waveScale * w.amp * scale * (w.broke ? lerp(1, 1.45, w.foam) : 1);
+    // Width: the wave spans the whole frame, but the crest line bows.
+    return { y, h, scale, bow: (0.5 + w.skew) * U * 0.16 * scale };
+  }
+
+  function drawWaves(time, pal) {
+    // Far to near, so a nearer wave always overlaps the one behind it.
+    const ordered = waves.slice().sort((a, b) => a.z - b.z);
+    for (const w of ordered) {
+      const { y, h, scale, bow } = waveGeom(w);
+      if (y < horizonY() - 4) continue;
+      const crushed = w.foam;
+
+      ctx.save();
+      // Back of the wave: the water behind the crest, darker and flatter.
+      //  The crest line is sampled once and reused for both the back and the
+      //  face, so the two polygons cannot disagree about where the lip is.
+      //
+      //  A swell is a long line across the frame, not a hump in the middle: the
+      //  first version modulated the crest height by cos((u-0.5)*PI), which is
+      //  zero at both edges and one in the centre, so every wave drew as an oval
+      //  blob. The crest is now nearly level, with a gentle bow and a little chop.
+      const pts = [];
+      for (let x = -10; x <= W + 10; x += Math.max(14, W * 0.016)) {
+        const u = x / W;
+        const crest = y
+          - h * (0.88 + 0.12 * Math.sin(u * Math.PI * 3.1 + w.phase * 0.4))
+          + Math.sin(u * Math.PI * 5.3 + w.phase) * h * 0.10
+          - Math.sin((u - 0.5) * Math.PI) * bow * 0.42;
+        pts.push({ x, crest });
+      }
+
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].crest);
+      for (const p of pts) ctx.lineTo(p.x, p.crest);
+      ctx.lineTo(W + 10, y + h * 0.65);
+      ctx.lineTo(-10, y + h * 0.65);
+      ctx.closePath();
+      const back = ctx.createLinearGradient(0, y - h, 0, y + h * 0.7);
+      back.addColorStop(0, pal.crestFar);
+      back.addColorStop(0.45, pal.backMid);
+      back.addColorStop(1, pal.trough);
+      ctx.fillStyle = back;
+      ctx.fill();
+
+      // The face: from the crest down into the trough, lighter where the wave
+      // is standing up and translucent where it has broken.
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].crest);
+      for (const p of pts) ctx.lineTo(p.x, p.crest);
+      for (let i = pts.length - 1; i >= 0; i--) {
+        //  The foot of the face lags the crest, which is the lean of a breaking
+        //  wave. The lag is what makes the face a wedge rather than a bar.
+        ctx.lineTo(pts[i].x, pts[i].crest + h * (1.30 + 0.45 * Math.sin(i * 0.35 + w.phase)));
+      }
+      ctx.closePath();
+      const face = ctx.createLinearGradient(0, y - h, 0, y + h * 1.5);
+      //  A breaking wave is translucent green where the light comes through the
+      //  lip and white where it is already foam. The mix shifts with `crushed`.
+      face.addColorStop(0, mixCss(pal.faceTop, pal.foamTop, crushed * 0.85));
+      face.addColorStop(0.35, mixCss(pal.faceMid, pal.foamMid, crushed * 0.80));
+      face.addColorStop(1, mixCss(pal.faceFoot, pal.foamFoot, crushed * 0.55));
+      ctx.fillStyle = face;
+      ctx.fill();
+
+      // Foam along the crest, drawn as a run of overlapping blobs whose radius
+      // follows the crest line. Kept thin: a swell's whitewater is a broken
+      // line, not a row of eggs.
+      if (w.broke) {
+        ctx.save();
+        ctx.globalAlpha = clamp(w.foam * 1.15, 0, 1) * 0.90;
+        ctx.fillStyle = 'rgba(250, 254, 255, 0.92)';
+        for (const p of pts) {
+          const rr = h * (0.085 + 0.075 * Math.sin(p.x * 0.031 + w.phase * 2));
+          ctx.beginPath();
+          ctx.ellipse(p.x, p.crest + rr * 0.25, Math.max(3, rr * 1.5), Math.max(2, rr), 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        // A brighter lip line over the top of the foam, so the crest still
+        // reads as an edge after the whitewater has built up.
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.75)';
+        ctx.lineWidth = Math.max(1.4, h * 0.05);
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].crest);
+        for (const p of pts) ctx.lineTo(p.x, p.crest);
+        ctx.stroke();
+        ctx.restore();
+      }
+      ctx.restore();
+    }
+  }
+
+  function mixCss(a, b, t) {
+    const pa = a.match(/\d+/g).map(Number);
+    const pb = b.match(/\d+/g).map(Number);
+    const r = Math.round(lerp(pa[0], pb[0], t));
+    const g = Math.round(lerp(pa[1], pb[1], t));
+    const bl = Math.round(lerp(pa[2], pb[2], t));
+    const al = lerp(pa[3] ?? 1, pb[3] ?? 1, t);
+    return `rgba(${r}, ${g}, ${bl}, ${al.toFixed(3)})`;
+  }
+
+  // ---------------- foam and spray ----------------
+  //  Foam is a particle field riding the water surface between a breaking wave
+  //  and the beach; it is emitted when a wave breaks and washed up the sand.
+  const foam = [];
+  const spray = [];
+
+  function emitFoam(gl, h) {
+    for (let i = 0; i < 26; i++) {
+      foam.push({
+        x: rand(-W * 0.05, W * 1.05),
+        y: gl + rand(-h * 0.2, h * 0.4),
+        r: rand(2, 9) * (U / 1080),
+        v: rand(0.10, 0.34),
+        a: rand(0.35, 0.9),
+        life: 1,
+        ph: rand(0, Math.PI * 2),
+      });
+    }
+    if (foam.length > CONFIG.foamParticles * 3) foam.splice(0, 40);
+  }
+
+  function emitSpray(gl, h) {
+    for (let i = 0; i < 14; i++) {
+      spray.push({
+        x: rand(-W * 0.02, W * 1.02),
+        y: gl + rand(-h * 0.4, 0),
+        vx: rand(-40, 40) * (U / 1080),
+        vy: rand(-160, -50) * (U / 1080),
+        r: rand(1, 3.2) * (U / 1080),
+        life: 1,
+      });
+    }
+    if (spray.length > CONFIG.sprayCount) spray.splice(0, 20);
+  }
+
+  function updateFoam(dt) {
+    for (let i = foam.length - 1; i >= 0; i--) {
+      const f = foam[i];
+      f.y += f.v * 62 * dt;
+      f.life -= dt * 0.30;
+      if (f.life <= 0 || f.y > sandY() + H * 0.02) foam.splice(i, 1);
+    }
+    for (let i = spray.length - 1; i >= 0; i--) {
+      const s = spray[i];
+      s.vy += 300 * dt;              // gravity
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      s.life -= dt * 1.15;
+      if (s.life <= 0 || s.y > sandY()) spray.splice(i, 1);
+    }
+  }
+
+  function drawFoamAndSpray(time) {
+    ctx.save();
+    for (const f of foam) {
+      const a = f.life * f.a;
+      const wob = Math.sin(time * 2.2 + f.ph) * f.r * 0.2;
+      ctx.fillStyle = `rgba(246, 253, 255, ${(a * 0.55).toFixed(3)})`;
+      ctx.beginPath();
+      ctx.ellipse(f.x + wob, f.y, f.r * 1.5, f.r * 0.8, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    for (const s of spray) {
+      ctx.fillStyle = `rgba(252, 255, 255, ${(clamp(s.life, 0, 1) * 0.75).toFixed(3)})`;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // ---------------- backdrop ----------------
+  //  Sky, sea gradient, headland and beach. Static per resize except for the
+  //  time of day, which is one lerped palette.
+  let backdrop = null;
+  let pal = null;
+
+  function buildPalette() {
+    //  One "morning haze" palette, blended across the frame. Keeping the palette
+    //  in one place is what lets the foam colours be mixed from the water
+    //  colours at draw time rather than being hard-coded in two places.
+    return {
+      skyTop: 'rgba(96, 138, 178, 1)',
+      skyBot: 'rgba(196, 214, 226, 1)',
+      seaFar: 'rgba(46, 82, 110, 1)',
+      seaNear: 'rgba(20, 50, 74, 1)',
+      crestFar: 'rgba(140, 186, 202, 1)',
+      backMid: 'rgba(62, 114, 142, 1)',
+      trough: 'rgba(26, 62, 90, 1)',
+      faceTop: 'rgba(150, 214, 220, 0.90)',
+      faceMid: 'rgba(66, 146, 172, 0.94)',
+      faceFoot: 'rgba(24, 68, 96, 0.96)',
+      foamTop: 'rgba(238, 250, 252, 0.94)',
+      foamMid: 'rgba(214, 238, 244, 0.92)',
+      foamFoot: 'rgba(176, 214, 226, 0.86)',
+      sandWet: 'rgba(122, 110, 92, 1)',
+      sandDry: 'rgba(178, 160, 132, 1)',
+    };
+  }
+
+  function paintBackdrop() {
+    if (!backdrop || backdrop.width !== Math.floor(W * DPR)) {
+      backdrop = document.createElement('canvas');
+      backdrop.width = Math.max(1, Math.floor(W * DPR));
+      backdrop.height = Math.max(1, Math.floor(H * DPR));
+    }
+    backdrop.height = Math.max(1, Math.floor(H * DPR));
+    const g = backdrop.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    const hy = horizonY();
+    const sy = sandY();
+
+    // Sky: a hazy marine layer, brighter at the horizon.
+    const sky = g.createLinearGradient(0, 0, 0, hy);
+    sky.addColorStop(0, pal.skyTop);
+    sky.addColorStop(0.55, 'rgba(148, 182, 206, 1)');
+    sky.addColorStop(1, pal.skyBot);
+    g.fillStyle = sky;
+    g.fillRect(0, 0, W, hy);
+
+    // Low cloud band, as a marine layer sits.
+    g.save();
+    for (let i = 0; i < 7; i++) {
+      const cy = rand(hy * 0.30, hy * 0.94);
+      const cx = rand(-0.1, 1.1) * W;
+      const cw = rand(0.16, 0.42) * W;
+      const ch = rand(0.012, 0.035) * H;
+      const cg = g.createRadialGradient(cx, cy, 0, cx, cy, cw);
+      cg.addColorStop(0, `rgba(244, 250, 255, ${rand(0.20, 0.42).toFixed(3)})`);
+      cg.addColorStop(1, 'rgba(230, 240, 250, 0)');
+      g.fillStyle = cg;
+      g.beginPath();
+      g.ellipse(cx, cy, cw, ch, 0, 0, Math.PI * 2);
+      g.fill();
+    }
+    g.restore();
+
+    // Sea: dark at the horizon, grading to a warmer, greener near-water.
+    const sea = g.createLinearGradient(0, hy, 0, sy);
+    sea.addColorStop(0, pal.seaFar);
+    sea.addColorStop(0.4, 'rgba(34, 70, 96, 1)');
+    sea.addColorStop(1, pal.seaNear);
+    g.fillStyle = sea;
+    g.fillRect(0, hy, W, sy - hy);
+
+    // Headland on the left, painted twice for aerial perspective.
+    const drawHeadland = (x0, h, alpha) => {
+      g.save();
+      g.globalAlpha = alpha;
+      g.fillStyle = '#243a44';
+      g.beginPath();
+      g.moveTo(x0, hy + 1);
+      g.lineTo(x0 - W * 0.10, hy + 1);
+      g.quadraticCurveTo(x0 + W * 0.02, hy - h, x0 + W * 0.16, hy - h * 0.42);
+      g.quadraticCurveTo(x0 + W * 0.20, hy - h * 0.20, x0 + W * 0.30, hy + 1);
+      g.closePath();
+      g.fill();
+      g.restore();
+    };
+    drawHeadland(-W * 0.02, H * 0.055, 0.55);
+    drawHeadland(W * 0.06, H * 0.032, 0.35);
+
+    // Beach: wet sand at the waterline, dry sand above it.
+    const beach = g.createLinearGradient(0, sy, 0, H);
+    beach.addColorStop(0, pal.sandWet);
+    beach.addColorStop(0.28, 'rgba(150, 134, 110, 1)');
+    beach.addColorStop(1, pal.sandDry);
+    g.fillStyle = beach;
+    g.fillRect(0, sy, W, H - sy);
+
+    // The waterline itself: a bright wet edge where the last surge stopped.
+    g.fillStyle = 'rgba(236, 246, 250, 0.30)';
+    g.beginPath();
+    g.moveTo(0, sy);
+    for (let x = 0; x <= W; x += Math.max(10, W * 0.012)) {
+      g.lineTo(x, sy + Math.sin(x * 0.011) * H * 0.004 + Math.sin(x * 0.027) * H * 0.002);
+    }
+    g.lineTo(W, sy + H * 0.012);
+    g.lineTo(0, sy + H * 0.012);
+    g.closePath();
+    g.fill();
+
+    // Sand ripples, as fine horizontal curves.
+    g.strokeStyle = 'rgba(90, 78, 62, 0.14)';
+    g.lineWidth = 1;
+    for (let i = 1; i < 14; i++) {
+      const y = sy + (H - sy) * Math.pow(i / 14, 1.3);
+      g.beginPath();
+      for (let x = 0; x <= W; x += Math.max(22, W * 0.03)) {
+        const yy = y + Math.sin(x * 0.008 + i * 0.9) * H * 0.004;
+        if (x === 0) g.moveTo(x, yy); else g.lineTo(x, yy);
+      }
+      g.stroke();
+    }
+  }
+
+  // ---------------- loop ----------------
+  let nextSet = 0;
+  let setLeft = 0;
+  let last = performance.now();
+  let ready = false;
+  const start = performance.now();
+
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.max(1, Math.floor(window.innerWidth));
+    H = Math.max(1, Math.floor(window.innerHeight));
+    U = Math.min(W, H);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    pal = pal || buildPalette();
+    paintBackdrop();
+    waves.length = 0;
+    foam.length = 0;
+    spray.length = 0;
+    // Open mid-set so the first frame already has swell on the way in.
+    spawnWave(0);
+    spawnWave(0.5);
+    spawnWave(1.1);
+    spawnWave(1.9);
+    for (const w of waves) w.z += rand(0.1, 0.5);
+  }
+  window.addEventListener('resize', resize, { passive: true });
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = (now - start) / 1000;
+
+    // Sets arrive in groups, with a lull between them.
+    if (setLeft <= 0 && time >= nextSet) {
+      setLeft = (CONFIG.setSize[0] + Math.random() * (CONFIG.setSize[1] - CONFIG.setSize[0] + 1)) | 0;
+      nextSet = time + rand(CONFIG.setEvery[0], CONFIG.setEvery[1]);
+    }
+    if (setLeft > 0 && (waves.length === 0 || waves[waves.length - 1].z > 0.10)) {
+      spawnWave(0);
+      setLeft--;
+    }
+
+    const before = waves.map((w) => w.broke);
+    updateWaves(dt);
+    // Emit foam and spray on the frame a wave breaks.
+    for (let i = 0; i < waves.length; i++) {
+      if (!waves[i].broke) continue;
+      if (before[i] === undefined || !before[i]) {
+        const geo = waveGeom(waves[i]);
+        emitFoam(geo.y, geo.h);
+        emitSpray(geo.y, geo.h);
+      }
+    }
+    updateFoam(dt);
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.drawImage(backdrop, 0, 0, W, H);
+    drawWaves(time, pal);
+    drawFoamAndSpray(time);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  nextSet = 1.5;
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
