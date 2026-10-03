@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Culture</title>
+  <style>
+    html,body{ margin:0; height:100%; overflow:hidden; background:#0a0705; }
+    canvas{ display:block; width:100vw; height:100vh; }
+    .vignette{
+      pointer-events:none; position:fixed; inset:0;
+      background:
+        radial-gradient(100% 78% at 44% 34%, rgba(0,0,0,0) 38%, rgba(0,0,0,0.55) 82%, rgba(0,0,0,0.9) 100%);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+<script>
+(() => {
+  // A plate of agar under a lid, seen from above. Colonies are laid down a few
+  // cells at a time into their own layer, so the cost of a plate that has been
+  // growing for five minutes is the same as one that has just been poured.
+  const CFG = {
+    dprCap: 2,
+    seedColonies: 7,
+    maxColonies: 15,
+    cellRadius: 1.5,
+    dishSeconds: 105,      // how long one plate lasts before it is replaced
+    pourSeconds: 2.2,
+    droplets: 16,
+  };
+
+  const TAU = Math.PI * 2;
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, dishX = 0, dishY = 0, dishR = 0;
+
+  const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const rand = (a, b) => a + Math.random() * (b - a);
+
+  // The bacterial mass lives in its own canvas and is only ever added to.
+  let growth = null;
+  let gg = null;
+  let colonies = [];
+  let droplets = [];
+  let plateAge = 0;
+  let pouring = 0;         // 0 → steady, 1 → a fresh plate is arriving
+  let dishRim = null;
+  let agar = null;
+
+  // ------------------------------------------------------------------ setup
+
+  function makeColony(spread) {
+    // Keep new colonies clear of the ones already on the plate.
+    let x = 0, y = 0, ok = false;
+    for (let tries = 0; tries < 24 && !ok; tries++) {
+      const a = rand(0, TAU);
+      const d = Math.sqrt(Math.random()) * spread;
+      x = dishX + Math.cos(a) * d;
+      y = dishY + Math.sin(a) * d;
+      ok = colonies.every((c) => Math.hypot(c.x - x, c.y - y) > c.r + dishR * 0.09);
+    }
+    // Most colonies are cream, but a plate is never that tidy.
+    const roll = Math.random();
+    const hue = roll < 0.62 ? rand(30, 52)
+      : roll < 0.8 ? rand(14, 28)
+        : roll < 0.92 ? rand(340, 358)
+          : rand(78, 104);
+
+    return {
+      x, y,
+      r: 0,
+      rMax: dishR * rand(0.1, 0.25),
+      speed: dishR * rand(0.0055, 0.016),
+      hue,
+      sat: hue > 80 && hue < 110 ? rand(26, 44) : rand(24, 48),
+      shade: hue > 80 && hue < 110 ? rand(64, 78) : rand(76, 94),
+      cellR: CFG.cellRadius * rand(0.8, 1.5),
+      credit: 0,
+      sheen: Math.random() < 0.65,
+      age: 0,
+      satDone: false,
+      // Colonies meet their edge unevenly, never as clean circles.
+      l1: rand(0.05, 0.16), p1: rand(0, TAU), l2: rand(0.03, 0.1), p2: rand(0, TAU),
+    };
+  }
+
+  // How far out the colony reaches at a given angle.
+  function edgeAt(c, a) {
+    return c.r * (1 + c.l1 * Math.sin(a * 3 + c.p1) + c.l2 * Math.sin(a * 5 - c.p2 * 1.7));
+  }
+
+  function pourPlate() {
+    colonies = [];
+    growth = document.createElement('canvas');
+    growth.width = canvas.width;
+    growth.height = canvas.height;
+    gg = growth.getContext('2d');
+    gg.setTransform(DPR, 0, 0, DPR, 0, 0);
+    gg.globalCompositeOperation = 'lighter';
+    // Nothing grows past the agar, whatever the colony maths would like.
+    gg.save();
+    gg.beginPath();
+    gg.arc(dishX, dishY, dishR - 2, 0, TAU);
+    gg.clip();
+
+    for (let i = 0; i < CFG.seedColonies; i++) colonies.push(makeColony(dishR * 0.7));
+    plateAge = 0;
+    pouring = 1;
+
+    droplets = Array.from({ length: CFG.droplets }, () => {
+      const a = rand(0, TAU);
+      const d = Math.sqrt(Math.random()) * dishR * 0.86;
+      return { x: dishX + Math.cos(a) * d, y: dishY + Math.sin(a) * d, r: rand(2, 9), a0: rand(0, TAU) };
+    });
+  }
+
+  function resize() {
+    DPR = Math.min(CFG.dprCap, window.devicePixelRatio || 1);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = Math.max(1, Math.floor(W * DPR));
+    canvas.height = Math.max(1, Math.floor(H * DPR));
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    dishX = W * 0.5;
+    dishY = H * 0.5;
+    dishR = Math.min(W, H) * 0.46;
+
+    // Warm agar, lit from the upper left.
+    agar = ctx.createRadialGradient(
+      dishX - dishR * 0.3, dishY - dishR * 0.34, dishR * 0.05,
+      dishX, dishY, dishR);
+    agar.addColorStop(0, '#6b4a24');
+    agar.addColorStop(0.45, '#4a3018');
+    agar.addColorStop(0.82, '#2e1d0f');
+    agar.addColorStop(1, '#1a100a');
+
+    dishRim = ctx.createLinearGradient(dishX - dishR, dishY - dishR, dishX + dishR, dishY + dishR);
+    dishRim.addColorStop(0, 'rgba(255,238,205,0.55)');
+    dishRim.addColorStop(0.4, 'rgba(190,170,140,0.18)');
+    dishRim.addColorStop(1, 'rgba(255,240,215,0.32)');
+
+    pourPlate();
+  }
+  window.addEventListener('resize', resize, { passive: true });
+
+  const pointer = { x: 0, y: 0, tx: 0, ty: 0, on: false };
+  window.addEventListener('pointermove', (e) => {
+    pointer.tx = (e.clientX / W) * 2 - 1;
+    pointer.ty = (e.clientY / H) * 2 - 1;
+    pointer.on = true;
+  }, { passive: true });
+  window.addEventListener('pointerleave', () => { pointer.on = false; }, { passive: true });
+
+  // ----------------------------------------------------------------- growth
+
+  function grow(dt) {
+    for (const c of colonies) {
+      c.age += dt;
+      if (c.r < c.rMax) c.r = Math.min(c.rMax, c.r + c.speed * dt);
+
+      // Only as many cells as the new annulus needs. A flat rate floods the
+      // centre and leaves a white blob instead of a colony.
+      c.credit += (1.15 * c.r * c.speed) / (c.cellR * c.cellR) * dt;
+      let n = Math.min(90, Math.floor(c.credit));
+      if (n <= 0) continue;
+      c.credit -= n;
+
+      for (let i = 0; i < n; i++) {
+        const a = rand(0, TAU);
+        // Biased hard to the rim, so density stays even as the disc grows.
+        const d = edgeAt(c, a) * Math.pow(Math.random(), 0.18);
+        const x = c.x + Math.cos(a) * d;
+        const y = c.y + Math.sin(a) * d;
+        gg.fillStyle = `hsla(${c.hue}, ${c.sat}%, ${c.shade}%, 0.2)`;
+        gg.beginPath();
+        gg.arc(x, y, c.cellR, 0, TAU);
+        gg.fill();
+      }
+
+      // A mature colony throws off a satellite.
+      if (c.r >= c.rMax * 0.98 && !c.satDone && c.age > 9) {
+        c.satDone = true;
+        if (colonies.length < CFG.maxColonies) {
+          const a = rand(0, TAU);
+          const d = c.rMax + rand(dishR * 0.09, dishR * 0.2);
+          const nx = c.x + Math.cos(a) * d;
+          const ny = c.y + Math.sin(a) * d;
+          if (Math.hypot(nx - dishX, ny - dishY) < dishR * 0.78) {
+            const s = makeColony(0);
+            s.x = nx; s.y = ny;
+            s.rMax = c.rMax * rand(0.4, 0.7);
+            s.speed = c.speed * 0.8;
+            s.hue = c.hue + rand(-6, 6);
+            s.age = 4;
+            colonies.push(s);
+          }
+        }
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------- drawing
+
+  function drawTable(time) {
+    ctx.fillStyle = '#0a0705';
+    ctx.fillRect(0, 0, W, H);
+    // Bench top: a pool of light under the plate.
+    const g = ctx.createRadialGradient(dishX, dishY, dishR * 0.7, dishX, dishY, dishR * 2.1);
+    g.addColorStop(0, 'rgba(92,66,38,0.4)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function drawDish(time) {
+    // Soft shadow under the glass.
+    const sx = dishX + dishR * 0.035;
+    const sy = dishY + dishR * 0.055;
+    const sh = ctx.createRadialGradient(sx, sy, dishR * 0.94, sx, sy, dishR * 1.3);
+    sh.addColorStop(0, 'rgba(0,0,0,0.6)');
+    sh.addColorStop(0.45, 'rgba(0,0,0,0.3)');
+    sh.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = sh;
+    ctx.beginPath();
+    ctx.arc(sx, sy, dishR * 1.3, 0, TAU);
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(dishX, dishY, dishR, 0, TAU);
+    ctx.fillStyle = agar;
+    ctx.fill();
+  }
+
+  function drawClearing() {
+    // Colonies clear the agar around themselves as they digest it.
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(dishX, dishY, dishR, 0, TAU);
+    ctx.clip();
+    for (const c of colonies) {
+      if (c.r < 2) continue;
+      const g = ctx.createRadialGradient(c.x, c.y, c.r * 0.4, c.x, c.y, c.r * 1.55);
+      g.addColorStop(0, `hsla(${c.hue + 6}, 34%, 62%, 0.11)`);
+      g.addColorStop(0.6, `hsla(${c.hue + 6}, 34%, 56%, 0.05)`);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, c.r * 1.55, 0, TAU);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawSheen(time) {
+    // Thin-film colour on the older colonies.
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const c of colonies) {
+      if (!c.sheen || c.r < 8) continue;
+      const wobble = Math.sin(time * 0.25 + c.x * 0.01) * 40;
+      const g = ctx.createRadialGradient(c.x, c.y, c.r * 0.1, c.x, c.y, c.r * 1.15);
+      g.addColorStop(0, `hsla(${c.hue + 165 + wobble}, 85%, 62%, 0)`);
+      g.addColorStop(0.35, `hsla(${c.hue + 200 + wobble}, 90%, 64%, 0.13)`);
+      g.addColorStop(0.62, `hsla(${c.hue + 45 + wobble}, 90%, 68%, 0.12)`);
+      g.addColorStop(0.85, `hsla(${c.hue + 310 + wobble}, 90%, 64%, 0.1)`);
+      g.addColorStop(1, `hsla(${c.hue + 300 + wobble}, 70%, 60%, 0)`);
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, c.r * 1.1, 0, TAU);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawGrowth() {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.drawImage(growth, 0, 0, W, H);
+    ctx.restore();
+  }
+
+  function drawLid(time) {
+    // Condensation on the underside of the lid.
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(dishX, dishY, dishR * 0.99, 0, TAU);
+    ctx.clip();
+    for (const d of droplets) {
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, d.r, 0, TAU);
+      ctx.fillStyle = 'rgba(255,246,225,0.035)';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, d.r, 0, TAU);
+      ctx.strokeStyle = 'rgba(255,250,235,0.16)';
+      ctx.lineWidth = 0.9;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(d.x - d.r * 0.3, d.y - d.r * 0.32, d.r * 0.5, Math.PI * 0.85, Math.PI * 1.7);
+      ctx.strokeStyle = `rgba(255,252,242,${0.3 + 0.14 * Math.sin(time * 1.1 + d.a0)})`;
+      ctx.lineWidth = 1.1;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawRim(time) {
+    // Glass wall, then a specular sweep across the top-left.
+    ctx.beginPath();
+    ctx.arc(dishX, dishY, dishR, 0, TAU);
+    ctx.strokeStyle = dishRim;
+    ctx.lineWidth = 3 * DPR;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(dishX, dishY, dishR - 1.5 * DPR, 0, TAU);
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+    ctx.lineWidth = 1.4 * DPR;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(dishX, dishY, dishR - 4 * DPR, Math.PI * 0.72, Math.PI * 1.36);
+    ctx.strokeStyle = `rgba(255,248,230,${0.3 + 0.06 * Math.sin(time * 0.5)})`;
+    ctx.lineWidth = 5 * DPR;
+    ctx.stroke();
+  }
+
+  // ------------------------------------------------------------------- loop
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    pointer.x = lerp(pointer.x, pointer.on ? pointer.tx : 0, 0.04);
+    pointer.y = lerp(pointer.y, pointer.on ? pointer.ty : 0, 0.04);
+
+    plateAge += dt;
+    if (pouring > 0) pouring = Math.max(0, pouring - dt / CFG.pourSeconds);
+    if (plateAge > CFG.dishSeconds) pourPlate();
+    grow(dt);
+
+    ctx.save();
+    ctx.translate(pointer.x * 5, pointer.y * 5);
+
+    drawTable(time);
+    drawDish(time);
+    drawClearing();
+    drawGrowth();
+    drawSheen(time);
+    drawLid(time);
+    drawRim(time);
+
+    // A fresh plate fades up out of the dark.
+    if (pouring > 0) {
+      ctx.fillStyle = `rgba(6,4,3,${pouring})`;
+      ctx.fillRect(-W, -H, W * 3, H * 3);
+    }
+    ctx.restore();
+
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
