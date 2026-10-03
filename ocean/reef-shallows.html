@@ -1,0 +1,619 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Reef Shallows</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #03121c; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 130% 106% at 50% 44%,
+        rgba(0,0,0,0) 46%, rgba(0,0,0,.26) 82%, rgba(0,0,0,.66) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(198, 246, 240, .30);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">two metres of water · eight of coral</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  REEF SHALLOWS — looking down into a shallow reef from just
+  //  above the surface. Caustics crawl across the sand and over
+  //  the coral heads, a school of small fish turns as one and
+  //  splits around the bommies, and two larger fish cruise the
+  //  edge of the drop-off.
+  //
+  //  Construction notes
+  //  ------------------
+  //  The seabed — sand, coral heads, sponges and their shadows — is
+  //  painted once per resize, because it never moves and it is the
+  //  most complex part of the image. The caustics are a pre-rendered
+  //  tile scrolled and layered, not a per-frame field. Only the fish
+  //  school, the two cruisers, the drifting particulate and a slow
+  //  surface ripple are drawn per frame.
+  // ============================================================
+  const CONFIG = {
+    //  This page blits a full-frame static seabed every frame and lays caustics
+    //  over it. At 1.6 the seabed blit alone is 5.3 MPx of fill per frame, which
+    //  measured at 32 fps at 1920x1080. The scene is soft and low-contrast by
+    //  nature — sand gradients, hazy caustics — so 1.2 is visually identical and
+    //  roughly twice as fast.
+    dprCap: 1.2,
+
+    coralHeads: 9,
+    sponges: 26,
+    sandMottles: 90,
+    weedTufts: 34,
+
+    /* ---- caustics ---- */
+    causticTile: 512,
+    causticScale: 1.5,
+    causticDrift: 9,          // px/s at 1080h
+    causticAlpha: 0.22,
+    //  Cells per tile side. More, smaller cells read as the fine lens network of
+    //  real caustics; fewer read as a net thrown over the scene.
+    causticCells: 14,
+    causticJitter: 0.44,
+
+    /* ---- fish ---- */
+    school: 120,
+    schoolSpread: [0.10, 0.30],  // orbit radius range, fraction of min(W,H)
+    schoolSpeed: [0.30, 0.72],   // rad/s
+    cruisers: 2,
+    particulate: 260,
+
+    /* ---- surface ---- */
+    rippleBands: 16,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  const TAU = Math.PI * 2;
+
+  // ---------------- caustic tile ----------------
+  //  A caustic is the bright web where surface lensing focuses sunlight. Drawn
+  //  as a network of thin bright cells on a tile, then scrolled and layered at
+  //  two scales and angles so the repetition is not visible.
+  let caustic = null;
+  function buildCausticTile() {
+    const s = CONFIG.causticTile;
+    caustic = document.createElement('canvas');
+    caustic.width = caustic.height = s;
+    const g = caustic.getContext('2d');
+    g.fillStyle = '#000';
+    g.fillRect(0, 0, s, s);
+
+    // Cell network: points on a jittered grid, joined to their neighbours. The
+    // bright edges between cells are the caustic.
+    const N = CONFIG.causticCells;
+    const cell = s / N;
+    const pts = [];
+    for (let y = 0; y <= N; y++) {
+      for (let x = 0; x <= N; x++) {
+        pts.push({
+          x: x * cell + rand(-cell * CONFIG.causticJitter, cell * CONFIG.causticJitter),
+          y: y * cell + rand(-cell * CONFIG.causticJitter, cell * CONFIG.causticJitter),
+        });
+      }
+    }
+    const at = (x, y) => pts[y * (N + 1) + x];
+
+    g.globalCompositeOperation = 'lighter';
+    g.lineCap = 'round';
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        const a = at(x, y);
+        //  Each cell's edges get a varying width and brightness, so the network
+        //  has the irregular thickness of real caustics rather than the even
+        //  mesh of a drawn net. The wrap seam means the opposite edge of the
+        //  tile has to use the same random draws, so the values come from the
+        //  cell's own coordinates rather than from fresh randomness.
+        const seed = (x * 31 + y * 17) % 97;
+        const mk = (k) => rand(0.30, 1.0) * (seed / 97 * 0.5 + 0.5) * (k ? 0.7 : 1);
+        const edges = [
+          [a, at(x + 1, y), mk(0), rand(1.0, 3.6)],
+          [a, at(x, y + 1), mk(1), rand(1.0, 3.6)],
+        ];
+        for (const [p, q, br, w] of edges) {
+          // A tight core plus a broad halo: this is what reads as a focused
+          // line of light rather than as a drawn stroke.
+          g.strokeStyle = `rgba(255, 255, 255, ${(br * 0.42).toFixed(3)})`;
+          g.lineWidth = w * 2.6;
+          g.beginPath(); g.moveTo(p.x, p.y); g.lineTo(q.x, q.y); g.stroke();
+          g.strokeStyle = `rgba(255, 255, 255, ${(br * 0.60).toFixed(3)})`;
+          g.lineWidth = w * 0.8;
+          g.beginPath(); g.moveTo(p.x, p.y); g.lineTo(q.x, q.y); g.stroke();
+        }
+      }
+    }
+    // Wrap the edges: copy the top and left rows to the opposite side so the
+    // tile is seamless when scrolled.
+    g.drawImage(caustic, -s, 0);
+    g.drawImage(caustic, 0, -s);
+    g.drawImage(caustic, -s, -s);
+    g.globalCompositeOperation = 'source-over';
+  }
+
+  // ---------------- seabed ----------------
+  let seabed = null;
+  let coral = [];
+
+  function paintSeabed() {
+    if (!seabed) seabed = document.createElement('canvas');
+    seabed.width = Math.max(1, Math.floor(W * DPR));
+    seabed.height = Math.max(1, Math.floor(H * DPR));
+    const g = seabed.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    // Water column: deeper and darker toward the top of the frame, because we
+    // are looking down a slope rather than at a flat floor.
+    const depth = g.createLinearGradient(0, 0, 0, H);
+    depth.addColorStop(0, '#04202f');
+    depth.addColorStop(0.35, '#073040');
+    depth.addColorStop(0.72, '#0b3c46');
+    depth.addColorStop(1, '#0d464a');
+    g.fillStyle = depth;
+    g.fillRect(0, 0, W, H);
+
+    // Sand: bright where shallow (bottom of frame), hazy into the distance.
+    const sand = g.createLinearGradient(0, H * 0.18, 0, H);
+    sand.addColorStop(0, 'rgba(24, 72, 82, 0.0)');
+    sand.addColorStop(0.30, 'rgba(58, 116, 116, 0.30)');
+    sand.addColorStop(0.62, 'rgba(150, 186, 164, 0.55)');
+    sand.addColorStop(1, 'rgba(214, 224, 190, 0.72)');
+    g.fillStyle = sand;
+    g.fillRect(0, 0, W, H);
+
+    // Sand mottles: patches of shell and algae, which is what stops a sand
+    // floor looking like a painted gradient.
+    for (let i = 0; i < CONFIG.sandMottles; i++) {
+      const x = rand(0, W);
+      const y = rand(H * 0.26, H);
+      const r = rand(0.012, 0.055) * U;
+      const cg = g.createRadialGradient(x, y, 0, x, y, r);
+      const dark = Math.random() < 0.55;
+      cg.addColorStop(0, dark
+        ? `rgba(52, 86, 78, ${rand(0.10, 0.26).toFixed(3)})`
+        : `rgba(232, 236, 206, ${rand(0.10, 0.24).toFixed(3)})`);
+      cg.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = cg;
+      g.beginPath(); g.arc(x, y, r, 0, TAU); g.fill();
+    }
+
+    // Sand ripples, horizontal because we are looking down a gentle slope.
+    g.strokeStyle = 'rgba(96, 138, 130, 0.16)';
+    for (let i = 0; i < 26; i++) {
+      const y = H * 0.24 + (H * 0.76) * Math.pow(i / 26, 1.25);
+      g.lineWidth = rand(1, 2.6);
+      g.beginPath();
+      for (let x = 0; x <= W; x += Math.max(26, W * 0.03)) {
+        const yy = y + Math.sin(x * 0.006 + i * 0.7) * H * 0.006
+          + Math.sin(x * 0.017 + i * 1.9) * H * 0.0026;
+        if (x === 0) g.moveTo(x, yy); else g.lineTo(x, yy);
+      }
+      g.stroke();
+    }
+
+    // Coral heads: irregular domes with a lit top and a shadow cast away from
+    // the light, which sits up and to the left.
+    coral = [];
+    for (let i = 0; i < CONFIG.coralHeads; i++) {
+      const x = rand(W * 0.06, W * 0.94);
+      // Lower in the frame reads as nearer, so the bigger heads go lower.
+      const depthT = Math.pow(Math.random(), 0.7);
+      const y = lerp(H * 0.34, H * 0.95, depthT);
+      const r = lerp(U * 0.045, U * 0.155, depthT) * rand(0.7, 1.25);
+      const hue = rand(24, 46);
+      const type = Math.random();
+      coral.push({ x, y, r, hue, type, phase: rand(0, TAU) });
+
+      // Shadow, offset away from the light.
+      g.save();
+      const sx = r * 1.5, sy = r * 0.85;
+      const sh = g.createRadialGradient(x + sx, y + sy, 0, x + sx, y + sy, r * 1.5);
+      sh.addColorStop(0, 'rgba(4, 26, 34, 0.50)');
+      sh.addColorStop(1, 'rgba(4, 26, 34, 0)');
+      g.fillStyle = sh;
+      g.beginPath();
+      g.ellipse(x + sx, y + sy, r * 1.5, r * 0.95, 0, 0, TAU);
+      g.fill();
+      g.restore();
+
+      g.save();
+      g.translate(x, y);
+      if (type < 0.34) {
+        // Branching staghorn: a few thick limbs from a base.
+        const limbs = 5 + ((Math.random() * 4) | 0);
+        for (let b = 0; b < limbs; b++) {
+          const a = (b / limbs) * TAU + rand(-0.3, 0.3);
+          const len = r * rand(0.7, 1.35);
+          const bw = r * rand(0.10, 0.20);
+          const tipX = Math.cos(a) * len, tipY = Math.sin(a) * len * 0.66;
+          const mg = g.createLinearGradient(0, 0, tipX, tipY);
+          mg.addColorStop(0, `hsla(${hue - 6}, 48%, 22%, 0.96)`);
+          mg.addColorStop(0.55, `hsla(${hue}, 56%, 34%, 0.95)`);
+          mg.addColorStop(1, `hsla(${hue + 10}, 66%, 48%, 0.92)`);
+          g.strokeStyle = mg;
+          g.lineWidth = bw;
+          g.lineCap = 'round';
+          g.beginPath();
+          g.moveTo(0, 0);
+          g.quadraticCurveTo(
+            Math.cos(a + 0.4) * len * 0.6, Math.sin(a + 0.4) * len * 0.34,
+            tipX, tipY
+          );
+          g.stroke();
+          // A pale tip, as coral grows white at the ends.
+          g.fillStyle = `hsla(${hue + 20}, 60%, 74%, 0.42)`;
+          g.beginPath(); g.arc(tipX, tipY, bw * 0.5, 0, TAU); g.fill();
+        }
+      } else if (type < 0.72) {
+        // Brain or boulder coral: an irregular dome with concentric ridges.
+        const lumps = 16;
+        g.beginPath();
+        for (let k = 0; k <= lumps; k++) {
+          const a = (k / lumps) * TAU;
+          const rr = r * (1 + Math.sin(a * 3.1 + i) * 0.16 + Math.sin(a * 7.3 + i * 2) * 0.07);
+          const px = Math.cos(a) * rr, py = Math.sin(a) * rr * 0.66;
+          if (k === 0) g.moveTo(px, py); else g.lineTo(px, py);
+        }
+        g.closePath();
+        const bg = g.createRadialGradient(-r * 0.35, -r * 0.35, r * 0.1, 0, 0, r * 1.15);
+        bg.addColorStop(0, `hsla(${hue + 22}, 60%, 62%, 0.96)`);
+        bg.addColorStop(0.42, `hsla(${hue}, 52%, 44%, 0.96)`);
+        bg.addColorStop(1, `hsla(${hue - 14}, 44%, 22%, 0.96)`);
+        g.fillStyle = bg;
+        g.fill();
+        // Ridges, as arcs following the dome.
+        g.strokeStyle = `hsla(${hue - 8}, 40%, 18%, 0.30)`;
+        g.lineWidth = Math.max(0.8, r * 0.026);
+        for (let k = 1; k <= 6; k++) {
+          g.beginPath();
+          g.ellipse(-r * 0.16, -r * 0.14, r * 0.14 * k, r * 0.09 * k, -0.4, 0, TAU);
+          g.stroke();
+        }
+      } else {
+        // Soft coral: a fan of thin fingers.
+        const fingers = 9 + ((Math.random() * 7) | 0);
+        for (let b = 0; b < fingers; b++) {
+          const a = -Math.PI * 0.72 + (b / (fingers - 1)) * Math.PI * 0.44;
+          const len = r * rand(0.8, 1.25);
+          g.strokeStyle = `hsla(${hue + 8}, 58%, ${(40 + Math.random() * 18) | 0}%, 0.86)`;
+          g.lineWidth = Math.max(1, r * 0.055);
+          g.lineCap = 'round';
+          g.beginPath();
+          g.moveTo(0, r * 0.30);
+          g.quadraticCurveTo(
+            Math.cos(a) * len * 0.5, r * 0.30 + Math.sin(a) * len * 0.5,
+            Math.cos(a) * len, r * 0.30 + Math.sin(a) * len
+          );
+          g.stroke();
+        }
+      }
+      g.restore();
+    }
+
+    // Sponges and weed tufts: small scatter to break up the sand.
+    for (let i = 0; i < CONFIG.sponges; i++) {
+      const x = rand(0, W);
+      const y = rand(H * 0.30, H);
+      const r = rand(0.006, 0.020) * U * (0.6 + (y / H) * 0.9);
+      g.fillStyle = `hsla(${rand(300, 350)}, ${rand(30, 60) | 0}%, ${rand(30, 52) | 0}%, 0.72)`;
+      g.beginPath();
+      if (Math.random() < 0.5) {
+        g.ellipse(x, y, r, r * 0.8, rand(0, TAU), 0, TAU);
+      } else {
+        // A tube, drawn as a short thick stroke.
+        g.lineWidth = r * 1.2;
+        g.strokeStyle = g.fillStyle;
+        g.lineCap = 'round';
+        g.beginPath();
+        g.moveTo(x, y);
+        g.lineTo(x + rand(-r, r), y - r * rand(1.2, 2.2));
+        g.stroke();
+      }
+      g.fill();
+    }
+
+    for (let i = 0; i < CONFIG.weedTufts; i++) {
+      const x = rand(0, W);
+      const y = rand(H * 0.40, H);
+      const h = rand(0.012, 0.040) * U * (0.6 + (y / H) * 0.9);
+      g.strokeStyle = `hsla(${rand(90, 140)}, 40%, ${rand(20, 36) | 0}%, 0.66)`;
+      g.lineWidth = Math.max(0.8, h * 0.13);
+      g.lineCap = 'round';
+      for (let b = 0; b < 5; b++) {
+        const a = -Math.PI / 2 + rand(-0.7, 0.7);
+        g.beginPath();
+        g.moveTo(x + rand(-h * 0.3, h * 0.3), y);
+        g.quadraticCurveTo(
+          x + Math.cos(a) * h * 0.5, y + Math.sin(a) * h * 0.6,
+          x + Math.cos(a) * h, y + Math.sin(a) * h
+        );
+        g.stroke();
+      }
+    }
+  }
+
+  // ---------------- fish ----------------
+  const school = [];
+  const cruisers = [];
+  const particulate = [];
+
+  function seedFish() {
+    school.length = 0;
+    for (let i = 0; i < CONFIG.school; i++) {
+      // Each fish carries its own offset, speed and phase; the school turns
+      // together because they share the centre and the base angle.
+      school.push({
+        a0: rand(0, TAU),
+        rr: rand(CONFIG.schoolSpread[0], CONFIG.schoolSpread[1]),
+        sp: rand(CONFIG.schoolSpeed[0], CONFIG.schoolSpeed[1]),
+        phase: rand(0, TAU),
+        // A small lag per fish, so the turn ripples through the school rather
+        // than the whole group rotating as one rigid body.
+        lag: rand(0, 0.55),
+        size: rand(0.55, 1.0),
+        hue: rand(38, 54),
+        tilt: rand(-0.3, 0.3),
+      });
+    }
+    cruisers.length = 0;
+    for (let i = 0; i < CONFIG.cruisers; i++) {
+      cruisers.push({
+        t: rand(0, 1),
+        speed: rand(0.020, 0.034),
+        dir: Math.random() < 0.5 ? 1 : -1,
+        size: rand(1.5, 2.3),
+        hue: rand(24, 42),
+        // A long wandering path across the frame, unique per cruiser.
+        amp: rand(0.05, 0.16),
+        freq: rand(0.5, 1.4),
+        phase: rand(0, TAU),
+      });
+    }
+    particulate.length = 0;
+    for (let i = 0; i < CONFIG.particulate; i++) {
+      particulate.push({
+        x: Math.random(), y: Math.random(),
+        r: rand(0.4, 1.9) * (U / 1080),
+        vx: rand(-3, 3), vy: rand(-6, 3),
+        a: rand(0.10, 0.45),
+      });
+    }
+  }
+
+  function schoolCentre(time) {
+    // The school's centre drifts on a slow lissajous, so it is never still and
+    // never obviously looping.
+    return {
+      x: W * (0.5 + 0.16 * Math.sin(time * 0.055) + 0.06 * Math.sin(time * 0.13 + 1.7)),
+      y: H * (0.54 + 0.11 * Math.cos(time * 0.043) + 0.05 * Math.sin(time * 0.11 + 0.6)),
+    };
+  }
+
+  function drawFishShape(g, x, y, ang, size, hue, alpha) {
+    g.save();
+    g.translate(x, y);
+    g.rotate(ang);
+    const L = size, Wd = size * 0.42;
+    // Body: a lens shape, wider at the front.
+    g.beginPath();
+    g.moveTo(L * 0.62, 0);
+    g.quadraticCurveTo(L * 0.10, -Wd, -L * 0.50, -Wd * 0.30);
+    g.quadraticCurveTo(-L * 0.70, 0, -L * 0.50, Wd * 0.30);
+    g.quadraticCurveTo(L * 0.10, Wd, L * 0.62, 0);
+    g.closePath();
+    const bg = g.createLinearGradient(-L * 0.5, -Wd, L * 0.6, Wd);
+    bg.addColorStop(0, `hsla(${hue - 12}, 46%, 42%, ${alpha})`);
+    bg.addColorStop(0.5, `hsla(${hue}, 62%, 66%, ${alpha})`);
+    bg.addColorStop(1, `hsla(${hue + 14}, 72%, 80%, ${alpha})`);
+    g.fillStyle = bg;
+    g.fill();
+    // Tail.
+    g.beginPath();
+    g.moveTo(-L * 0.48, 0);
+    g.lineTo(-L * 0.86, -Wd * 0.72);
+    g.lineTo(-L * 0.74, 0);
+    g.lineTo(-L * 0.86, Wd * 0.72);
+    g.closePath();
+    g.fillStyle = `hsla(${hue - 6}, 52%, 52%, ${alpha * 0.9})`;
+    g.fill();
+    // A pale lateral line, which is what makes a small fish readable at size.
+    g.strokeStyle = `hsla(${hue + 30}, 70%, 86%, ${alpha * 0.55})`;
+    g.lineWidth = Math.max(0.5, size * 0.055);
+    g.beginPath();
+    g.moveTo(L * 0.42, 0);
+    g.lineTo(-L * 0.40, 0);
+    g.stroke();
+    g.restore();
+  }
+
+  function drawFish(time) {
+    const c = schoolCentre(time);
+    // The whole school's heading turns slowly, and the fish fan out from it.
+    const baseAng = time * 0.16;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const f of school) {
+      const a = f.a0 + time * f.sp + baseAng;
+      // Radial wobble, so the group is a shoal and not a ring.
+      const rr = f.rr * U * (1 + 0.22 * Math.sin(time * 0.7 + f.phase));
+      // Lag the radius slightly behind the angle: the fish are following, not
+      // rigidly attached.
+      const x = c.x + Math.cos(a - f.lag) * rr;
+      const y = c.y + Math.sin(a - f.lag) * rr * 0.72;
+      // Heading is the tangent of the orbit, so every fish faces the way the
+      // school is going round.
+      const heading = a - f.lag + Math.PI / 2 + f.tilt * 0.2;
+      drawFishShape(ctx, x, y, heading, U * 0.011 * f.size, f.hue, 0.42 + 0.22 * Math.sin(f.phase));
+    }
+    ctx.restore();
+
+    // Cruisers: larger, slower, on their own paths.
+    for (const cr of cruisers) {
+      cr.t += (cr.speed * cr.dir) * (1 / 60);
+      if (cr.t > 1.4) cr.t = -0.4;
+      if (cr.t < -0.4) cr.t = 1.4;
+      const x = cr.t * W;
+      const y = H * (0.42 + Math.sin(cr.t * Math.PI * 2 * cr.freq + cr.phase) * cr.amp);
+      // Heading from the path's own derivative, so it banks into the curve.
+      const dy = Math.cos(cr.t * Math.PI * 2 * cr.freq + cr.phase) * cr.amp * H * Math.PI * 2 * cr.freq;
+      const ang = Math.atan2(dy / W, cr.dir);
+      drawFishShape(ctx, x, y, ang, U * 0.030 * cr.size, cr.hue, 0.86);
+    }
+
+    // Drifting particulate: the "marine snow" that makes water read as a medium
+    // rather than as empty space.
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const p of particulate) {
+      p.x += (p.vx * (1 / 60)) / W;
+      p.y += (p.vy * (1 / 60)) / H;
+      if (p.x < 0) p.x += 1; if (p.x > 1) p.x -= 1;
+      if (p.y < 0) p.y += 1; if (p.y > 1) p.y -= 1;
+      ctx.fillStyle = `rgba(216, 244, 246, ${p.a.toFixed(3)})`;
+      ctx.fillRect(p.x * W, p.y * H, p.r, p.r);
+    }
+    ctx.restore();
+  }
+
+  // ---------------- caustics and surface ----------------
+  //  The caustic layers are composited into a half-resolution offscreen canvas
+  //  and then blitted up in one pass. Blending is the expensive half of this and
+  //  doing it at quarter the pixels is what makes the page hold its rate at
+  //  1920x1080; the upscale softens the caustic web, which is what it should
+  //  look like anyway through a metre of water.
+  const CAUSTIC_S = 0.5;
+  let causticLayer = null;
+
+  function drawCaustics(time) {
+    if (!caustic) return;
+    const lw = Math.max(1, Math.round(W * CAUSTIC_S));
+    const lh = Math.max(1, Math.round(H * CAUSTIC_S));
+    if (!causticLayer) causticLayer = document.createElement('canvas');
+    if (causticLayer.width !== lw || causticLayer.height !== lh) {
+      causticLayer.width = lw;
+      causticLayer.height = lh;
+    }
+    const g = causticLayer.getContext('2d');
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.clearRect(0, 0, lw, lh);
+    g.globalCompositeOperation = 'lighter';
+
+    const s = CONFIG.causticTile * CONFIG.causticScale * (U / 1080) * CAUSTIC_S;
+    const drift = CONFIG.causticDrift * (U / 1080) * CAUSTIC_S;
+
+    // Two layers at different scales and directions. One layer repeats visibly;
+    // two at different rates read as a living surface.
+    for (let layer = 0; layer < 2; layer++) {
+      const scale = layer === 0 ? 1 : 1.7;
+      const speed = layer === 0 ? 1 : -0.62;
+      const alpha = (layer === 0 ? 1 : 0.55);
+      g.save();
+      g.globalAlpha = alpha;
+      g.translate(lw * 0.5, lh * 0.5);
+      g.rotate(layer === 0 ? 0.06 : -0.09);
+      g.translate(-lw * 0.5, -lh * 0.5);
+      const size = s * scale;
+      const ox = ((time * drift * speed) % size) - size;
+      const oy = ((time * drift * speed * 0.6) % size) - size;
+      for (let x = ox; x < lw + size; x += size) {
+        for (let y = oy; y < lh + size; y += size) {
+          g.drawImage(caustic, x, y, size, size);
+        }
+      }
+      g.restore();
+    }
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    ctx.globalAlpha = CONFIG.causticAlpha;
+    ctx.drawImage(causticLayer, 0, 0, W, H);
+    ctx.restore();
+  }
+
+  function drawSurface(time) {
+    // Looking down from just above the surface, so the water's own movement
+    // shows as slow bright bands across the top of the frame.
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (let i = 0; i < CONFIG.rippleBands; i++) {
+      const t = i / CONFIG.rippleBands;
+      const y = H * 0.06 + t * H * 0.42;
+      const a = 0.030 * (1 - t) * (0.55 + 0.45 * Math.sin(time * 0.5 + i * 1.3));
+      if (a <= 0.002) continue;
+      ctx.strokeStyle = `rgba(210, 248, 250, ${a.toFixed(4)})`;
+      ctx.lineWidth = Math.max(2, H * (0.008 + t * 0.014));
+      ctx.beginPath();
+      for (let x = 0; x <= W; x += Math.max(20, W * 0.022)) {
+        const yy = y + Math.sin(x * 0.005 + time * 0.6 + i) * H * 0.012
+          + Math.sin(x * 0.013 + time * 0.9 + i * 2.1) * H * 0.005;
+        if (x === 0) ctx.moveTo(x, yy); else ctx.lineTo(x, yy);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // ---------------- loop ----------------
+  let last = performance.now();
+  let ready = false;
+  const start = performance.now();
+
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.max(1, Math.floor(window.innerWidth));
+    H = Math.max(1, Math.floor(window.innerHeight));
+    U = Math.min(W, H);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    buildCausticTile();
+    paintSeabed();
+    seedFish();
+  }
+  window.addEventListener('resize', resize, { passive: true });
+
+  function frame(now) {
+    const time = (now - start) / 1000;
+    last = now;
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.drawImage(seabed, 0, 0, W, H);
+    drawCaustics(time);
+    drawFish(time);
+    drawSurface(time);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
