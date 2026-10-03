@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Deep Drift</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #01050a; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 122% 100% at 50% 42%,
+        rgba(0,0,0,0) 40%, rgba(0,0,0,.40) 78%, rgba(0,0,0,.88) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(180, 214, 240, .26);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">beyond the light · 1 400 metres</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  DEEP DRIFT — the descent past the last of the sunlight. The
+  //  frame starts in deep blue and darkens as it goes, the marine
+  //  snow thickens, and the only light is what the animals make:
+  //  a chain of siphonophores pulsing, comb jellies running their
+  //  rainbow cilia, a few anglerfish lamps, and the slow fall of
+  //  a whale carcass far below.
+  //
+  //  Construction notes
+  //  ------------------
+  //  There is no backdrop to cache: the water column is one
+  //  gradient that darkens with descent, and everything else is
+  //  additive light. The per-frame cost is the particles plus a
+  //  handful of creatures, so the budget goes on their number.
+  // ============================================================
+  const CONFIG = {
+    //  Additive points of light over near-black: a 1.4 store is
+    //  indistinguishable from 2 and much cheaper to fill.
+    dprCap: 1.4,
+
+    descentSeconds: 240,     // one full pass from the shallows to the abyss
+    marineSnow: 420,
+    siphonophores: 5,
+    combJellies: 6,
+    anglers: 3,
+    carcass: true,
+
+    snowSpeed: [6, 26],      // px/s at 1080h
+  };
+
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d", { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  const TAU = Math.PI * 2;
+
+  // ---------------- sprites ----------------
+  function glow(r, g, b, core) {
+    const s = 64;
+    const c = document.createElement("canvas");
+    c.width = c.height = s;
+    const x = c.getContext("2d");
+    const grad = x.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    grad.addColorStop(0, `rgba(255,255,255,${core ? 0.9 : 0.6})`);
+    grad.addColorStop(0.16, `rgba(${r},${g},${b},${core ? 0.75 : 0.45})`);
+    grad.addColorStop(0.5, `rgba(${r},${g},${b},0.14)`);
+    grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    x.fillStyle = grad;
+    x.fillRect(0, 0, s, s);
+    return c;
+  }
+
+  let sprBlue, sprCyan, sprGreen, sprRed, sprWarm;
+
+  function buildSprites() {
+    sprBlue = glow(120, 180, 255, true);
+    sprCyan = glow(140, 240, 255, true);
+    sprGreen = glow(150, 255, 210, true);
+    sprRed = glow(255, 110, 120, true);
+    sprWarm = glow(255, 214, 150, true);
+  }
+
+  function stamp(s, x, y, size, alpha) {
+    if (alpha <= 0.004 || size <= 0.3) return;
+    ctx.globalAlpha = Math.min(1, alpha);
+    ctx.drawImage(s, x - size / 2, y - size / 2, size, size);
+    ctx.globalAlpha = 1;
+  }
+
+  //  Style-string cache.
+  //
+  //  This page draws several hundred small dots a frame (marine snow, and eight
+  //  rows of cilia on each comb jelly). Building an `rgba(...)` template string
+  //  for every one of them allocates hundreds of strings per frame and makes the
+  //  browser parse each colour; measured at 41 fps at 1920x1080, that was the
+  //  page's whole remaining cost. Quantizing the value and caching the string
+  //  removes the allocation, and because consecutive dots usually land in the
+  //  same bucket the `fillStyle` setter is touched far less often too.
+  const styleCache = new Map();
+  function cachedStyle(kind, a, b, c, d) {
+    const key = kind + a + ":" + b + ":" + c + ":" + d;
+    let s = styleCache.get(key);
+    if (s === undefined) {
+      s = kind === "hsla"
+        ? `hsla(${a}, ${b}%, ${c}%, ${(d / 100).toFixed(2)})`
+        : `rgba(${a}, ${b}, ${c}, ${(d / 100).toFixed(2)})`;
+      styleCache.set(key, s);
+    }
+    return s;
+  }
+
+  // ---------------- creatures ----------------
+  const snow = [];
+  const siphons = [];
+  const combs = [];
+  const anglers = [];
+  let carcass = null;
+
+  function seedLife() {
+    snow.length = 0;
+    for (let i = 0; i < CONFIG.marineSnow; i++) {
+      snow.push({
+        x: Math.random(), y: Math.random(),
+        r: rand(0.5, 2.2) * (U / 1080),
+        v: rand(CONFIG.snowSpeed[0], CONFIG.snowSpeed[1]) * (U / 1080),
+        drift: rand(-0.4, 0.4),
+        a: rand(0.10, 0.42),
+        ph: rand(0, TAU),
+      });
+    }
+
+    siphons.length = 0;
+    for (let i = 0; i < CONFIG.siphonophores; i++) {
+      siphons.push({
+        x: Math.random(), y: Math.random(),
+        bells: 5 + ((Math.random() * 5) | 0),
+        len: rand(0.10, 0.24),
+        hue: rand(300, 340),
+        phase: rand(0, TAU),
+        speed: rand(0.010, 0.024),
+        // Sink slightly as they pulse, which is what a siphonophore does.
+        sink: rand(0.2, 0.7),
+      });
+    }
+
+    combs.length = 0;
+    for (let i = 0; i < CONFIG.combJellies; i++) {
+      combs.push({
+        x: Math.random(), y: Math.random(),
+        r: rand(0.016, 0.034) * U,
+        phase: rand(0, TAU),
+        speed: rand(0.008, 0.020),
+        drift: rand(-0.4, 0.4),
+        hue: rand(150, 220),
+      });
+    }
+
+    anglers.length = 0;
+    for (let i = 0; i < CONFIG.anglers; i++) {
+      anglers.push({
+        x: Math.random(), y: Math.random(),
+        size: rand(0.020, 0.040) * U,
+        phase: rand(0, TAU),
+        speed: rand(0.006, 0.018),
+        drift: rand(-0.5, 0.5),
+        // The lamp lures: it brightens and fades on its own clock.
+        lureHz: rand(0.18, 0.45),
+        dir: Math.random() < 0.5 ? 1 : -1,
+      });
+    }
+
+    carcass = CONFIG.carcass ? {
+      x: rand(0.22, 0.78),
+      y: 1.35,
+      fall: rand(0.0016, 0.0030),
+      sway: rand(0, TAU),
+      size: rand(0.10, 0.16) * U,
+    } : null;
+  }
+
+  // ---------------- drawing ----------------
+  // ---------------- water column -------------
+  //  The water is two fullscreen gradient fills (the column, plus the dying
+  //  sunlight), which at 1920x1080 is 4.1 MPx of blended fill every frame for a
+  //  background that changes only as the descent advances. It is pre-composited
+  //  into one opaque image and blitted, and rebuilt only when the descent has
+  //  moved enough to be visible. One opaque blit instead of two gradient fills
+  //  roughly halved this page's frame cost.
+  let waterLayer = null;
+  let waterDescent = -1;
+  const WATER_STEP = 0.004;
+
+  function paintWater(descent) {
+    const lw = Math.max(1, Math.floor(W * DPR));
+    const lh = Math.max(1, Math.floor(H * DPR));
+    if (!waterLayer) waterLayer = document.createElement('canvas');
+    if (waterLayer.width !== lw || waterLayer.height !== lh) {
+      waterLayer.width = lw;
+      waterLayer.height = lh;
+    }
+    const g = waterLayer.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    // The column darkens with depth. `descent` runs 0..1 over the whole pass.
+    const top = [
+      Math.round(lerp(10, 2, descent)),
+      Math.round(lerp(34, 5, descent)),
+      Math.round(lerp(62, 11, descent)),
+    ];
+    const bottom = [
+      Math.round(lerp(2, 0, descent)),
+      Math.round(lerp(9, 1, descent)),
+      Math.round(lerp(22, 3, descent)),
+    ];
+    const grad = g.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, `rgb(${top[0]}, ${top[1]}, ${top[2]})`);
+    grad.addColorStop(0.55, `rgb(${Math.round(top[0] * 0.45)}, ${Math.round(top[1] * 0.45)}, ${Math.round(top[2] * 0.5)})`);
+    grad.addColorStop(1, `rgb(${bottom[0]}, ${bottom[1]}, ${bottom[2]})`);
+    g.fillStyle = grad;
+    g.fillRect(0, 0, W, H);
+
+    // The last of the sunlight, dying away as it goes.
+    if (descent < 0.75) {
+      const a = Math.pow(1 - descent / 0.75, 1.6) * 0.5;
+      const sun = g.createRadialGradient(W * 0.5, -H * 0.10, 0, W * 0.5, -H * 0.10, H * 1.15);
+      sun.addColorStop(0, `rgba(150, 210, 255, ${a.toFixed(3)})`);
+      sun.addColorStop(0.45, `rgba(70, 130, 200, ${(a * 0.35).toFixed(3)})`);
+      sun.addColorStop(1, 'rgba(20, 50, 100, 0)');
+      g.fillStyle = sun;
+      g.fillRect(0, 0, W, H);
+    }
+    waterDescent = descent;
+  }
+
+  function drawWater(descent) {
+    if (!waterLayer || Math.abs(descent - waterDescent) >= WATER_STEP) paintWater(descent);
+    ctx.drawImage(waterLayer, 0, 0, W, H);
+  }
+
+  function drawSnow(dt, time, descent) {
+    //  Marine snow thickens with depth, because there is more of everything
+    //  falling past as the light goes.
+    const vis = Math.floor(snow.length * clamp(0.35 + descent * 0.9, 0, 1));
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    let lastSnowStyle = "";
+    for (let i = 0; i < vis; i++) {
+      const p = snow[i];
+      p.y += (p.v * dt) / H;
+      p.x += (p.drift * dt * 0.01) / W;
+      if (p.y > 1.02) { p.y = -0.02; p.x = Math.random(); }
+      if (p.x < -0.02) p.x += 1.04; if (p.x > 1.02) p.x -= 1.04;
+      const tw = 0.7 + 0.3 * Math.sin(time * 1.3 + p.ph);
+      // Snow near the top of the frame is further away and dimmer.
+      const depthFade = 0.35 + 0.65 * clamp(1 - p.y, 0, 1);
+      const a = p.a * tw * depthFade;
+      const bucket = Math.round(a * 40);            // 0.025 steps
+      const style = cachedStyle("rgba", 200, 226, 244, Math.max(0, bucket * 2.5));
+      if (style !== lastSnowStyle) { ctx.fillStyle = style; lastSnowStyle = style; }
+      ctx.fillRect(p.x * W, p.y * H, p.r, p.r);
+    }
+    ctx.restore();
+  }
+
+  function drawSiphons(dt, time) {
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    for (const s of siphons) {
+      s.y -= (s.speed * dt);
+      s.x += Math.sin(time * 0.2 + s.phase) * dt * 0.006;
+      if (s.y < -0.3) { s.y = 1.2; s.x = Math.random(); }
+      if (s.x < -0.1) s.x = 1.05; if (s.x > 1.1) s.x = -0.05;
+      const x = s.x * W, y = s.y * H;
+      // The chain: bells down the length, each pulsing in sequence so the wave
+      // of contraction travels from the top to the bottom.
+      const len = s.len * H;
+      for (let i = 0; i < s.bells; i++) {
+        const t = i / (s.bells - 1);
+        const pulse = 0.55 + 0.45 * Math.sin(time * 1.6 - t * 2.4 + s.phase);
+        const bx = x + Math.sin(time * 0.6 + t * 2.0 + s.phase) * len * 0.10;
+        const by = y + t * len;
+        const r = (U * 0.014) * (1 - t * 0.35) * (0.75 + pulse * 0.4);
+        stamp(sprBlue, bx, by, r * 5.5, (0.30 + pulse * 0.45) * 0.62);
+        // A pink core, as these colonies carry.
+        stamp(sprRed, bx, by, r * 2.4, (0.18 + pulse * 0.30) * 0.55);
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawCombs(dt, time) {
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    let lastCilStyle = "";
+    for (const c of combs) {
+      c.y -= (c.speed * dt);
+      c.x += Math.sin(time * 0.25 + c.phase) * dt * c.drift * 0.02;
+      if (c.y < -0.14) { c.y = 1.14; c.x = Math.random(); }
+      if (c.x < -0.1) c.x = 1.05; if (c.x > 1.1) c.x = -0.05;
+      const x = c.x * W, y = c.y * H;
+      const r = c.r;
+      // Body: a soft translucent oval.
+      const bg = ctx.createRadialGradient(x, y, 0, x, y, r);
+      bg.addColorStop(0, `hsla(${c.hue}, 70%, 76%, 0.42)`);
+      bg.addColorStop(0.6, `hsla(${c.hue}, 60%, 60%, 0.16)`);
+      bg.addColorStop(1, `hsla(${c.hue}, 60%, 50%, 0)`);
+      ctx.fillStyle = bg;
+      ctx.beginPath();
+      ctx.ellipse(x, y, r, r * 0.72, 0, 0, TAU);
+      ctx.fill();
+      // Cilia: eight rows, each a run of dots whose colour slides along the
+      // spectrum as it moves. This is the whole reason to draw a comb jelly.
+      const rows = 8;
+      for (let k = 0; k < rows; k++) {
+        const a0 = (k / rows) * TAU;
+        //  Hue and brightness are quantized here too: both slide continuously
+        //  with time, so without quantizing every one of these 56 dots a frame
+        //  would be a fresh colour string.
+        const hue = Math.round((c.hue + time * 55 + k * 26) % 360 / 15) * 15 % 360;
+        for (let m = 1; m <= 7; m++) {
+          const t = m / 7;
+          const px = x + Math.cos(a0) * r * 0.92 * t;
+          const py = y + Math.sin(a0) * r * 0.66 * t;
+          const bright = Math.round((Math.sin(t * Math.PI) * 0.5 + 0.2) * 20);
+          const style = cachedStyle("hsla", hue, 92, 74, bright * 5);
+          if (style !== lastCilStyle) { ctx.fillStyle = style; lastCilStyle = style; }
+          const sz = Math.max(1, r * 0.055);
+          ctx.fillRect(px - sz / 2, py - sz / 2, sz, sz);
+        }
+      }
+      stamp(sprCyan, x, y, r * 2.4, 0.14);
+    }
+    ctx.restore();
+  }
+
+  function drawAnglers(dt, time) {
+    for (const a of anglers) {
+      a.y -= (a.speed * dt);
+      a.x += Math.sin(time * 0.18 + a.phase) * dt * a.drift * 0.02;
+      if (a.y < -0.16) { a.y = 1.16; a.x = Math.random(); }
+      if (a.x < -0.12) a.x = 1.08; if (a.x > 1.12) a.x = -0.08;
+      const x = a.x * W, y = a.y * H;
+      const s = a.size;
+      // Body: an almost-black fish shape, so it reads as a silhouette with a
+      // lamp rather than as a lit animal.
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(a.dir, 1);
+      ctx.fillStyle = "rgba(4, 8, 14, 0.94)";
+      ctx.beginPath();
+      ctx.moveTo(s * 0.62, 0);
+      ctx.quadraticCurveTo(s * 0.12, -s * 0.48, -s * 0.46, -s * 0.20);
+      ctx.quadraticCurveTo(-s * 0.66, 0, -s * 0.46, s * 0.20);
+      ctx.quadraticCurveTo(s * 0.12, s * 0.48, s * 0.62, 0);
+      ctx.closePath();
+      ctx.fill();
+      // Jaw and teeth, as a suggestion of a line.
+      ctx.strokeStyle = "rgba(150, 180, 200, 0.35)";
+      ctx.lineWidth = Math.max(0.6, s * 0.030);
+      ctx.beginPath();
+      ctx.moveTo(s * 0.62, 0);
+      ctx.lineTo(s * 0.20, s * 0.10);
+      ctx.stroke();
+      // The lure on its stalk, out in front of the jaw.
+      const stalk = Math.sin(time * 0.9 + a.phase) * 0.16;
+      const lx = s * 0.86 + Math.cos(stalk) * s * 0.30;
+      const ly = -s * 0.30 + Math.sin(stalk) * s * 0.34;
+      ctx.strokeStyle = "rgba(10, 16, 22, 0.9)";
+      ctx.lineWidth = Math.max(0.8, s * 0.035);
+      ctx.beginPath();
+      ctx.moveTo(s * 0.52, -s * 0.18);
+      ctx.quadraticCurveTo(s * 0.70, -s * 0.34, lx, ly);
+      ctx.stroke();
+      ctx.restore();
+      // The lamp itself: a real point of light, which is all you see of one of
+      // these at depth.
+      const lure = 0.45 + 0.55 * (0.5 + 0.5 * Math.sin(time * a.lureHz * TAU + a.phase));
+      stamp(sprCyan, x + a.dir * (s * 0.86 + Math.cos(Math.sin(time * 0.9 + a.phase) * 0.16) * s * 0.30),
+        y + (-s * 0.30 + Math.sin(Math.sin(time * 0.9 + a.phase) * 0.16) * s * 0.34),
+        s * (1.6 + lure * 1.5), 0.35 + lure * 0.55);
+    }
+  }
+
+  function drawCarcass(dt, time) {
+    const c = carcass;
+    if (!c) return;
+    c.y -= c.fall * dt * 60;
+    if (c.y < -0.5) { c.y = 1.5; c.x = rand(0.2, 0.8); }
+    const x = c.x * W + Math.sin(time * 0.08 + c.sway) * W * 0.012;
+    const y = c.y * H;
+    if (y < -U * 0.3 || y > H + U * 0.3) return;
+    const s = c.size;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(Math.sin(time * 0.06 + c.sway) * 0.10);
+    // A ribcage and a skull, faintly lit by whatever is scavenging it. Drawn as
+    // silhouettes with a cold edge, because at this depth there is no light.
+    ctx.strokeStyle = "rgba(150, 178, 190, 0.30)";
+    ctx.lineWidth = Math.max(1, s * 0.030);
+    ctx.lineCap = "round";
+    // spine
+    ctx.beginPath();
+    ctx.moveTo(-s, 0);
+    ctx.quadraticCurveTo(0, -s * 0.10, s * 0.72, -s * 0.02);
+    ctx.stroke();
+    // ribs
+    for (let i = 0; i < 9; i++) {
+      const t = i / 8;
+      const rx = lerp(-s * 0.86, s * 0.52, t);
+      const span = Math.sin(t * Math.PI) * s * 0.42 + s * 0.06;
+      ctx.beginPath();
+      ctx.moveTo(rx, 0);
+      ctx.quadraticCurveTo(rx + span * 0.4, -span * 0.9, rx + span * 0.16, -span);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(rx, 0);
+      ctx.quadraticCurveTo(rx + span * 0.4, span * 0.9, rx + span * 0.16, span);
+      ctx.stroke();
+    }
+    // skull
+    ctx.beginPath();
+    ctx.moveTo(s * 0.68, -s * 0.04);
+    ctx.quadraticCurveTo(s * 1.06, -s * 0.16, s * 1.20, 0);
+    ctx.quadraticCurveTo(s * 1.06, s * 0.16, s * 0.68, s * 0.04);
+    ctx.closePath();
+    ctx.stroke();
+    // scavengers: a scatter of small bright points working along the bones
+    for (let i = 0; i < 14; i++) {
+      const t = (i / 14 + time * 0.02) % 1;
+      const bx = lerp(-s * 0.9, s * 1.15, t);
+      const by = Math.sin(t * 9 + time * 0.6 + i) * s * 0.34;
+      stamp(sprWarm, x + bx, y + by, s * 0.14, 0.35 + 0.3 * Math.sin(time * 1.7 + i));
+    }
+    ctx.restore();
+  }
+
+  // ---------------- loop ----------------
+  let last = performance.now();
+  let ready = false;
+  const start = performance.now();
+
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.max(1, Math.floor(window.innerWidth));
+    H = Math.max(1, Math.floor(window.innerHeight));
+    U = Math.min(W, H);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    buildSprites();
+    seedLife();
+  }
+  window.addEventListener("resize", resize, { passive: true });
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = (now - start) / 1000;
+    // One pass is a full descent, then it starts again from the shallows.
+    const descent = (time % CONFIG.descentSeconds) / CONFIG.descentSeconds;
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    drawWater(descent);
+    drawSnow(dt, time, descent);
+    drawCarcass(dt, time);
+    drawSiphons(dt, time);
+    drawCombs(dt, time);
+    drawAnglers(dt, time);
+
+    if (!ready) { ready = true; document.body.classList.add("ready"); }
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
