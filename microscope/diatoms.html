@@ -1,0 +1,591 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Diatoms</title>
+  <style>
+    html,body{ margin:0; height:100%; overflow:hidden; background:#01060a; }
+    canvas{ display:block; width:100vw; height:100vh; }
+    .vignette{
+      pointer-events:none; position:fixed; inset:0;
+      background:
+        radial-gradient(105% 78% at 50% 44%, rgba(0,0,0,0) 40%, rgba(0,0,0,0.5) 82%, rgba(0,0,0,0.86) 100%);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+<script>
+(() => {
+  // A dark-field microscope slide: silica frustules catch the light and glow,
+  // everything between them stays black. Each specimen is generated once from
+  // its own N-fold symmetry rule, baked to a bitmap, then only transformed
+  // per frame, so the detail stays crisp without any per-frame path work.
+  const CFG = {
+    dprCap: 2,
+    population: 22,
+    heroes: 2,            // defocused specimens between the lens and the slide
+    specimenCss: 340,      // edge of the baked specimen bitmap, in CSS px
+    minSize: 52,           // on-screen diameter for the furthest specimen
+    maxSize: 290,          // ...and the nearest
+    heroSize: 470,
+    dustCount: 130,
+  };
+
+  const TAU = Math.PI * 2;
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, S = 1;
+
+  const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const rand = (a, b) => a + Math.random() * (b - a);
+
+  // Small deterministic generator so one specimen's geometry is stable for life.
+  function mulberry(seed) {
+    return function () {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  let seedCounter = 1;
+  const nextSeed = () => (seedCounter = (seedCounter * 1103515245 + 12345) & 0x7fffffff);
+
+  // ---------------------------------------------------------------- specimens
+
+  // Frustules are mostly silica, so they read as cool colours, but the pigments
+  // and the interference colours run all the way round the wheel.
+  const HUES = [162, 176, 188, 198, 210, 228, 258, 285, 318, 28, 40, 52];
+  const ACCENTS = [40, 52, 190, 320, 168];
+
+  function makeSpec() {
+    const r = mulberry(nextSeed());
+    const rr = (a, b) => a + r() * (b - a);
+    const kind = r() < 0.34 ? 'stellate' : r() < 0.62 ? 'pinnate' : 'centric';
+
+    const spec = {
+      kind,
+      seed: nextSeed(),
+      hue: HUES[(r() * HUES.length) | 0] + rr(-7, 7),
+      hue2: ACCENTS[(r() * ACCENTS.length) | 0],
+      bright: rr(0.55, 0.9),
+    };
+
+    if (kind === 'pinnate') {
+      // Navicula / Stauroneis: a bilobate valve seen down the microscope.
+      spec.narrow = rr(0.3, 0.46);
+      spec.lobes = rr(0.02, 0.12);      // the shoulders either side of the head
+      spec.striae = Math.floor(rr(11, 22));
+      spec.raphe = r() < 0.72;
+      spec.striaRelief = rr(0.55, 1);
+      spec.apical = r() < 0.8;
+      return spec;
+    }
+
+    spec.sectors = [3, 4, 5, 6, 6, 8, 10, 12, 16][(r() * 9) | 0];
+    spec.rimAmp = kind === 'stellate' ? rr(0.26, 0.5) : rr(0.03, 0.14);
+    spec.rimPow = kind === 'stellate' ? rr(1.1, 2.2) : rr(0.7, 1.6);
+    spec.ribAt = r() < 0.55 ? 'edge' : 'centre';
+    spec.bands = [];
+    const bandCount = r() < 0.45 ? 1 : 2;
+    let edge = rr(0.24, 0.4);
+    for (let i = 0; i < bandCount; i++) {
+      const width = bandCount === 1 ? rr(0.5, 0.66) : rr(0.18, 0.3);
+      spec.bands.push({
+        r0: edge,
+        r1: Math.min(0.93, edge + width),
+        cols: Math.max(1, Math.round((width * rr(26, 46)) / (spec.sectors * 0.28 + 1) * 0.9)),
+        pore: rr(0.018, 0.036),
+        relief: rr(0.5, 1),
+      });
+      edge = Math.min(0.9, edge + width + rr(0.03, 0.09));
+    }
+    spec.spines = kind === 'stellate' ? rr(0.05, 0.16) : (r() < 0.22 ? rr(0.05, 0.12) : 0);
+    spec.bossR = rr(0.1, 0.22);
+    spec.bossSpokes = r() < 0.5 ? spec.sectors : Math.floor(rr(5, 14));
+    return spec;
+  }
+
+  // Angular position expressed as a fraction of one sector, mirrored about the
+  // sector centre: 0 at a sector boundary, 0.5 down the middle of a sector.
+  function sectorPos(spec, theta) {
+    const u = (theta * spec.sectors) / TAU;
+    const f = u - Math.floor(u);
+    return f < 0.5 ? f : 1 - f;
+  }
+
+  // Outline radius multiplier as a function of angle — this single function
+  // gives every specimen its silhouette.
+  function outlineAt(spec, theta) {
+    if (spec.kind === 'pinnate') {
+      // Long axis on Y: the valve is `narrow` across and 1 along.
+      return 1 / Math.hypot(Math.cos(theta) / spec.narrow, Math.sin(theta));
+    }
+    const v = sectorPos(spec, theta);
+    const bulge = Math.sin(Math.PI * v);
+    if (spec.kind === 'stellate') {
+      // Points sit on the sector boundaries, valleys between them. The sign has
+      // to be kept by hand: a fractional power of a negative base is NaN.
+      const d = 1 - 2 * bulge;
+      return 1 + spec.rimAmp * (d < 0 ? -Math.pow(-d, spec.rimPow) : Math.pow(d, spec.rimPow));
+    }
+    return 1 + spec.rimAmp * Math.pow(bulge, spec.rimPow);
+  }
+
+  // Every feature is placed through this so radial species stay radial and the
+  // pinnate one stays elongated.
+  function point(spec, rFrac, theta, out) {
+    const rr = rFrac * outlineAt(spec, theta);
+    out[0] = Math.cos(theta) * rr;
+    out[1] = Math.sin(theta) * rr;
+  }
+
+  const p0 = [0, 0];
+  const p1 = [0, 0];
+  const p2 = [0, 0];
+  const p3 = [0, 0];
+
+  // Walk one sector, emitting both the point and its mirror image.
+  function eachSector(spec, v, fn) {
+    const step = TAU / spec.sectors;
+    for (let s = 0; s < spec.sectors; s++) {
+      const a = s * step;
+      fn(a + v * step, s, 1);
+      if (v > 1e-4 && v < 0.5 - 1e-4) fn(a + (1 - v) * step, s, -1);
+    }
+  }
+
+  // ------------------------------------------------------------------- baking
+
+  function bake(spec) {
+    const edge = CFG.specimenCss * Math.min(DPR, CFG.dprCap);
+    const R = edge * 0.5 * 0.8;   // the rest is padding, so the blur never clips
+    const g = document.createElement('canvas');
+    g.width = edge;
+    g.height = edge;
+    const gx = g.getContext('2d');
+    gx.translate(edge / 2, edge / 2);
+    gx.lineJoin = 'round';
+    gx.lineCap = 'round';
+
+    const silica = (l, a) => `hsla(${spec.hue}, 96%, ${l}%, ${a})`;
+    const accent = (l, a) => `hsla(${spec.hue2}, 96%, ${l}%, ${a})`;
+    const hair = edge / 340;   // scales every stroke with the bake size
+
+    // --- glass body: two stacked outlines give the shell its depth
+    const traceOutline = (radius, steps) => {
+      gx.beginPath();
+      for (let i = 0; i <= steps; i++) {
+        const theta = (i / steps) * TAU;
+        point(spec, radius, theta, p0);
+        if (i === 0) gx.moveTo(p0[0] * R, p0[1] * R);
+        else gx.lineTo(p0[0] * R, p0[1] * R);
+      }
+      gx.closePath();
+    };
+
+    traceOutline(1, 260);
+    const body = gx.createRadialGradient(0, 0, R * 0.1, 0, 0, R * 1.02);
+    body.addColorStop(0, silica(46, 0.06 * spec.bright));
+    body.addColorStop(0.62, silica(56, 0.12 * spec.bright));
+    body.addColorStop(1, silica(74, 0.22 * spec.bright));
+    gx.fillStyle = body;
+    gx.fill();
+
+    if (spec.kind !== 'pinnate') {
+      // Concentric areolae: the perforated silica plates.
+      for (const band of spec.bands) {
+        const rows = Math.max(1, Math.round((band.r1 - band.r0) / (band.pore * 1.45)));
+        for (let row = 0; row < rows; row++) {
+          const rf = band.r0 + ((row + 0.5) / rows) * (band.r1 - band.r0);
+          const cols = Math.max(1, band.cols);
+          for (let c = 0; c < cols; c++) {
+            const v = ((c + 0.5) / cols) * 0.5;
+            if (v < 0.035) continue;                       // leave a clear rib
+            eachSector(spec, v, (theta) => {
+              point(spec, rf, theta, p0);
+              const pr = band.pore * R * (0.72 + 0.5 * Math.sin(Math.PI * v)) * band.relief;
+              gx.beginPath();
+              gx.arc(p0[0] * R, p0[1] * R, Math.max(0.5, pr), 0, TAU);
+              gx.fillStyle = `rgba(2,10,16,${0.5 + 0.28 * band.relief})`;
+              gx.fill();
+              gx.strokeStyle = silica(88, 0.34 + 0.24 * band.relief);
+              gx.lineWidth = hair * 0.85;
+              gx.stroke();
+            });
+          }
+        }
+        // Band margins
+        for (const rf of [band.r0, band.r1]) {
+          gx.beginPath();
+          for (let i = 0; i <= 240; i++) {
+            const theta = (i / 240) * TAU;
+            point(spec, rf, theta, p0);
+            if (i === 0) gx.moveTo(p0[0] * R, p0[1] * R);
+            else gx.lineTo(p0[0] * R, p0[1] * R);
+          }
+          gx.closePath();
+          gx.strokeStyle = silica(86, 0.3);
+          gx.lineWidth = hair * 1.1;
+          gx.stroke();
+        }
+      }
+
+      // Radial ribs splitting the sectors
+      const ribV = spec.ribAt === 'edge' ? 0 : 0.5;
+      eachSector(spec, ribV, (theta) => {
+        point(spec, 0.2, theta, p0);
+        point(spec, 0.99, theta, p1);
+        gx.beginPath();
+        gx.moveTo(p0[0] * R, p0[1] * R);
+        gx.lineTo(p1[0] * R, p1[1] * R);
+        gx.strokeStyle = silica(92, 0.5 * spec.bright);
+        gx.lineWidth = hair * 1.7;
+        gx.stroke();
+      });
+
+      // Spines, if this one grew any
+      if (spec.spines > 0) {
+        const v = spec.kind === 'stellate' ? 0 : 0.5;
+        eachSector(spec, v, (theta) => {
+          point(spec, 0.86, theta - 0.012, p0);
+          point(spec, 0.86, theta + 0.012, p1);
+          point(spec, 1 + spec.spines, theta, p2);
+          gx.beginPath();
+          gx.moveTo(p0[0] * R, p0[1] * R);
+          gx.lineTo(p2[0] * R, p2[1] * R);
+          gx.lineTo(p1[0] * R, p1[1] * R);
+          gx.closePath();
+          gx.fillStyle = silica(90, 0.4);
+          gx.fill();
+          gx.strokeStyle = accent(86, 0.5);
+          gx.lineWidth = hair * 0.9;
+          gx.stroke();
+        });
+      }
+
+      // Central boss
+      gx.beginPath();
+      gx.arc(0, 0, spec.bossR * R, 0, TAU);
+      gx.fillStyle = silica(80, 0.3);
+      gx.fill();
+      gx.strokeStyle = accent(90, 0.55);
+      gx.lineWidth = hair * 1.3;
+      gx.stroke();
+      for (let i = 0; i < spec.bossSpokes; i++) {
+        const a = (i / spec.bossSpokes) * TAU;
+        gx.beginPath();
+        gx.moveTo(Math.cos(a) * spec.bossR * R * 0.3, Math.sin(a) * spec.bossR * R * 0.3);
+        gx.lineTo(Math.cos(a) * spec.bossR * R * 1.5, Math.sin(a) * spec.bossR * R * 1.5);
+        gx.strokeStyle = silica(90, 0.35);
+        gx.lineWidth = hair * 0.8;
+        gx.stroke();
+      }
+    } else {
+      // Transverse striae across the valve, plus a raphe down the long axis.
+      const halfAt = (y) => spec.narrow * Math.sqrt(Math.max(0, 1 - y * y));
+      const inner = 0.9;
+      for (let i = 1; i < spec.striae; i++) {
+        const y = -inner + (i / spec.striae) * inner * 2;
+        const w = halfAt(y) * R * 0.94;
+        const sag = 0.03 * R * Math.cos(y * 1.9);
+        gx.beginPath();
+        gx.moveTo(-w, y * R + sag);
+        gx.quadraticCurveTo(0, y * R - sag, w, y * R + sag);
+        gx.strokeStyle = silica(88, 0.4 * spec.striaRelief);
+        gx.lineWidth = hair * 1.15;
+        gx.stroke();
+      }
+      // Marginal line just inside the valve edge
+      gx.beginPath();
+      for (let i = 0; i <= 200; i++) {
+        const theta = (i / 200) * TAU;
+        point(spec, 0.9, theta, p0);
+        if (i === 0) gx.moveTo(p0[0] * R, p0[1] * R);
+        else gx.lineTo(p0[0] * R, p0[1] * R);
+      }
+      gx.closePath();
+      gx.strokeStyle = silica(84, 0.3);
+      gx.lineWidth = hair;
+      gx.stroke();
+      if (spec.raphe) {
+        gx.beginPath();
+        for (let i = 0; i <= 60; i++) {
+          const y = -0.98 + (i / 60) * 1.96;
+          const x = Math.sin(y * 2.4) * 0.03 * R;
+          if (i === 0) gx.moveTo(x, y * R);
+          else gx.lineTo(x, y * R);
+        }
+        gx.strokeStyle = accent(90, 0.5);
+        gx.lineWidth = hair * 1.6;
+        gx.stroke();
+      }
+      if (spec.apical) {
+        for (const sgn of [-1, 1]) {
+          gx.beginPath();
+          gx.ellipse(0, sgn * R * 1.0, spec.narrow * R * 0.42, R * 0.05, 0, 0, TAU);
+          gx.fillStyle = silica(90, 0.4);
+          gx.fill();
+        }
+      }
+    }
+
+    // --- the bright outer edge that sells the glass
+    traceOutline(1, 300);
+    gx.strokeStyle = `hsla(${spec.hue}, 100%, ${lerp(80, 95, spec.bright)}%, ${0.55 + 0.3 * spec.bright})`;
+    gx.lineWidth = hair * 2.1;
+    gx.stroke();
+    traceOutline(0.965, 300);
+    gx.strokeStyle = accent(92, 0.22);
+    gx.lineWidth = hair * 1.1;
+    gx.stroke();
+
+    // --- the halo, blurred once at bake time so the loop stays cheap
+    const soft = document.createElement('canvas');
+    soft.width = edge * 0.5;
+    soft.height = edge * 0.5;
+    const sx = soft.getContext('2d');
+    sx.filter = `blur(${Math.max(2, edge * 0.014)}px)`;
+    sx.drawImage(g, 0, 0, edge * 0.5, edge * 0.5);
+    sx.filter = 'none';
+    sx.globalCompositeOperation = 'source-atop';
+    sx.fillStyle = `hsla(${spec.hue}, 100%, 56%, 0.3)`;
+    sx.fillRect(0, 0, edge * 0.5, edge * 0.5);
+
+    return { sharp: g, soft, edge, radius: R };
+  }
+
+  // -------------------------------------------------------------------- scene
+
+  const specimens = [];
+  let dust = [];
+  let bgGrad = null;
+  let lampGrad = null;
+  let focus = 1;
+  let focusTarget = 1;
+  let nextFocusChange = 0;
+
+  function spawn(d, hero) {
+    const spec = makeSpec();
+    const b = bake(spec);
+    return {
+      b,
+      depth: d,
+      hero: !!hero,
+      x: rand(0.04, 0.96),
+      y: rand(0.04, 0.96),
+      size: hero ? rand(CFG.heroSize * 0.8, CFG.heroSize) : lerp(CFG.minSize, CFG.maxSize, Math.pow(d, 0.85)),
+      spin: rand(-0.13, 0.13) * (0.4 + d),
+      angle: rand(0, TAU),
+      vx: rand(-0.012, 0.012) * (0.4 + d),
+      vy: rand(-0.012, 0.012) * (0.4 + d),
+      fade: 0,
+    };
+  }
+
+  // Nudge overlapping specimens apart so the field never clumps or leaves a
+  // hole in the middle. A few relaxation passes is enough and costs nothing
+  // because it only runs on (re)build.
+  function relax(list) {
+    for (let pass = 0; pass < 40; pass++) {
+      for (let i = 0; i < list.length; i++) {
+        for (let j = i + 1; j < list.length; j++) {
+          const a = list[i];
+          const b = list[j];
+          const want = (a.size + b.size) * 0.34;
+          let dx = b.x - a.x;
+          let dy = b.y - a.y;
+          const gap = want / Math.max(W, H);
+          let d = Math.hypot(dx, dy);
+          if (d >= gap) continue;
+          if (d < 1e-4) { dx = rand(-1, 1); dy = rand(-1, 1); d = Math.hypot(dx, dy) || 1; }
+          const push = (gap - d) * 0.5;
+          const ux = (dx / d) * push;
+          const uy = (dy / d) * push;
+          a.x -= ux; a.y -= uy;
+          b.x += ux; b.y += uy;
+        }
+      }
+    }
+    for (const s of list) {
+      s.x = clamp(s.x, 0.03, 0.97);
+      s.y = clamp(s.y, 0.03, 0.97);
+    }
+  }
+
+  function buildScene(initial) {
+    specimens.length = 0;
+    for (let i = 0; i < CFG.population; i++) {
+      specimens.push(spawn(i / (CFG.population - 1), false));
+    }
+    for (let i = 0; i < CFG.heroes; i++) {
+      specimens.push(spawn(1.2, true));
+    }
+    relax(specimens);
+    specimens.sort((a, b) => a.depth - b.depth);
+    for (const s of specimens) s.fade = initial ? 1 : 0;
+
+    dust = Array.from({ length: CFG.dustCount }, () => ({
+      x: rand(0, 1),
+      y: rand(0, 1),
+      r: rand(0.4, 1.9),
+      d: Math.pow(Math.random(), 2.2),
+      drift: rand(-0.006, 0.006),
+      phase: rand(0, TAU),
+    }));
+  }
+
+  function resize() {
+    DPR = Math.min(CFG.dprCap, window.devicePixelRatio || 1);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    S = Math.min(W, H);
+    canvas.width = Math.max(1, Math.floor(W * DPR));
+    canvas.height = Math.max(1, Math.floor(H * DPR));
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    bgGrad = ctx.createRadialGradient(W * 0.5, H * 0.42, 0, W * 0.5, H * 0.42, S * 1.1);
+    bgGrad.addColorStop(0, '#071c24');
+    bgGrad.addColorStop(0.5, '#03111a');
+    bgGrad.addColorStop(1, '#01060a');
+    lampGrad = ctx.createRadialGradient(W * 0.5, H * 0.34, 0, W * 0.5, H * 0.34, S * 0.85);
+    lampGrad.addColorStop(0, 'rgba(90,190,205,0.11)');
+    lampGrad.addColorStop(0.55, 'rgba(30,90,110,0.05)');
+    lampGrad.addColorStop(1, 'rgba(0,0,0,0)');
+    buildScene(true);
+  }
+
+  window.addEventListener('resize', resize, { passive: true });
+
+  const pointer = { x: 0, y: 0, tx: 0, ty: 0, on: false };
+  window.addEventListener('pointermove', (e) => {
+    pointer.tx = (e.clientX / W) * 2 - 1;
+    pointer.ty = (e.clientY / H) * 2 - 1;
+    pointer.on = true;
+  }, { passive: true });
+  window.addEventListener('pointerleave', () => { pointer.on = false; }, { passive: true });
+
+  // ------------------------------------------------------------------ drawing
+
+  function drawBackdrop(time) {
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, W, H);
+
+    // Faint interference banding from the condenser — sells the "lens" feel.
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.05;
+    ctx.fillStyle = lampGrad;
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+
+    ctx.save();
+    ctx.globalAlpha = 0.018;
+    ctx.strokeStyle = '#7fe6ff';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 10; i++) {
+      const y = ((i / 10) * H + time * 3) % (H + 120) - 60;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(W, y + Math.sin(time * 0.2 + i) * 6);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawDust(time) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const d of dust) {
+      const px = d.x * W;
+      const py = d.y * H + Math.sin(time * 0.3 + d.phase) * 4;
+      ctx.globalAlpha = 0.05 + d.d * 0.3;
+      ctx.fillStyle = '#9fe6f5';
+      ctx.beginPath();
+      ctx.arc(px, py, d.r * (1 + d.d * 1.6), 0, TAU);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawSpecimen(sp, time) {
+    const px = sp.x * W + pointer.x * (1 - sp.depth) * 16;
+    const py = sp.y * H + pointer.y * (1 - sp.depth) * 16;
+    const size = sp.size;
+    if (size < 6) return;
+
+    // Margin check against the rotation, so corners never pop in.
+    const reach = size * 0.62;
+    if (px < -reach || px > W + reach || py < -reach || py > H + reach) return;
+
+    sp.fade = Math.min(1, sp.fade + 0.02);
+    const alpha = sp.fade;
+    const soft = sp.depth < 0.3 || sp.hero;
+
+    // Halo first, additively — a dim fringe of scattered light.
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(sp.angle + time * 0.02 * sp.depth);
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = alpha * (0.1 + 0.16 * focus) * (sp.hero ? 0.55 : 0.35 + sp.depth * 0.65);
+    ctx.drawImage(sp.b.soft, -size / 2, -size / 2, size, size);
+    ctx.restore();
+
+    // Then the specimen itself, over the top so overlaps stay readable.
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(sp.angle + time * 0.02 * sp.depth);
+    if (!soft) {
+      ctx.globalAlpha = alpha * (0.42 + 0.58 * focus);
+      ctx.drawImage(sp.b.sharp, -size / 2, -size / 2, size, size);
+    }
+    ctx.restore();
+  }
+
+  // --------------------------------------------------------------------- loop
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    pointer.x = lerp(pointer.x, pointer.on ? pointer.tx : 0, 0.04);
+    pointer.y = lerp(pointer.y, pointer.on ? pointer.ty : 0, 0.04);
+
+    // The objective hunts: everything softens, then snaps back into focus.
+    if (time > nextFocusChange) {
+      focusTarget = Math.random() < 0.45 ? rand(0.22, 0.5) : rand(0.92, 1);
+      nextFocusChange = time + rand(4.5, 9);
+    }
+    focus = lerp(focus, focusTarget, 1 - Math.pow(0.015, dt));
+
+    for (const sp of specimens) {
+      sp.x += sp.vx * dt * 60 * 0.016;
+      sp.y += sp.vy * dt * 60 * 0.016;
+      sp.angle += sp.spin * dt;
+      // Wrap with a margin so nothing vanishes in the middle of the field.
+      const m = 0.2;
+      if (sp.x < -m) sp.x += 1 + m * 2;
+      if (sp.x > 1 + m) sp.x -= 1 + m * 2;
+      if (sp.y < -m) sp.y += 1 + m * 2;
+      if (sp.y > 1 + m) sp.y -= 1 + m * 2;
+    }
+
+    drawBackdrop(time);
+    drawDust(time);
+    for (const sp of specimens) drawSpecimen(sp, time);
+
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
