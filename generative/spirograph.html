@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Spirograph</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #08060e; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 126% 102% at 50% 46%,
+        rgba(0,0,0,0) 48%, rgba(0,0,0,.26) 82%, rgba(0,0,0,.68) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(226, 200, 255, .26);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">hypotrochoid · drawing 1 of n</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  SPIROGRAPH — a hypotrochoid drawn the way the toy draws it:
+  //  one continuous line, laid down point by point, at a speed you
+  //  can watch. Each figure is set up from a small integer pair
+  //  (the gear teeth), drawn until it closes, admired, then
+  //  dissolved away with a soft wipe that reveals the next one
+  //  already in progress beneath it.
+  //
+  //  Construction notes
+  //  ------------------
+  //  A hypotrochoid closes exactly after lcm(R, r) / r revolutions,
+  //  so the number of points is knowable in advance -- that is what
+  //  makes it possible to animate the whole line growing instead of
+  //  fading it in. The current figure is kept in a Path2D that is
+  //  extended one point per frame (fixed cost, independent of how
+  //  long the figure is) and redrawn each frame with a gradient
+  //  stroke. The dissolve is a radial wipe over the top.
+  // ============================================================
+  const CONFIG = {
+    //  Fine line art: this is the other page that benefits from more pixels,
+    //  and it draws only a few strokes per frame, so the cost is affordable.
+    dprCap: 2,
+
+    radius: 0.42,            // figure radius, fraction of min(W,H)
+    stepAngle: 0.0055,       // spindle rotation per point appended
+    //  A hypotrochoid of this size closes after tens of thousands of points, so
+    //  at a couple of points per frame a figure would take five minutes. At this
+    //  rate the line is still visibly being drawn (the pen moves a few percent of
+    //  the figure per second) but a figure reaches its hold in well under a
+    //  minute.
+    pointsPerFrame: 22,
+
+    holdSeconds: 7,          // time to admire a finished figure before wiping
+    wipeSeconds: 2.6,
+
+    gears: [
+      { R: 96, r: 35, d: 0.62 },
+      { R: 120, r: 44, d: 0.50 },
+      { R: 84, r: 31, d: 0.74 },
+      { R: 150, r: 56, d: 0.44 },
+      { R: 90, r: 41, d: 0.68 },
+      { R: 132, r: 45, d: 0.58 },
+      { R: 108, r: 47, d: 0.52 },
+      { R: 168, r: 61, d: 0.40 },
+    ],
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1, CX = 0, CY = 0, RAD = 1;
+
+  function gcd(a, b) { while (b) { const t = a % b; a = b; b = t; } return a || 1; }
+  function lcm(a, b) { return (a / gcd(a, b)) * b; }
+
+  // ---------------- sprites ----------------
+  let glowSprite;
+
+  function buildSprites() {
+    const s = 128;
+    const c = document.createElement('canvas');
+    c.width = c.height = s;
+    const x = c.getContext('2d');
+    const g = x.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    g.addColorStop(0, 'rgba(255, 255, 255, 0.85)');
+    g.addColorStop(0.18, 'rgba(240, 226, 255, 0.40)');
+    g.addColorStop(0.5, 'rgba(200, 170, 255, 0.10)');
+    g.addColorStop(1, 'rgba(160, 130, 255, 0)');
+    x.fillStyle = g;
+    x.fillRect(0, 0, s, s);
+    glowSprite = c;
+  }
+
+  // ---------------- figure ----------------
+  //  One figure = a gear pair, a palette, and a Path2D that grows.
+  let fig = null;
+  let nextGear = 0;
+  let phase = 'draw';          // 'draw' | 'hold' | 'wipe'
+  let phaseT = 0;
+  let wipeT = 0;
+  let lastFig = null;          // the finished figure, for the wipe to reveal
+
+  function makeFigure(gi) {
+    const G = CONFIG.gears[gi % CONFIG.gears.length];
+    // The number of points to close the curve: one full circuit of the rolling
+    // circle, at the current angular step.
+    const revs = lcm(G.R, G.r) / G.R;
+    const total = Math.ceil((revs * Math.PI * 2) / CONFIG.stepAngle);
+    return {
+      G,
+      gi,
+      total,
+      theta: 0,
+      count: 0,
+      path: new Path2D(),
+      started: false,
+      // Hue drifts a little per figure so successive ones are distinguishable.
+      hue: (gi * 47) % 360,
+      // A dashed overlay every so often, which is a real spirograph trick and
+      // adds a second rhythm to the line.
+      dashed: gi % 3 === 2,
+    };
+  }
+
+  function pointAt(f, theta) {
+    const { R, r, d } = f.G;
+    const diff = R - r;
+    const x = diff * Math.cos(theta) + d * r * Math.cos((diff / r) * theta);
+    const y = diff * Math.sin(theta) - d * r * Math.sin((diff / r) * theta);
+    // Normalise by the maximum reach of the curve so every figure fills the
+    // circle regardless of its gear pair.
+    const maxReach = diff + d * r;
+    const k = RAD / maxReach;
+    return { x: CX + x * k, y: CY + y * k };
+  }
+
+  function strokeStyleFor(f, alpha) {
+    // A conic-ish sweep made from a linear gradient rotated with the figure:
+    // the line takes on a different hue at each end, which is what makes a
+    // spirograph look drawn rather than plotted.
+    const g = ctx.createLinearGradient(CX - RAD, CY - RAD, CX + RAD, CY + RAD);
+    const h0 = f.hue;
+    const h1 = (f.hue + 130) % 360;
+    g.addColorStop(0, `hsla(${h0}, 92%, 68%, ${alpha})`);
+    g.addColorStop(0.5, `hsla(${(h0 + 60) % 360}, 88%, 74%, ${alpha})`);
+    g.addColorStop(1, `hsla(${h1}, 90%, 66%, ${alpha})`);
+    return g;
+  }
+
+  // ---------------- loop ----------------
+  let last = performance.now();
+  let ready = false;
+
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.max(1, Math.floor(window.innerWidth));
+    H = Math.max(1, Math.floor(window.innerHeight));
+    U = Math.min(W, H);
+    CX = W / 2;
+    CY = H / 2;
+    RAD = U * CONFIG.radius;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    buildSprites();
+    // A new figure at the new size, since the old path is in old coordinates.
+    fig = makeFigure(nextGear++);
+    lastFig = null;
+    phase = 'draw';
+    phaseT = 0;
+    wipeT = 0;
+  }
+  window.addEventListener('resize', resize, { passive: true });
+
+  function frame(now) {
+    const dt = 1 / 60;
+    const t = now / 1000;
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    // Ground: nearly black, with a faint well of light where the figure sits.
+    ctx.fillStyle = '#08060e';
+    ctx.fillRect(0, 0, W, H);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.30;
+    const s = RAD * 3.4;
+    ctx.drawImage(glowSprite, CX - s / 2, CY - s / 2, s, s);
+    ctx.restore();
+
+    if (phase === 'draw') {
+      // Append a couple of points. Extending a Path2D is cheap and its cost does
+      // not grow with the number of points already in it, which is why the
+      // figure can take a minute to close without the frame time creeping up.
+      for (let k = 0; k < CONFIG.pointsPerFrame && fig.count < fig.total; k++) {
+        const p = pointAt(fig, fig.theta);
+        if (!fig.started) { fig.path.moveTo(p.x, p.y); fig.started = true; }
+        else fig.path.lineTo(p.x, p.y);
+        fig.theta += CONFIG.stepAngle;
+        fig.count++;
+      }
+
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.lineWidth = Math.max(0.7, U * 0.0011);
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = strokeStyleFor(fig, 0.85);
+      if (fig.dashed) ctx.setLineDash([U * 0.006, U * 0.004]);
+      ctx.stroke(fig.path);
+      ctx.setLineDash([]);
+      ctx.restore();
+
+      // The pen itself: a bright dot with a small halo, so the drawing is
+      // visibly being drawn.
+      const p = pointAt(fig, fig.theta);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const ps = U * 0.055;
+      ctx.globalAlpha = 0.55;
+      ctx.drawImage(glowSprite, p.x - ps / 2, p.y - ps / 2, ps, ps);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.92)';
+      ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(1.1, U * 0.0026), 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+
+      if (fig.count >= fig.total) { phase = 'hold'; phaseT = 0; }
+    } else if (phase === 'hold') {
+      phaseT += dt;
+      // A slow rotation of the finished figure, as if the paper were turned.
+      ctx.save();
+      ctx.translate(CX, CY);
+      ctx.rotate(phaseT * 0.035);
+      ctx.translate(-CX, -CY);
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.lineWidth = Math.max(0.7, U * 0.0011);
+      ctx.strokeStyle = strokeStyleFor(fig, 0.85);
+      if (fig.dashed) ctx.setLineDash([U * 0.006, U * 0.004]);
+      ctx.stroke(fig.path);
+      ctx.setLineDash([]);
+      ctx.restore();
+
+      if (phaseT >= CONFIG.holdSeconds) {
+        // Hand the finished figure over to the wipe, and start the next one
+        // beneath it. The next figure is drawn under the old one, so the wipe
+        // uncovers something already there rather than an empty frame.
+        lastFig = fig;
+        fig = makeFigure(nextGear++);
+        phase = 'wipe';
+        wipeT = 0;
+      }
+    } else {
+      // wipe: the new figure draws while a ring clears the old one away.
+      wipeT += dt / CONFIG.wipeSeconds;
+      for (let k = 0; k < CONFIG.pointsPerFrame * 2 && fig.count < fig.total; k++) {
+        const p = pointAt(fig, fig.theta);
+        if (!fig.started) { fig.path.moveTo(p.x, p.y); fig.started = true; }
+        else fig.path.lineTo(p.x, p.y);
+        fig.theta += CONFIG.stepAngle;
+        fig.count++;
+      }
+
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.lineWidth = Math.max(0.7, U * 0.0011);
+      ctx.strokeStyle = strokeStyleFor(fig, 0.85);
+      if (fig.dashed) ctx.setLineDash([U * 0.006, U * 0.004]);
+      ctx.stroke(fig.path);
+      ctx.setLineDash([]);
+      ctx.restore();
+
+      // The clearing ring: an expanding annulus painted in the ground colour.
+      const r0 = wipeT * Math.hypot(W, H) * 0.62;
+      const band = Math.max(2, U * 0.10);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, W, H);
+      ctx.arc(CX, CY, Math.max(0.01, r0 - band * 0.5), 0, Math.PI * 2, true);
+      ctx.arc(CX, CY, r0 + band, 0, Math.PI * 2);
+      ctx.fillStyle = '#08060e';
+      ctx.fill('evenodd');
+      ctx.restore();
+
+      if (wipeT >= 1) { lastFig = null; phase = 'draw'; phaseT = 0; }
+    }
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
