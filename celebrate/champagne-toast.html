@@ -1,0 +1,573 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Champagne Toast</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0710; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 130% 105% at 50% 42%,
+        rgba(0,0,0,0) 40%, rgba(0,0,0,.34) 82%, rgba(0,0,0,.76) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(255, 236, 200, .30);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">à votre santé</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  CHAMPAGNE TOAST — two coupes, a topping-up pour, and the
+  //  rise that follows. Flutes fill, streams of fine bubbles break
+  //  loose and climb, and the head over the rim keeps sparkling
+  //  after a pour. Everything is lit from behind, as if the glass
+  //  sat in front of a window; the bubble trains refract that light.
+  //
+  //  Construction notes
+  //  ------------------
+  //  The glasses, the light behind them and the table are painted
+  //  into a per-resize backdrop layer; only the liquid surface, the
+  //  bubbling and the pour are animated. Bubbles are drawn from a
+  //  pool of three pre-rendered sprites, so two hundred of them cost
+  //  two hundred blits rather than two hundred gradient builds.
+  // ============================================================
+  const CONFIG = {
+    //  A 2x backing store costs 4x the fill; this scene is mostly soft
+    //  gradients and glass, which gain nothing visible from it.
+    dprCap: 1.6,
+
+    coupes: [
+      { x: 0.345, scale: 1.00, tilt: -0.015 },
+      { x: 0.655, scale: 0.98, tilt:  0.018 },
+    ],
+    bowlR: 0.150,          // coupe bowl radius, fraction of min(W,H)
+    stemH: 0.22,
+    footR: 0.070,
+
+    pourEvery: [9, 15],     // s between pours
+    pourRise: 0.55,         // s for the liquid surface to climb
+    fillFrom: 0.34,         // coupe starts this full
+    fillTo: 0.80,
+
+    bubbleRate: 34,         // bubbles released per second while sparkling
+    bubbleMax: 210,
+    bubbleR: [1.4, 4.2],
+    rise: [42, 96],         // px/s at 1600w
+
+    sparkleFade: 7.0,       // s a coupe keeps sparkling after a pour
+
+    film: 0.055,            // bubbles clinging to the glass wall
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+  function smoothstep(t) { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); }
+
+  // ---------------- sprites ----------------
+  //  Bubbles are bright rims with a soft interior and a specular dot: at these
+  //  sizes a plain filled circle reads as a dot, not a bubble.
+  function makeBubbleSprite(px) {
+    const s = px * 4;
+    const c = document.createElement('canvas');
+    c.width = c.height = s;
+    const g = c.getContext('2d');
+    const r = s / 2;
+    const body = g.createRadialGradient(r * 0.72, r * 0.68, 0, r, r, r);
+    body.addColorStop(0, 'rgba(255,250,230,0.50)');
+    body.addColorStop(0.55, 'rgba(255,236,190,0.16)');
+    body.addColorStop(1, 'rgba(255,220,160,0)');
+    g.fillStyle = body;
+    g.beginPath(); g.arc(r, r, r, 0, Math.PI * 2); g.fill();
+    g.strokeStyle = 'rgba(255,248,225,0.62)';
+    g.lineWidth = Math.max(0.8, r * 0.16);
+    g.beginPath(); g.arc(r, r, r * 0.80, 0, Math.PI * 2); g.stroke();
+    g.fillStyle = 'rgba(255,255,250,0.85)';
+    g.beginPath(); g.arc(r * 0.68, r * 0.62, r * 0.17, 0, Math.PI * 2); g.fill();
+    return c;
+  }
+
+  function makeGlowSprite(r, g, b, profile) {
+    const s = 128;
+    const c = document.createElement('canvas');
+    c.width = c.height = s;
+    const g2 = c.getContext('2d');
+    const grad = g2.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    for (const [p, col] of profile) grad.addColorStop(p, col.replace('%C', `${r},${g},${b}`));
+    g2.fillStyle = grad;
+    g2.fillRect(0, 0, s, s);
+    return c;
+  }
+
+  let bubbleSprites = [];
+  let glowWarm, glowCool;
+
+  function buildSprites() {
+    bubbleSprites = [makeBubbleSprite(6), makeBubbleSprite(9), makeBubbleSprite(13)];
+    glowWarm = makeGlowSprite(255, 226, 170, [
+      [0, 'rgba(%C,0.55)'], [0.35, 'rgba(%C,0.16)'], [1, 'rgba(%C,0)'],
+    ]);
+    glowCool = makeGlowSprite(190, 225, 255, [
+      [0, 'rgba(%C,0.42)'], [0.40, 'rgba(%C,0.12)'], [1, 'rgba(%C,0)'],
+    ]);
+  }
+
+  function stamp(sprite, x, y, size, alpha) {
+    if (alpha <= 0.004 || size <= 0) return;
+    ctx.globalAlpha = Math.min(1, alpha);
+    ctx.drawImage(sprite, x - size / 2, y - size / 2, size, size);
+    ctx.globalAlpha = 1;
+  }
+
+  // ---------------- geometry ----------------
+  //  A coupe is a wide shallow bowl on a stem: it shows the liquid surface
+  //  broadside, which is what makes it read as celebrating rather than as a
+  //  glass of water. All values are derived from one unit so the two glasses
+  //  stay proportional at any window size.
+  let glasses = [];
+
+  function layout() {
+    U = Math.min(W, H);
+    glasses = CONFIG.coupes.map((c) => {
+      const bowlR = CONFIG.bowlR * U;
+      const stemH = CONFIG.stemH * U;
+      const footR = CONFIG.footR * U;
+      const bowlH = bowlR * 0.58;            // shallow: a coupe, not a flute
+      const footY = H * 0.88;
+      const bowlBaseY = footY - stemH;
+      return {
+        cx: c.x * W,
+        tilt: c.tilt,
+        scale: c.scale,
+        bowlR: bowlR * c.scale,
+        bowlH: bowlH * c.scale,
+        stemH: stemH * c.scale,
+        footR: footR * c.scale,
+        footY,
+        bowlBaseY,
+        // Liquid surface height as a fraction of the bowl, animated by pours.
+        level: CONFIG.fillFrom,
+        target: CONFIG.fillFrom,
+        pourT: -1,
+        sparkle: 0,
+      };
+    });
+  }
+
+  // Surface y for a bowl.
+  //
+  // The bowl is drawn downward from bowlBaseY (the rim): its opening is at
+  // bowlBaseY and its base is at bowlBaseY + bowlH. The liquid therefore fills
+  // from the base upward, so a full coupe has its surface just under the rim and
+  // an empty one has it at the base.
+  function bowlBottomY(gl) { return gl.bowlBaseY + gl.bowlH * 0.95; }
+  function surfaceY(gl, level) {
+    const t = clamp(level, 0, 1);
+    return bowlBottomY(gl) - gl.bowlH * 0.90 * t;
+  }
+
+  // ---------------- bubbles ----------------
+  const bubbles = [];
+
+  function spawnBubble(gl, fromFilm) {
+    // released from just above the base of the bowl, scattered across its width
+    const rpx = rand(CONFIG.bubbleR[0], CONFIG.bubbleR[1]) * U / 900;
+    const spread = gl.bowlR * 0.80 * Math.sqrt(Math.random());
+    const dir = Math.random() < 0.5 ? -1 : 1;
+    bubbles.push({
+      gl,
+      x: gl.cx + dir * spread * gl.scale,
+      y: bowlBottomY(gl) - gl.bowlH * 0.04,
+      rpx,                       // radius in CSS px, for sprite choice and size
+      v: rand(CONFIG.rise[0], CONFIG.rise[1]) * U / 1000,
+      sway: rand(0.6, 2.4),
+      phase: rand(0, Math.PI * 2),
+      // Bubbles near the glass wall ride slower and wobble more.
+      wall: fromFilm ? 1 : 0,
+      life: 0,
+    });
+    if (bubbles.length > CONFIG.bubbleMax) bubbles.shift();
+  }
+
+  function updateBubbles(dt, time) {
+    for (let i = bubbles.length - 1; i >= 0; i--) {
+      const b = bubbles[i];
+      const gl = b.gl;
+      b.life += dt;
+      const sy = surfaceY(gl, gl.level);
+      b.y -= b.v * dt;
+      b.x += Math.sin(time * 1.7 + b.phase) * b.sway * dt * (b.wall ? 26 : 14);
+      // Constrain to the bowl profile, so bubbles hug the glass rather than
+      // drifting through it. The bowl narrows toward its base.
+      const bottom = bowlBottomY(gl);
+      const tAt = clamp((bottom - b.y) / (bottom - gl.bowlBaseY), 0, 1);
+      const halfW = gl.bowlR * (0.86 + 0.14 * tAt);
+      const dx = b.x - gl.cx;
+      if (Math.abs(dx) > halfW) b.x = gl.cx + Math.sign(dx) * halfW;
+      if (b.y <= sy) { bubbles.splice(i, 1); continue; }
+    }
+  }
+
+  // ---------------- backdrop ----------------
+  //  Glass outline, the light behind it, and the table. Static per resize.
+  let backdrop = null;
+
+  function paintBackdrop() {
+    if (!backdrop) backdrop = document.createElement('canvas');
+    backdrop.width = Math.max(1, Math.floor(W * DPR));
+    backdrop.height = Math.max(1, Math.floor(H * DPR));
+    const g = backdrop.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    // Room: warm behind the glasses, falling to near black at the edges.
+    const room = g.createRadialGradient(W * 0.5, H * 0.34, 0, W * 0.5, H * 0.42, Math.max(W, H) * 0.78);
+    room.addColorStop(0, '#3a2a2e');
+    room.addColorStop(0.32, '#241a20');
+    room.addColorStop(0.68, '#130e14');
+    room.addColorStop(1, '#08060a');
+    g.fillStyle = room;
+    g.fillRect(0, 0, W, H);
+
+    // The window behind: a soft warm panel that the glass will refract.
+    const winW = Math.min(W * 0.62, H * 1.05);
+    const winH = Math.min(H * 0.58, W * 0.46);
+    const wx = W * 0.5, wy = H * 0.36;
+    const win = g.createRadialGradient(wx, wy, 0, wx, wy, winW * 0.62);
+    win.addColorStop(0, 'rgba(255, 224, 176, 0.30)');
+    win.addColorStop(0.45, 'rgba(240, 186, 132, 0.12)');
+    win.addColorStop(1, 'rgba(180, 120, 90, 0)');
+    g.fillStyle = win;
+    g.fillRect(wx - winW, wy - winH, winW * 2, winH * 2);
+
+    // Tabletop: a dark band with a faint sheen where the feet sit.
+    const ty = glasses.length ? glasses[0].footY : H * 0.86;
+    const table = g.createLinearGradient(0, ty - H * 0.06, 0, H);
+    table.addColorStop(0, 'rgba(0,0,0,0)');
+    table.addColorStop(0.30, 'rgba(14, 9, 12, 0.72)');
+    table.addColorStop(1, 'rgba(4, 3, 5, 0.95)');
+    g.fillStyle = table;
+    g.fillRect(0, ty - H * 0.06, W, H - ty + H * 0.06);
+
+    const sheen = g.createRadialGradient(W * 0.5, ty + 6, 0, W * 0.5, ty + 6, W * 0.42);
+    sheen.addColorStop(0, 'rgba(255, 214, 168, 0.10)');
+    sheen.addColorStop(0.55, 'rgba(255, 196, 150, 0.035)');
+    sheen.addColorStop(1, 'rgba(255, 180, 140, 0)');
+    g.fillStyle = sheen;
+    g.fillRect(0, ty - 4, W, H * 0.16);
+
+    // Foot and stem for each glass.
+    for (const gl of glasses) {
+      g.save();
+      g.translate(gl.cx, gl.footY);
+      g.rotate(gl.tilt);
+      // foot ellipse
+      const foot = g.createLinearGradient(0, -10, 0, 10);
+      foot.addColorStop(0, 'rgba(226, 236, 246, 0.20)');
+      foot.addColorStop(0.5, 'rgba(150, 168, 190, 0.10)');
+      foot.addColorStop(1, 'rgba(90, 106, 128, 0.05)');
+      g.fillStyle = foot;
+      g.beginPath(); g.ellipse(0, 0, gl.footR, gl.footR * 0.26, 0, 0, Math.PI * 2); g.fill();
+      g.strokeStyle = 'rgba(226, 240, 255, 0.22)';
+      g.lineWidth = Math.max(1, gl.footR * 0.045);
+      g.beginPath(); g.ellipse(0, 0, gl.footR, gl.footR * 0.26, 0, 0, Math.PI * 2); g.stroke();
+      // stem
+      const stemGrad = g.createLinearGradient(-gl.bowlR * 0.1, 0, gl.bowlR * 0.1, 0);
+      stemGrad.addColorStop(0, 'rgba(214, 228, 244, 0.14)');
+      stemGrad.addColorStop(0.4, 'rgba(244, 250, 255, 0.30)');
+      stemGrad.addColorStop(1, 'rgba(150, 166, 190, 0.12)');
+      g.fillStyle = stemGrad;
+      g.fillRect(-gl.bowlR * 0.030, -gl.stemH, gl.bowlR * 0.060, gl.stemH);
+      // the little knot where the stem meets the bowl
+      g.beginPath();
+      g.ellipse(0, -gl.stemH, gl.bowlR * 0.075, gl.bowlR * 0.030, 0, 0, Math.PI * 2);
+      g.fillStyle = 'rgba(240, 248, 255, 0.26)';
+      g.fill();
+      g.restore();
+    }
+  }
+
+  // ---------------- drawing ----------------
+  function bowlPath(g, gl, inset) {
+    const r = gl.bowlR - (inset || 0);
+    const h = gl.bowlH;
+    g.beginPath();
+    // A coupe is a wide arc closed by a shallow curve: opening at the top,
+    // rounded underneath.
+    g.moveTo(-r, 0);
+    g.bezierCurveTo(-r * 1.02, h * 0.72, -r * 0.52, h * 1.06, 0, h * 1.06);
+    g.bezierCurveTo(r * 0.52, h * 1.06, r * 1.02, h * 0.72, r, 0);
+    g.closePath();
+  }
+
+  function drawLiquid(gl, time) {
+    const sy = surfaceY(gl, gl.level);
+    const r = gl.bowlR;
+    const h = gl.bowlH;
+
+    ctx.save();
+    ctx.translate(gl.cx, gl.bowlBaseY);
+    ctx.rotate(gl.tilt);
+    // Clip to the bowl so the liquid takes the glass's shape.
+    bowlPath(ctx, gl, 0);
+    ctx.clip();
+
+    // The body of the wine: a bright core falling to deep amber at the edges,
+    // with the light from behind showing through the middle.
+    const bodyTop = sy - gl.bowlBaseY;                 // positive, inside the bowl
+    const bodyH = Math.max(0, gl.bowlH * 1.06 - bodyTop);
+    const fill = ctx.createLinearGradient(0, gl.bowlBaseY + bodyTop, 0, gl.bowlBaseY + gl.bowlH * 1.06);
+    fill.addColorStop(0, 'rgba(255, 236, 186, 0.50)');
+    fill.addColorStop(0.18, 'rgba(252, 206, 122, 0.42)');
+    fill.addColorStop(0.55, 'rgba(214, 146, 60, 0.40)');
+    fill.addColorStop(1, 'rgba(150, 84, 26, 0.52)');
+    ctx.fillStyle = fill;
+    ctx.fillRect(-r, bodyTop, r * 2, bodyH + h * 0.1);
+
+    // Light passing through the wine from the window behind.
+    const cy = gl.bowlBaseY + bodyTop + bodyH * 0.45;
+    const thru = ctx.createRadialGradient(0, cy, 0, 0, cy, r * 1.05);
+    thru.addColorStop(0, 'rgba(255, 246, 214, 0.30)');
+    thru.addColorStop(0.55, 'rgba(255, 214, 150, 0.10)');
+    thru.addColorStop(1, 'rgba(255, 180, 110, 0)');
+    ctx.fillStyle = thru;
+    ctx.fillRect(-r, bodyTop, r * 2, bodyH + h * 0.1);
+
+    // The surface itself: an ellipse catching the window, plus a bright rim.
+    // It narrows as the level drops, because the bowl narrows toward its base.
+    const depth = clamp(bodyTop / (h * 1.06), 0, 1);
+    const srx = r * lerp(1.0, 0.42, Math.pow(depth, 1.5));
+    ctx.beginPath();
+    ctx.ellipse(0, bodyTop, srx, srx * 0.20, 0, 0, Math.PI * 2);
+    const surf = ctx.createLinearGradient(0, bodyTop - srx * 0.22, 0, bodyTop + srx * 0.22);
+    surf.addColorStop(0, 'rgba(255, 252, 232, 0.72)');
+    surf.addColorStop(0.5, 'rgba(255, 238, 196, 0.46)');
+    surf.addColorStop(1, 'rgba(246, 204, 138, 0.26)');
+    ctx.fillStyle = surf;
+    ctx.fill();
+
+    // Mid-bowl caustic ribbons from the surface refraction.
+    ctx.globalAlpha = 0.22;
+    for (let i = 0; i < 3; i++) {
+      const yy = bodyTop + bodyH * (0.22 + i * 0.22);
+      if (yy > h * 1.02) continue;
+      const w = srx * (0.46 + 0.16 * Math.sin(time * 0.7 + i * 1.9));
+      ctx.beginPath();
+      ctx.ellipse(0, yy, w, h * 0.035, 0, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(255, 238, 196, ${0.28 - i * 0.06})`;
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+
+  function drawGlass(gl) {
+    ctx.save();
+    ctx.translate(gl.cx, gl.bowlBaseY);
+    ctx.rotate(gl.tilt);
+    const r = gl.bowlR, h = gl.bowlH;
+
+    // Rim: the opening of the coupe, drawn as an ellipse at the top.
+    ctx.save();
+    bowlPath(ctx, gl, 0);
+    ctx.strokeStyle = 'rgba(238, 246, 255, 0.34)';
+    ctx.lineWidth = Math.max(1.1, U * 0.0022);
+    ctx.stroke();
+    ctx.restore();
+
+    // Specular edges down the near side.
+    ctx.save();
+    bowlPath(ctx, gl, 0);
+    ctx.clip();
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.20)';
+    ctx.lineWidth = Math.max(2, U * 0.006);
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.80, h * 0.94);
+    ctx.bezierCurveTo(-r * 0.40, h * 0.42, -r * 0.30, h * 0.16, -r * 0.30, 0);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(r * 0.86, h * 0.86);
+    ctx.bezierCurveTo(r * 0.72, h * 0.40, r * 0.66, h * 0.18, r * 0.66, 0);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.10)';
+    ctx.stroke();
+    ctx.restore();
+
+    // The open rim, drawn after clipping so it reads as a lip.
+    ctx.beginPath();
+    ctx.ellipse(0, 0, r, r * 0.20, 0, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(246, 250, 255, 0.42)';
+    ctx.lineWidth = Math.max(1.2, U * 0.0026);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawFoam(gl, time) {
+    // The head over a freshly poured coupe: clustered bubbles riding the
+    // surface, densest at the rim.
+    if (gl.sparkle <= 0.02) return;
+    const sy = surfaceY(gl, gl.level);
+    const r = gl.bowlR * 0.94;
+    for (let i = 0; i < 26; i++) {
+      const a = (i / 26) * Math.PI * 2 + gl.cx;
+      const rr = r * (0.68 + 0.30 * Math.abs(Math.sin(i * 2.3 + time * 0.5)));
+      const x = gl.cx + Math.cos(a) * rr;
+      const y = sy + Math.sin(a) * rr * 0.20;
+      const s = U * 0.012 * (0.5 + 0.5 * Math.abs(Math.sin(i * 1.7)));
+      stamp(bubbleSprites[1], x, y, s * 2.6, 0.30 * gl.sparkle);
+    }
+  }
+
+  function drawPour(gl, time) {
+    if (gl.pourT < 0) return;
+    const t = clamp(gl.pourT / CONFIG.pourRise, 0, 1);
+    // A thread of wine falling from just above the rim, not a pillar: keep it
+    // short enough to still read as pouring into the glass rather than as a
+    // column anchored to the frame edge, and fade it out well before the top.
+    const top = gl.bowlBaseY - gl.bowlH * 3.4;
+    const y0 = surfaceY(gl, gl.level);
+    const x = gl.cx + gl.bowlR * 0.10 + Math.sin(time * 2.1) * gl.bowlR * 0.03;
+    const w = U * 0.0075 * (1 - t * 0.30);
+    const g = ctx.createLinearGradient(x, top, x, y0);
+    g.addColorStop(0, 'rgba(255, 226, 168, 0)');
+    g.addColorStop(0.42, 'rgba(255, 232, 178, 0.16)');
+    g.addColorStop(0.86, 'rgba(255, 240, 196, 0.34)');
+    g.addColorStop(1, 'rgba(255, 246, 214, 0.48)');
+    ctx.fillStyle = g;
+    // Slight barrel: narrow at the top, flaring as it lands.
+    ctx.beginPath();
+    ctx.moveTo(x - w * 0.30, top);
+    ctx.bezierCurveTo(x - w * 0.48, top + (y0 - top) * 0.5, x - w * (0.62 + t * 0.4), y0 - (y0 - top) * 0.25, x - w * (0.8 + t * 0.5), y0);
+    ctx.lineTo(x + w * (0.8 + t * 0.5), y0);
+    ctx.bezierCurveTo(x + w * (0.62 + t * 0.4), y0 - (y0 - top) * 0.25, x + w * 0.48, top + (y0 - top) * 0.5, x + w * 0.30, top);
+    ctx.closePath();
+    ctx.fill();
+
+    // Splash crown where the thread meets the surface.
+    ctx.save();
+    ctx.globalAlpha = 0.34 + 0.30 * (1 - t);
+    for (let i = 0; i < 7; i++) {
+      const a = -Math.PI + (i / 6) * Math.PI;
+      const rr = gl.bowlR * 0.30 * (0.4 + t);
+      stamp(glowWarm, x + Math.cos(a) * rr, y0 + Math.sin(a) * rr * 0.25, U * 0.030, 0.30);
+    }
+    ctx.restore();
+    stamp(glowWarm, x, y0, gl.bowlR * 0.62, 0.34 * (0.6 + gl.sparkle));
+  }
+
+  // ---------------- loop ----------------
+  let nextPour = 0;
+  let pourIndex = 0;
+  let last = performance.now();
+  let ready = false;
+
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.max(1, Math.floor(window.innerWidth));
+    H = Math.max(1, Math.floor(window.innerHeight));
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    layout();
+    buildSprites();
+    paintBackdrop();
+    bubbles.length = 0;
+  }
+  window.addEventListener('resize', resize, { passive: true });
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = now / 1000;
+
+    // A pour starts when one is due, or when the first glass is low.
+    if (time >= nextPour) {
+      nextPour = time + rand(CONFIG.pourEvery[0], CONFIG.pourEvery[1]);
+      // Alternate glasses, occasionally both, so the two never move in lockstep.
+      const gl = glasses[pourIndex % glasses.length];
+      pourIndex++;
+      gl.target = CONFIG.fillTo;
+      gl.pourT = 0;
+      gl.sparkle = 1;
+    }
+
+    for (const gl of glasses) {
+      if (gl.pourT >= 0) {
+        gl.pourT += dt;
+        const t = clamp(gl.pourT / CONFIG.pourRise, 0, 1);
+        gl.level = lerp(CONFIG.fillFrom, gl.target, easeOutCubic(t));
+        if (t >= 1) { gl.pourT = -1; }
+      }
+      gl.sparkle = Math.max(0, gl.sparkle - dt / CONFIG.sparkleFade);
+      // Continuously top up a little so the levels never sit still forever.
+      gl.level = Math.max(CONFIG.fillFrom * 0.92, gl.level - dt * 0.010);
+    }
+
+    // Bubbles rise while the wine is sparkling, most of them right after a pour.
+    for (const gl of glasses) {
+      const rate = CONFIG.bubbleRate * (0.18 + gl.sparkle);
+      const n = rate * dt;
+      let count = Math.floor(n);
+      if (Math.random() < n - count) count++;
+      for (let i = 0; i < count; i++) spawnBubble(gl, Math.random() < CONFIG.film);
+    }
+    updateBubbles(dt, time);
+
+    // ---- draw ----
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.drawImage(backdrop, 0, 0, W, H);
+
+    // Glasses back-to-front so the nearer rim overlaps.
+    for (const gl of glasses) drawLiquid(gl, time);
+    for (const gl of glasses) drawBubblesFor(gl);
+    for (const gl of glasses) drawGlass(gl);
+    for (const gl of glasses) { drawFoam(gl, time); drawPour(gl, time); }
+
+    // Room haze over everything, tying the glass into the scene.
+    stamp(glowWarm, W * 0.5, H * 0.34, Math.max(W, H) * 0.62, 0.10);
+    stamp(glowCool, W * 0.5, H * 0.42, Math.max(W, H) * 0.55, 0.05);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  function drawBubblesFor(gl) {
+    const bottom = bowlBottomY(gl);
+    for (const b of bubbles) {
+      if (b.gl !== gl) continue;
+      const sy = surfaceY(gl, gl.level);
+      const t = clamp((bottom - b.y) / ((bottom - sy) || 1), 0, 1);
+      // Fade in as it leaves the base, brightest mid-rise, out at the surface.
+      const a = 0.16 + 0.52 * smoothstep(Math.min(t * 2.0, (1 - t) * 3.2));
+      const idx = b.rpx > 3.0 ? 2 : b.rpx > 2.2 ? 1 : 0;
+      stamp(bubbleSprites[idx], b.x, b.y, b.rpx * 6.2, a);
+    }
+  }
+
+  resize();
+  nextPour = 0.6;
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
