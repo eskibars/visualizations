@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>First Light</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0d16; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 130% 105% at 50% 44%,
+        rgba(0,0,0,0) 44%, rgba(0,0,0,.30) 82%, rgba(0,0,0,.72) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(255, 226, 190, .30);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">the city before the city wakes</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  FIRST LIGHT — an empty city street at dawn. The towers on
+  //  both sides climb out of frame so the street reads as a
+  //  canyon; a mast crane swings its jib slowly; office windows
+  //  come on in ones and twos as the whole frame warms from blue
+  //  shadow to pale gold.
+  //
+  //  Construction notes
+  //  ------------------
+  //  The lighting schedule is the spine of the piece: one value
+  //  runs the sky gradient, the ground wash, the tower tints and
+  //  the window colour, so nothing can drift out of step. Tower
+  //  geometry and the crane are generated once per resize; only
+  //  the window grid's lit set and the sun's height change per
+  //  frame, and windows are drawn as sprites rather than gradients.
+  // ============================================================
+  const CONFIG = {
+    //  Small warm sprites over a static canyon; 2x buys nothing visible here.
+    dprCap: 1.6,
+
+    vpY: 0.66,               // horizon / vanishing point height
+    towerLayers: [
+      { depth: 0.0, w: [0.16, 0.30], h: [0.46, 0.86], lit: 0.09, tint: 0.30 },
+      { depth: 0.45, w: [0.11, 0.20], h: [0.28, 0.54], lit: 0.13, tint: 0.62 },
+      { depth: 0.80, w: [0.07, 0.13], h: [0.16, 0.34], lit: 0.18, tint: 0.92 },
+    ],
+    //  How much of the frame the towers may occupy, leaving clear sky above and
+    //  a street band below. Without these the towers tile the whole viewport and
+    //  the piece reads as a texture rather than as a street.
+    skyBand: 0.30,
+    streetBand: 0.20,
+    //  Every tower stands on the same street line, as buildings seen from the
+    //  pavement do. Depth changes size, haze and tint -- not the ground line.
+    towerGap: [0.004, 0.024],
+
+    dawnSeconds: 42,         // one pass from night to morning
+    //  Windows are the piece's heartbeat: a screensaver has to look alive in
+    //  the first seconds, not after a minute. Groups change often enough to be
+    //  seen, and a whole column relights at once so the eye catches it.
+    windowFlickerMin: 2.6,   // seconds between window changes
+    windowBurst: [2, 7],     // windows changed per event
+    windowColumnChance: 0.30,
+    craneSway: 0.035,        // radians of jib swing
+    craneSwaySeconds: 26,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  function smoothstep(t) { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); }
+
+  // ---------------- sprites ----------------
+  function dot(r, g, b) {
+    const s = 32;
+    const c = document.createElement('canvas');
+    c.width = c.height = s;
+    const x = c.getContext('2d');
+    const grad = x.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    grad.addColorStop(0, `rgba(${r},${g},${b},1)`);
+    grad.addColorStop(0.34, `rgba(${r},${g},${b},0.72)`);
+    grad.addColorStop(0.7, `rgba(${r},${g},${b},0.16)`);
+    grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    x.fillStyle = grad;
+    x.fillRect(0, 0, s, s);
+    return c;
+  }
+
+  let winWarm, winCool, winDim, glowSun;
+
+  function buildSprites() {
+    winWarm = dot(255, 214, 152);
+    winCool = dot(210, 232, 255);
+    winDim = dot(255, 238, 210);
+    glowSun = dot(255, 232, 190);
+  }
+
+  // ---------------- palette ----------------
+  //  Sampled at dawnT: 0 is deep night blue, 1 is pale gold morning.
+  //  Each stop is [sky top, sky bottom, ground wash, rgba tint for towers].
+  const KEYS = [
+    { t: 0.00, top: [10, 16, 40], bot: [26, 34, 66], wash: [24, 34, 66], washA: 0.32, farm: 0.00 },
+    { t: 0.34, top: [28, 38, 74], bot: [92, 78, 96], wash: [78, 74, 96], washA: 0.30, farm: 0.10 },
+    { t: 0.62, top: [58, 76, 118], bot: [214, 148, 118], wash: [186, 136, 118], washA: 0.28, farm: 0.42 },
+    { t: 0.82, top: [104, 132, 168], bot: [246, 208, 168], wash: [232, 194, 164], washA: 0.26, farm: 0.72 },
+    { t: 1.00, top: [150, 178, 202], bot: [255, 240, 214], wash: [248, 232, 208], washA: 0.24, farm: 1.00 },
+  ];
+
+  function palette(t) {
+    let i = 0;
+    while (i < KEYS.length - 2 && t > KEYS[i + 1].t) i++;
+    const a = KEYS[i], b = KEYS[i + 1];
+    const k = smoothstep((t - a.t) / Math.max(1e-6, b.t - a.t));
+    const mix = (x, y) => [
+      Math.round(lerp(x[0], y[0], k)),
+      Math.round(lerp(x[1], y[1], k)),
+      Math.round(lerp(x[2], y[2], k)),
+    ];
+    return {
+      ttop: mix(a.top, b.top),
+      top: mix(a.top, b.top),
+      bot: mix(a.bot, b.bot),
+      wash: mix(a.wash, b.wash),
+      washA: lerp(a.washA, b.washA, k),
+      farm: lerp(a.farm, b.farm, k),
+    };
+  }
+
+  // ---------------- geometry ----------------
+  //  Each tower is a plain box with a small window grid, all standing on one
+  //  street line. Depth drives size, haze and tint only.
+  let towers = [];
+  let crane = null;
+
+  function buildCity() {
+    towers = [];
+    //  All towers share one ground line, and the street band below it stays
+    //  clear. An earlier version varied the base by depth, which made the lower
+    //  half of the frame a single undifferentiated mass of facades.
+    const groundY = H * (1 - CONFIG.streetBand);
+    const roofCeiling = H * CONFIG.skyBand;
+
+    for (let layerIndex = 0; layerIndex < CONFIG.towerLayers.length; layerIndex++) {
+      const L = CONFIG.towerLayers[layerIndex];
+      const maxH = Math.max(H * 0.10, groundY - roofCeiling * lerp(1.0, 1.7, L.depth));
+      const floorH = H * 0.16;               // shortest a tower may be
+
+      let x = -W * 0.08;
+      while (x < W * 1.08) {
+        const bw = rand(L.w[0], L.w[1]) * W;
+        //  Between a floor and the ceiling, with a bias toward middling
+        //  heights: drawing uniformly in the band produced a flat wall of
+        //  equal boxes. A small kept-out fraction gives a real skyline rhythm.
+        const t = Math.pow(Math.random(), 1.5);
+        const bh = Math.max(floorH, Math.min(maxH, floorH + (maxH - floorH) * t));
+        //  Some towers are low blocks instead of slabs, so the silhouette
+        //  steps up and down across the frame.
+        const lowBlock = Math.random() < 0.22;
+        //  Windows are small panes in a grid: the cell is a fraction of the
+        //  face, and the glow sprite stays close to the cell so neighbouring
+        //  windows read as separate points of light rather than as a wash.
+        const height = lowBlock ? Math.min(bh, floorH * rand(0.55, 0.85)) : bh;
+        const winCols = Math.max(3, Math.round(bw / (W * 0.010)));
+        const winRows = Math.max(4, Math.round(height / (H * 0.022)));
+        //  Windows occupy less than half the face, so the tower reads as a dark
+        //  slab with lit panes rather than as a grid of light.
+        const winW = (bw * 0.44) / winCols;
+        const winH = (height * 0.38) / winRows;
+
+        const wins = [];
+        for (let c = 0; c < winCols; c++) {
+          for (let r = 0; r < winRows; r++) {
+            wins.push({
+              // Stored as fractions of the tower's window grid.
+              fx: (c + 1) / (winCols + 1),
+              fy: (r + 1) / (winRows + 1),
+              on: Math.random() < L.lit,
+              // Warm office light, or the cooler glow of a screen.
+              cool: Math.random() < 0.30,
+              a: rand(0.40, 0.85),
+            });
+          }
+        }
+
+        towers.push({
+          layer: layerIndex,
+          depth: L.depth,
+          x, bw, bh: height,
+          baseY: groundY,
+          wins,
+          winW, winH,
+          // A parapet or roof plant, so the roofline is not a flat bar.
+          roof: Math.random() < 0.42 ? rand(0.006, 0.018) * H : 0,
+          lit: L.lit,
+          tint: L.tint,
+        });
+        x += bw + rand(CONFIG.towerGap[0], CONFIG.towerGap[1]) * W;
+      }
+    }
+
+    // A mast crane on the far side, silhouetted against the light.
+    const craneX = W * rand(0.62, 0.80);
+    const mh = H * rand(0.40, 0.52);
+    crane = {
+      x: craneX,
+      baseY: groundY,
+      h: mh,
+      jib: W * rand(0.10, 0.15),
+      phase: rand(0, Math.PI * 2),
+    };
+  }
+
+  // ---------------- backdrop ----------------
+  //  Sky, ground wash and the towers' bodies are static except for the
+  //  palette, which changes with dawnT. Repainting a 60-stop gradient every
+  //  frame would be wasteful, so the backdrop is rebuilt only when dawnT has
+  //  moved enough to matter.
+  let backdrop = null;
+  let backdropT = -1;
+
+  function paintBackdrop(pal) {
+    if (!backdrop) backdrop = document.createElement('canvas');
+    if (backdrop.width !== Math.floor(W * DPR) || backdrop.height !== Math.floor(H * DPR)) {
+      backdrop.width = Math.max(1, Math.floor(W * DPR));
+      backdrop.height = Math.max(1, Math.floor(H * DPR));
+    }
+    const g = backdrop.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+    g.clearRect(0, 0, W, H);
+
+    const vpY = H * CONFIG.vpY;
+
+    // Sky: warm at the horizon, cooler above, deepened at the top.
+    const sky = g.createLinearGradient(0, 0, 0, vpY);
+    sky.addColorStop(0, `rgb(${pal.top[0] * 0.62 | 0}, ${pal.top[1] * 0.62 | 0}, ${pal.top[2] * 0.70 | 0})`);
+    sky.addColorStop(0.55, `rgb(${pal.top[0]}, ${pal.top[1]}, ${pal.top[2]})`);
+    sky.addColorStop(1, `rgb(${pal.bot[0]}, ${pal.bot[1]}, ${pal.bot[2]})`);
+    g.fillStyle = sky;
+    g.fillRect(0, 0, W, vpY);
+
+    // Ground: the street, brightening toward the vanishing point.
+    const ground = g.createLinearGradient(0, vpY, 0, H);
+    ground.addColorStop(0, `rgb(${pal.wash[0]}, ${pal.wash[1]}, ${pal.wash[2]})`);
+    ground.addColorStop(0.30, `rgb(${pal.wash[0] * 0.6 | 0}, ${pal.wash[1] * 0.6 | 0}, ${pal.wash[2] * 0.62 | 0})`);
+    ground.addColorStop(1, `rgb(${pal.wash[0] * 0.30 | 0}, ${pal.wash[1] * 0.30 | 0}, ${pal.wash[2] * 0.34 | 0})`);
+    g.fillStyle = ground;
+    g.fillRect(0, vpY, W, H - vpY);
+
+    // Towers, far layer first so near ones overlap.
+    const ordered = towers.slice().sort((a, b) => a.depth - b.depth);
+    for (const t of ordered) {
+      const top = t.baseY - t.bh;
+      // silhouette is visible without turning the city into a black band.
+      // Body: reads as a building in shadow, a few shades off the sky so the
+      // silhouette is visible without turning the city into a black band.
+      const bodyR = Math.round(pal.ttop[0] * 0.55 + pal.wash[0] * t.tint * 0.12);
+      const bodyG = Math.round(pal.ttop[1] * 0.55 + pal.wash[1] * t.tint * 0.12);
+      const bodyB = Math.round(pal.ttop[2] * 0.60 + pal.wash[2] * t.tint * 0.14);
+      g.fillStyle = `rgb(${bodyR}, ${bodyG}, ${bodyB})`;
+      g.fillRect(t.x, top, t.bw, t.bh + (H - t.baseY));
+
+      // A parapet line on top, so the roofline reads as a building edge.
+      g.fillStyle = 'rgba(255, 255, 255, 0.05)';
+      g.fillRect(t.x, top, t.bw, Math.max(1, H * 0.0016));
+
+      // A lit edge on the side facing the sun, which is off to the right.
+      g.fillStyle = `rgba(${pal.bot[0]}, ${pal.bot[1]}, ${pal.bot[2]}, ${0.10 + 0.14 * pal.farm * (1 - t.depth)})`;
+      g.fillRect(t.x + t.bw * 0.86, top, t.bw * 0.14, t.bh + (H - t.baseY));
+
+      if (t.roof) {
+        g.fillRect(t.x + t.bw * 0.34, top - t.roof, t.bw * 0.30, t.roof);
+      }
+
+      // Faint window recesses, so unlit windows are not invisible.
+      g.fillStyle = 'rgba(0, 0, 0, 0.22)';
+      for (const w of t.wins) {
+        g.fillRect(t.x + t.bw * w.fx - t.winW / 2, top + t.bh * w.fy - t.winH / 2, t.winW, t.winH);
+      }
+    }
+
+    // Street haze pooling at the vanishing point.
+    const haze = g.createRadialGradient(W * 0.5, vpY, 0, W * 0.5, vpY, W * 0.40);
+    haze.addColorStop(0, `rgba(${pal.bot[0]}, ${pal.bot[1]}, ${pal.bot[2]}, ${0.30 * (0.35 + pal.farm)})`);
+    haze.addColorStop(0.45, `rgba(${pal.bot[0]}, ${pal.bot[1]}, ${pal.bot[2]}, 0.10)`);
+    haze.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = haze;
+    g.fillRect(0, 0, W, vpY * 1.5);
+
+    backdropT = pal.t;
+  }
+
+  //  The crane is drawn per frame rather than baked into the backdrop, because
+  //  it has to move. Baking it made its sway phase a constant, so it never did.
+  function drawCrane(time) {
+    if (!crane) return;
+    const sway = Math.sin((time / CONFIG.craneSwaySeconds) * Math.PI * 2) * CONFIG.craneSway;
+    const hx = crane.x + Math.sin(sway * 0.4) * crane.h * 0.05;
+    const topY = crane.baseY - crane.h;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(10, 12, 24, 0.82)';
+    ctx.lineWidth = Math.max(1.4, U * 0.0020);
+    ctx.beginPath();
+    ctx.moveTo(crane.x, crane.baseY);
+    ctx.lineTo(hx, topY);
+    ctx.stroke();
+    ctx.translate(hx, topY);
+    ctx.rotate(sway);
+    ctx.beginPath();
+    ctx.moveTo(crane.jib, 0);
+    ctx.lineTo(-crane.jib * 0.34, 0);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(crane.jib * 0.86, 0);
+    ctx.lineTo(0, -crane.h * 0.16);
+    ctx.lineTo(-crane.jib * 0.28, 0);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(crane.jib * 0.55, 0);
+    ctx.lineTo(crane.jib * 0.55, crane.h * 0.22);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // ---------------- loop ----------------
+  let last = performance.now();
+  let nextWindowChange = 0;
+  let ready = false;
+  const start = performance.now();
+
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.max(1, Math.floor(window.innerWidth));
+    H = Math.max(1, Math.floor(window.innerHeight));
+    U = Math.min(W, H);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    buildSprites();
+    buildCity();
+    backdropT = -1;                  // force a repaint at the new size
+  }
+  window.addEventListener('resize', resize, { passive: true });
+
+  function frame(now) {
+    const time = (now - start) / 1000;
+    last = now;
+
+    // dawnT cycles, but spends longer in the warm middle of the range where
+    // most of the visual change lives.
+    const raw = (time % CONFIG.dawnSeconds) / CONFIG.dawnSeconds;
+    const dawnT = smoothstep(raw);
+
+    const pal = palette(dawnT);
+    pal.t = dawnT;
+    // Repaint the backdrop when the palette has moved enough to be visible.
+    if (backdropT < 0 || Math.abs(dawnT - backdropT) > 0.0035) paintBackdrop(pal);
+
+    // Windows switch on and off in small groups, never all at once.
+    if (time >= nextWindowChange) {
+      nextWindowChange = time + rand(CONFIG.windowFlickerMin * 0.5, CONFIG.windowFlickerMin);
+      const changes = CONFIG.windowBurst[0] + ((Math.random() * (CONFIG.windowBurst[1] - CONFIG.windowBurst[0] + 1)) | 0);
+      const host = towers[(Math.random() * towers.length) | 0];
+      if (host && host.wins.length) {
+        if (Math.random() < CONFIG.windowColumnChance) {
+          // A whole stack relights, as a floor of offices would.
+          const col = 0.1 + Math.random() * 0.8;
+          let n = 0;
+          for (let i = 0; i < host.wins.length && n < 9; i++) {
+            const w = host.wins[i];
+            if (Math.abs(w.fx - col) > 0.10) continue;
+            w.on = Math.random() < 0.7 ? true : w.on;
+            n++;
+          }
+        }
+        for (let i = 0; i < changes; i++) {
+          const w = host.wins[(Math.random() * host.wins.length) | 0];
+          w.on = !w.on;
+        }
+      }
+    }
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.drawImage(backdrop, 0, 0, W, H);
+    drawCrane(time);
+
+    // Lit windows, additive so they read as light rather than as paint.
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const vpY = H * CONFIG.vpY;
+    for (const t of towers) {
+      const top = t.baseY - t.bh;
+      const depthFade = lerp(0.45, 1.0, t.depth);      // far towers are hazier
+      for (const w of t.wins) {
+        if (!w.on) continue;
+        const x = t.x + t.bw * w.fx;
+        const y = top + t.bh * w.fy;
+        // Windows brighten as the light comes up, then are washed out by it.
+        const dayFade = lerp(1.0, 0.45, pal.farm);
+        const a = w.a * depthFade * dayFade * 0.75;
+        if (a < 0.02) continue;
+        const spr = w.cool ? winCool : winWarm;
+        //  The glow is a tight bloom only slightly larger than the pane itself.
+        //  Bigger sprites made neighbouring windows merge into a continuous wash.
+        const s = Math.max(2, t.winW * 1.55);
+        ctx.globalAlpha = a;
+        ctx.drawImage(spr, x - s / 2, y - s / 2, s, s);
+      }
+    }
+
+    // The sun itself: below the horizon line early, rising through the dawn.
+    const sunX = W * 0.5 + Math.sin(dawnT * Math.PI) * W * 0.04;
+    const sunY = vpY + H * 0.10 - dawnT * H * 0.16;
+    const sunS = U * lerp(0.30, 0.46, pal.farm);
+    ctx.globalAlpha = 0.10 + 0.42 * pal.farm;
+    ctx.drawImage(glowSun, sunX - sunS / 2, sunY - sunS / 2, sunS, sunS);
+    ctx.restore();
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
