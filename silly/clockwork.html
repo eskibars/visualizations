@@ -29,6 +29,7 @@
   const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
   let W = 0, H = 0, DPR = 1;
+  let sceneTimer = 0;
 
   let gears = [];
   let rods = [];
@@ -54,7 +55,10 @@
     canvas.width = Math.floor(W * DPR);
     canvas.height = Math.floor(H * DPR);
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-    buildScene();
+    // buildScene() walks every gear and linkage; defer it so a window drag does
+    // not re-run it dozens of times per second.
+    clearTimeout(sceneTimer);
+    sceneTimer = setTimeout(buildScene, 160);
   }
 
   window.addEventListener('resize', resize, { passive: true });
@@ -705,6 +709,10 @@
   }
 
   resize();
+  // Boot must not wait for the debounce, or the first frames would run against
+  // an empty scene.
+  clearTimeout(sceneTimer);
+  buildScene();
   requestAnimationFrame(frame);
 })();
 </script>

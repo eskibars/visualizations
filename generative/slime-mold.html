@@ -257,13 +257,13 @@
 
   // -------------------- render --------------------
   //
-  //  A bounded recomposite (only the cells the agents just wrote) would be
-  //  wrong here: the diffusion pass rewrites every cell and decays the whole
-  //  field each frame, and putImageData is clipped to the canvas, so a
-  //  shrinking bound would leave stale pixels and freeze the outer margin. The
-  //  full pass over the sim grid is cheap next to stepping 320k agents, which is
-  //  what actually limits this page; adapt() below trims the agent count to hold
-  //  the frame budget on slower devices.
+  //  The trail field is recomposited in full every frame. Tracking only the
+  //  agents' cells was considered and rejected: the diffusion pass rewrites every
+  //  cell and decays the whole field, and putImageData is clipped to the canvas,
+  //  so a shrinking dirty rectangle leaves stale pixels and freezes the outer
+  //  margin. The full pass over the sim grid is cheap next to stepping the
+  //  agents, which is what limits this page; adapt() trims the agent count to
+  //  hold the frame budget on slower devices.
   function render() {
     const d = img.data;
 

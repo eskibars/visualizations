@@ -146,11 +146,20 @@ function buildSkyline() {
   function rand(a,b){ return a + Math.random()*(b-a); }
   function clamp(x,a,b){ return Math.max(a, Math.min(b,x)); }
 
+  //  The offscreen bokeh layers are the expensive part of a resize: each one is
+  //  blurred with ctx.filter over the whole canvas, and buildSkyline() walks the
+  //  full width. Rebuilding them on *every* resize event is what made this page
+  //  feel heavy, because a resize fires continuously while a window is dragged
+  //  or a tablet rotates. The layers are cheap to keep and merely need to be
+  //  redrawn at a new size, so the work is deferred to the end of the gesture.
+  let relayoutTimer = 0;
+
   function resize(){
     DPR = Math.min(CFG.dprCap, window.devicePixelRatio || 1);
     W = Math.max(1, Math.floor(window.innerWidth));
     H = Math.max(1, Math.floor(window.innerHeight));
 
+    // Canvas size only: no blur, no skyline walk, safe on every event.
     for (const cnv of [cityCanvas, rainCanvas]){
       cnv.width  = Math.floor(W * DPR);
       cnv.height = Math.floor(H * DPR);
@@ -160,17 +169,27 @@ function buildSkyline() {
 
     // Offscreen canvases at reduced res (big speed win)
     const scale = 0.55;
-    offFar = document.createElement('canvas');
-    offNear = document.createElement('canvas');
+    if (!offFar) {
+      offFar = document.createElement('canvas');
+      offNear = document.createElement('canvas');
+      offFarCtx = offFar.getContext('2d', { alpha: true });
+      offNearCtx = offNear.getContext('2d', { alpha: true });
+    }
     offFar.width = Math.floor(W * scale);
     offFar.height = Math.floor(H * scale);
     offNear.width = Math.floor(W * scale);
     offNear.height = Math.floor(H * scale);
-    offFarCtx = offFar.getContext('2d', { alpha: true });
-    offNearCtx = offNear.getContext('2d', { alpha: true });
 
+    // Debounce the expensive rebuild until the gesture settles.
+    clearTimeout(relayoutTimer);
+    relayoutTimer = setTimeout(relayout, 160);
+  }
+
+  //  Everything that depends on the canvas being at its final size. Calling this
+  //  mid-gesture would just throw the work away on the next resize event.
+  function relayout(){
     buildSkyline();
-    buildCityLayers(scale);
+    buildCityLayers(offFar.width / W);
     buildNoise();
     initRain();
   }
@@ -516,6 +535,10 @@ function buildSkyline() {
   }
 
   resize();
+  // The initial layout must not wait for the debounce, or the first frames
+  // would run against empty offscreen layers.
+  clearTimeout(relayoutTimer);
+  relayout();
   requestAnimationFrame(frame);
 })();
 </script>

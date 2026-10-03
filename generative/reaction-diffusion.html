@@ -61,8 +61,9 @@
     minStepsPerFrame: 1,
     maxStepsPerFrame: 22,
     simBudgetMs: 13,        // hard ceiling on simulation time per frame
-    warmupSteps: 2600,      // substeps run before the first paint
-    warmupBudgetMs: 1500,
+    warmupSteps: 2600,      // substeps run before the pattern is mature
+    warmupMaxMs: 4000,      // wall-clock ceiling on finishing that warmup
+    primeSteps: 120,        // run synchronously so the first paint has structure
 
     // --- growth schedule (seconds) ----------------------------
     holdSeconds: 78,        // sit on one regime
@@ -561,21 +562,26 @@
 
     // Two jobs: develop the colony so the first paint is a mature
     // pattern rather than bare droplets, and measure the machine.
-    // The budget is wall-clock, so a machine that cannot afford a
-    // long warmup simply gets fewer steps instead of a frozen tab.
+    //
+    // Only a short prime runs synchronously. A wall-clock budget cannot bound
+    // the rest, because the substeps are GPU draws that queue asynchronously: on
+    // a software or very weak context the driver returns from each draw
+    // immediately while the real work piles up, so a "check the clock every few
+    // steps" loop still blocks the main thread for many seconds and the page
+    // shows nothing. Measured at 17.6 s for the full 2600 steps under an
+    // unaccelerated context. The remainder of the warmup is therefore spread
+    // across the first frames, where it doubles as visible growth.
     let warmupSteps = 0;
     let msPerStep = 0;
-    (function warmup() {
+    const PRIME_STEPS = 120;
+    {
       const t0 = performance.now();
-      const batch = 40;
-      while (warmupSteps < CONFIG.warmupSteps) {
-        for (let i = 0; i < batch; i++) step();
-        warmupSteps += batch;
-        if (performance.now() - t0 > CONFIG.warmupBudgetMs) break;
-      }
-      const elapsed = performance.now() - t0;
-      msPerStep = elapsed / Math.max(1, warmupSteps);
-    })();
+      for (let i = 0; i < PRIME_STEPS; i++) step();
+      warmupSteps = PRIME_STEPS;
+      msPerStep = (performance.now() - t0) / PRIME_STEPS;
+    }
+    let warmupRemaining = Math.max(0, CONFIG.warmupSteps - PRIME_STEPS);
+    let warmupDeadline = performance.now() + CONFIG.warmupMaxMs;
 
     // --- running order ----------------------------------------
     let regimeIndex = startRegime, phase = "hold", phaseStart = performance.now();
@@ -643,12 +649,20 @@
 
     function runSteps() {
       const t0 = performance.now();
-      for (let i = 0; i < steps; i++) {
+      let budget = steps;
+      // While the warmup is still being paid off, run extra substeps so the
+      // colony develops on screen instead of during a blank first second.
+      if (warmupRemaining > 0 && performance.now() < warmupDeadline) {
+        budget = Math.min(CONFIG.maxStepsPerFrame + warmupRemaining, budget + steps);
+      }
+      for (let i = 0; i < budget; i++) {
         step();
+        if (warmupRemaining > 0) warmupRemaining--;
         // Reading the clock every step costs more than the step
         // does, so only check the budget every few substeps.
         if ((i & 3) === 3 && performance.now() - t0 > CONFIG.simBudgetMs) break;
       }
+      if (warmupRemaining > 0 && performance.now() >= warmupDeadline) warmupRemaining = 0;
     }
 
     function frame(now) {
@@ -754,25 +768,40 @@
     }
     setRegime(0, phaseStart);
 
-    // ~1500 substeps to develop, then hand over to the frame loop.
-    for (let s = 0; s < 900; s++) {
-      for (let y = 1; y < gh - 1; y++) {
-        for (let x = 1; x < gw - 1; x++) {
-          const i = y * gw + x;
-          const a = A[i], b = B[i];
-          const lapA = (A[i - 1] + A[i + 1] + A[i - gw] + A[i + gw]) * 0.2
-            + (A[i - gw - 1] + A[i - gw + 1] + A[i + gw - 1] + A[i + gw + 1]) * 0.05 - a;
-          const lapB = (B[i - 1] + B[i + 1] + B[i - gw] + B[i + gw]) * 0.2
-            + (B[i - gw - 1] + B[i - gw + 1] + B[i + gw - 1] + B[i + gw + 1]) * 0.05 - b;
-          const re = a * b * b;
-          A2[i] = a + (lapA - re + feed * (1 - a));
-          B2[i] = b + (0.5 * lapB + re - (kill + feed) * b);
+    // Develop the colony before the first paint, so the piece opens on a mature
+    // pattern rather than bare droplets.
+    //
+    // This used to be an unconditional 900 steps over the whole dish, run
+    // synchronously. That is 900 x gw x gh cell updates in one uninterruptible
+    // block — measured at 17.6 s at 240p, during which the page appears hung.
+    // Any device that lands on this path (WebGL2 float rendering unavailable)
+    // saw a blank screen for that long. The budget is now wall-clock, checked
+    // every few steps, so the warmup gives way to the frame loop instead of
+    // owning the main thread.
+    const cpuWarmupBudgetMs = 700;
+    (function warmupCPU() {
+      const t0 = performance.now();
+      const deadline = t0 + cpuWarmupBudgetMs;
+      for (let s = 0; s < 900; s++) {
+        for (let y = 1; y < gh - 1; y++) {
+          for (let x = 1; x < gw - 1; x++) {
+            const i = y * gw + x;
+            const a = A[i], b = B[i];
+            const lapA = (A[i - 1] + A[i + 1] + A[i - gw] + A[i + gw]) * 0.2
+              + (A[i - gw - 1] + A[i - gw + 1] + A[i + gw - 1] + A[i + gw + 1]) * 0.05 - a;
+            const lapB = (B[i - 1] + B[i + 1] + B[i - gw] + B[i + gw]) * 0.2
+              + (B[i - gw - 1] + B[i - gw + 1] + B[i + gw - 1] + B[i + gw + 1]) * 0.05 - b;
+            const re = a * b * b;
+            A2[i] = a + (lapA - re + feed * (1 - a));
+            B2[i] = b + (0.5 * lapB + re - (kill + feed) * b);
+          }
         }
+        for (let x = 0; x < gw; x++) { A2[x] = A[x]; B2[x] = B[x]; const i = (gh - 1) * gw + x; A2[i] = A[i]; B2[i] = B[i]; }
+        for (let y = 0; y < gh; y++) { const i = y * gw; A2[i] = A[i]; B2[i] = B[i]; const j = i + gw - 1; A2[j] = A[j]; B2[j] = B[j]; }
+        let t = A; A = A2; A2 = t; t = B; B = B2; B2 = t;
+        if ((s & 3) === 3 && performance.now() > deadline) break;
       }
-      for (let x = 0; x < gw; x++) { A2[x] = A[x]; B2[x] = B[x]; const i = (gh - 1) * gw + x; A2[i] = A[i]; B2[i] = B[i]; }
-      for (let y = 0; y < gh; y++) { const i = y * gw; A2[i] = A[i]; B2[i] = B[i]; const j = i + gw - 1; A2[j] = A[j]; B2[j] = B[j]; }
-      let t = A; A = A2; A2 = t; t = B; B = B2; B2 = t;
-    }
+    })();
 
     const gl3 = [0, 0, 0];
     function glazeAt(t, out) {

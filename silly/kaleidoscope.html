@@ -52,6 +52,7 @@
   // rather than toward the background), so only alpha >= 0.99 is cached.
   const CACHE_MAX = 6;
   let rotCache = [];
+  let patternTimer = 0;
 
   function createOffscreen(size) {
     const c = document.createElement('canvas');
@@ -316,12 +317,19 @@
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     R = Math.min(W, H) * 0.48;
 
-    // Regenerate patterns at new size
-    patternA = generatePattern(Math.floor(R * 2));
-    patternB = generatePattern(Math.floor(R * 2));
+    // Regenerating the wedge patterns walks a clipped shape list twice, which
+    // is far too much to do on every resize event while a window is dragged.
+    // The canvas itself must resize immediately (otherwise the frame stretches),
+    // so only the pattern rebuild is deferred until the gesture settles.
     clearRotCache();
-    state = STATE.HOLDING;
-    stateTimer = 0;
+    clearTimeout(patternTimer);
+    patternTimer = setTimeout(() => {
+      patternA = generatePattern(Math.floor(R * 2));
+      patternB = generatePattern(Math.floor(R * 2));
+      clearRotCache();
+      state = STATE.HOLDING;
+      stateTimer = 0;
+    }, 160);
   }
   window.addEventListener('resize', resize, { passive: true });
 
