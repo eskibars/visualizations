@@ -1,0 +1,631 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Cozy Window</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #140c07; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 130% 105% at 46% 46%,
+        rgba(0,0,0,0) 44%, rgba(0,0,0,.34) 84%, rgba(0,0,0,.78) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(255, 210, 150, .28);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">the kettle's on</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  COZY WINDOW — October, from indoors. Dusk through the
+  //  glass: bare trees, a cottage lighting its windows, the
+  //  first stars. On the glass itself, breath-fog that comes
+  //  and goes, a droplet that picks its way down every so
+  //  often, and the room's lamp floating in the reflections.
+  //  On the sill, a mug works on its steam.
+  //
+  //  Construction notes
+  //  ------------------
+  //  Room, frame and the view are static layers painted per
+  //  resize; the view is clipped to the opening. Condensation
+  //  lives on its own offscreen canvas so the sliding droplets
+  //  can erase their trails out of it with destination-out —
+  //  the fog thins where the drop has been, exactly like the
+  //  real thing — and it re-fogs by slowly painting itself
+  //  back. Steam and the lamp bokeh are the shared glow
+  //  sprites; the leaf that flutters past outside is a pooled
+  //  guest from the field pieces.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1.6,
+
+    frame: { x0: 0.155, x1: 0.845, y0: 0.075, y1: 0.775 },
+    sillY: 0.845,
+
+    fogBlobs: 26,
+    dropletGap: [7, 18],
+    leafGap: [9, 22],
+    steamRate: 9,          // particles per second
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  function noise1(x) {
+    const i = Math.floor(x), f = x - i;
+    const h = (n) => {
+      const s = Math.sin(n * 127.1 + 311.7) * 43758.5453;
+      return s - Math.floor(s);
+    };
+    const u = f * f * f * (f * (f * 6 - 15) + 10);
+    return h(i) * (1 - u) + h(i + 1) * u;
+  }
+  const fbm1 = (x) => 0.6 * noise1(x) + 0.4 * noise1(x * 2.13 + 7.7);
+
+  function makeGlow(r, g, b) {
+    const s = 128, c = document.createElement('canvas');
+    c.width = c.height = s;
+    const g2 = c.getContext('2d');
+    const grad = g2.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    grad.addColorStop(0, `rgba(${r},${g},${b},1)`);
+    grad.addColorStop(0.25, `rgba(${r},${g},${b},.55)`);
+    grad.addColorStop(0.6, `rgba(${r},${g},${b},.16)`);
+    grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    g2.fillStyle = grad;
+    g2.fillRect(0, 0, s, s);
+    return c;
+  }
+  const glowSteam = makeGlow(235, 228, 220);
+  const glowBokeh = makeGlow(255, 186, 100);
+  const glowLamp = makeGlow(255, 196, 120);
+  const glowWindowLight = makeGlow(255, 210, 130);
+
+  function stampAt(g, sprite, x, y, size, alpha) {
+    if (alpha <= 0.004) return;
+    g.globalAlpha = Math.min(1, alpha);
+    g.drawImage(sprite, x - size / 2, y - size / 2, size, size);
+    g.globalAlpha = 1;
+  }
+
+  // -------------------- geometry --------------------
+  let fx0, fx1, fy0, fy1, sillY, panes;
+  function layout() {
+    fx0 = W * CONFIG.frame.x0; fx1 = W * CONFIG.frame.x1;
+    fy0 = H * CONFIG.frame.y0; fy1 = H * CONFIG.frame.y1;
+    sillY = H * CONFIG.sillY;
+    // 2 x 3 panes: centre mullion + two transoms
+    panes = [];
+    const cols = [fx0, (fx0 + fx1) / 2, fx1];
+    const rows = [fy0, fy0 + (fy1 - fy0) / 3, fy0 + 2 * (fy1 - fy0) / 3, fy1];
+    for (let c = 0; c < 2; c++)
+      for (let r = 0; r < 3; r++)
+        panes.push({ x0: cols[c], x1: cols[c + 1], y0: rows[r], y1: rows[r + 1] });
+  }
+  function mullionW() { return Math.max(6, 14 * U); }
+
+  // -------------------- static: view outside --------------------
+  let viewLayer;
+  function paintView() {
+    viewLayer = document.createElement('canvas');
+    viewLayer.width = Math.floor(W * DPR); viewLayer.height = Math.floor(H * DPR);
+    const g = viewLayer.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    // dusk gradient
+    const grad = g.createLinearGradient(0, fy0, 0, fy1);
+    grad.addColorStop(0, '#1a2038');
+    grad.addColorStop(0.55, '#33304e');
+    grad.addColorStop(0.8, '#5c4356');
+    grad.addColorStop(1, '#7a5560');
+    g.fillStyle = grad;
+    g.fillRect(fx0, fy0, fx1 - fx0, fy1 - fy0);
+
+    // stars in the upper panes
+    for (let i = 0; i < 60; i++) {
+      const y = fy0 + Math.pow(Math.random(), 1.6) * (fy1 - fy0) * 0.45;
+      const x = rand(fx0, fx1);
+      g.fillStyle = `rgba(225, 230, 255, ${rand(0.15, 0.6).toFixed(2)})`;
+      g.fillRect(x, y, Math.random() < 0.15 ? 1.6 * U : 1 * U, 1 * U);
+    }
+
+    // slim crescent, upper right pane area
+    const mx = fx0 + (fx1 - fx0) * 0.72, my = fy0 + (fy1 - fy0) * 0.16, mr = 14 * U;
+    const mc = document.createElement('canvas');
+    mc.width = mc.height = Math.ceil(mr * 2 + 2);
+    const mg = mc.getContext('2d');
+    mg.fillStyle = '#f4e8c8';
+    mg.beginPath(); mg.arc(mr + 1, mr + 1, mr, 0, Math.PI * 2); mg.fill();
+    mg.globalCompositeOperation = 'destination-out';
+    mg.beginPath(); mg.arc(mr + 1 + mr * 0.46, mr + 1 - mr * 0.1, mr * 0.9, 0, Math.PI * 2); mg.fill();
+    g.drawImage(mc, mx - mr - 1, my - mr - 1);
+
+    // far hills
+    g.fillStyle = '#241f38';
+    g.beginPath();
+    g.moveTo(fx0, fy1);
+    for (let x = fx0; x <= fx1; x += 6) {
+      const t = (x - fx0) / (fx1 - fx0);
+      g.lineTo(x, fy1 - (fy1 - fy0) * 0.30
+        - Math.sin(t * 4.2 + 1) * (fy1 - fy0) * 0.035
+        - noise1(t * 3 + 4) * (fy1 - fy0) * 0.02);
+    }
+    g.lineTo(fx1, fy1);
+    g.closePath();
+    g.fill();
+
+    // the cottage: small, mid-left, two lit windows
+    const cx2 = fx0 + (fx1 - fx0) * 0.30, cy2 = fy1 - (fy1 - fy0) * 0.26;
+    const cs = (fx1 - fx0) * 0.052;
+    g.fillStyle = '#191528';
+    g.fillRect(cx2 - cs, cy2 - cs * 0.85, cs * 2, cs * 0.85);
+    g.beginPath();
+    g.moveTo(cx2 - cs * 1.18, cy2 - cs * 0.85);
+    g.lineTo(cx2, cy2 - cs * 1.55);
+    g.lineTo(cx2 + cs * 1.18, cy2 - cs * 0.85);
+    g.closePath();
+    g.fill();
+    // chimney + smoke (static wisp)
+    g.fillRect(cx2 + cs * 0.5, cy2 - cs * 1.5, cs * 0.2, cs * 0.45);
+    g.strokeStyle = 'rgba(180, 175, 200, .18)';
+    g.lineWidth = 3 * U;
+    g.beginPath();
+    g.moveTo(cx2 + cs * 0.6, cy2 - cs * 1.55);
+    g.bezierCurveTo(cx2 + cs * 0.2, cy2 - cs * 2.0, cx2 + cs * 1.1, cy2 - cs * 2.3, cx2 + cs * 0.7, cy2 - cs * 2.8);
+    g.stroke();
+    // lit windows + glow
+    for (const dx of [-0.45, 0.28]) {
+      const wx = cx2 + dx * cs, wy = cy2 - cs * 0.45;
+      stampAt(g, glowWindowLight, wx, wy, cs * 2.1, 0.30);
+      g.fillStyle = 'rgba(255, 202, 120, .92)';
+      g.fillRect(wx - cs * 0.16, wy - cs * 0.2, cs * 0.32, cs * 0.4);
+      g.fillStyle = 'rgba(40, 26, 12, .9)';
+      g.fillRect(wx - cs * 0.02, wy - cs * 0.2, cs * 0.04, cs * 0.4);
+    }
+
+    // near treeline + bare trees
+    g.fillStyle = '#12101f';
+    g.beginPath();
+    g.moveTo(fx0, fy1);
+    for (let x = fx0; x <= fx1; x += 6) {
+      const t = (x - fx0) / (fx1 - fx0);
+      g.lineTo(x, fy1 - (fy1 - fy0) * 0.16 - noise1(t * 5 + 8) * (fy1 - fy0) * 0.05);
+    }
+    g.lineTo(fx1, fy1);
+    g.closePath();
+    g.fill();
+
+    // two bare trees, one each side, reaching into the upper panes
+    bareTree(g, fx0 + (fx1 - fx0) * 0.115, fy1 - (fy1 - fy0) * 0.16, (fy1 - fy0) * 0.52, -0.12);
+    bareTree(g, fx0 + (fx1 - fx0) * 0.865, fy1 - (fy1 - fy0) * 0.15, (fy1 - fy0) * 0.42, 0.1);
+  }
+
+  function bareTree(g, x, y, h, lean) {
+    g.strokeStyle = '#0d0b18';
+    g.lineCap = 'round';
+    function branch(px, py, len, ang, w, depth) {
+      if (depth === 0 || len < 2) return;
+      const bend = rand(-0.1, 0.1);
+      const na = ang + bend + lean * 0.1;
+      const nx = px + Math.cos(na) * len;
+      const ny = py + Math.sin(na) * len;
+      g.lineWidth = Math.max(0.6, w);
+      g.beginPath(); g.moveTo(px, py); g.lineTo(nx, ny); g.stroke();
+      branch(nx, ny, len * rand(0.62, 0.78), na + rand(-0.34, 0.34) + (Math.random() < 0.5 ? -0.35 : 0.35) * (1 - depth / 6), w * 0.62, depth - 1);
+      if (depth <= 3) {
+        branch(nx, ny, len * rand(0.4, 0.55), na - 0.7, w * 0.5, depth - 1);
+        branch(nx, ny, len * rand(0.4, 0.55), na + 0.7, w * 0.5, depth - 1);
+      }
+    }
+    branch(x, y, h * 0.42, -Math.PI / 2 + lean * 0.3, Math.max(1.5, h * 0.028), 6);
+  }
+
+  // -------------------- static: room + frame --------------------
+  let roomLayer;
+  function paintRoom() {
+    roomLayer = document.createElement('canvas');
+    roomLayer.width = Math.floor(W * DPR); roomLayer.height = Math.floor(H * DPR);
+    const g = roomLayer.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    // wall
+    const wall = g.createLinearGradient(0, 0, 0, H);
+    wall.addColorStop(0, '#120b06');
+    wall.addColorStop(0.6, '#1e130a');
+    wall.addColorStop(1, '#150d07');
+    g.fillStyle = wall;
+    g.fillRect(0, 0, W, H);
+    // faint wallpaper stripes
+    for (let x = 0; x < W; x += 26 * U) {
+      g.fillStyle = 'rgba(255, 214, 160, .014)';
+      g.fillRect(x, 0, 9 * U, H);
+    }
+    // lamp glow bleeding onto the wall, from lower left
+    stampAt(g, glowLamp, W * 0.06, H * 0.9, W * 0.5, 0.22);
+
+    const mw = mullionW();
+
+    // outer frame: wood with bevel highlights
+    const wood = g.createLinearGradient(fx0, fy0, fx1, fy1);
+    wood.addColorStop(0, '#40260f');
+    wood.addColorStop(0.5, '#4c2d13');
+    wood.addColorStop(1, '#331d0c');
+    g.fillStyle = wood;
+    // top, bottom, left, right
+    g.fillRect(fx0 - mw * 2.2, fy0 - mw * 2.2, (fx1 - fx0) + mw * 4.4, mw * 2.2);
+    g.fillRect(fx0 - mw * 2.2, fy1, (fx1 - fx0) + mw * 4.4, mw * 2.4);
+    g.fillRect(fx0 - mw * 2.2, fy0, mw * 2.2, fy1 - fy0);
+    g.fillRect(fx1, fy0, mw * 2.2, fy1 - fy0);
+    // inner bevel line
+    g.strokeStyle = 'rgba(255, 214, 150, .14)';
+    g.lineWidth = Math.max(1, 2 * U);
+    g.strokeRect(fx0 - 1, fy0 - 1, fx1 - fx0 + 2, fy1 - fy0 + 2);
+    g.strokeStyle = 'rgba(0, 0, 0, .5)';
+    g.strokeRect(fx0 + 1, fy0 + 1, fx1 - fx0 - 2, fy1 - fy0 - 2);
+
+    // sill: projecting board with top highlight
+    const sy = sillY - mw * 1.2;
+    g.fillStyle = '#4a2c12';
+    g.fillRect(fx0 - mw * 3.4, sy, (fx1 - fx0) + mw * 6.8, mw * 2.1);
+    g.fillStyle = 'rgba(255, 224, 170, .16)';
+    g.fillRect(fx0 - mw * 3.4, sy, (fx1 - fx0) + mw * 6.8, mw * 0.42);
+    g.fillStyle = 'rgba(0,0,0,.4)';
+    g.fillRect(fx0 - mw * 3.4, sy + mw * 2.1, (fx1 - fx0) + mw * 6.8, mw * 0.5);
+    // sill front shadow onto wall
+    const shg = g.createLinearGradient(0, sy + mw * 2.6, 0, sy + mw * 5.5);
+    shg.addColorStop(0, 'rgba(0,0,0,.5)');
+    shg.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = shg;
+    g.fillRect(fx0 - mw * 3.4, sy + mw * 2.6, (fx1 - fx0) + mw * 6.8, mw * 2.9);
+
+    // mug on the sill, right of centre
+    const mugX = fx0 + (fx1 - fx0) * 0.66, mugY = sy;
+    const mw2 = mw * 3.1, mh = mw * 3.6;
+    // body
+    const mug = g.createLinearGradient(mugX - mw2, 0, mugX + mw2, 0);
+    mug.addColorStop(0, '#6e3d20');
+    mug.addColorStop(0.45, '#945530');
+    mug.addColorStop(1, '#573018');
+    g.fillStyle = mug;
+    g.beginPath();
+    g.moveTo(mugX - mw2, mugY - mh);
+    g.quadraticCurveTo(mugX - mw2 * 1.06, mugY - mh * 0.4, mugX - mw2 * 0.86, mugY);
+    g.lineTo(mugX + mw2 * 0.86, mugY);
+    g.quadraticCurveTo(mugX + mw2 * 1.06, mugY - mh * 0.4, mugX + mw2, mugY - mh);
+    g.closePath();
+    g.fill();
+    // rim
+    g.fillStyle = '#7c4526';
+    g.beginPath();
+    g.ellipse(mugX, mugY - mh, mw2, mw2 * 0.3, 0, 0, Math.PI * 2);
+    g.fill();
+    g.fillStyle = '#2a160a';
+    g.beginPath();
+    g.ellipse(mugX, mugY - mh, mw2 * 0.8, mw2 * 0.22, 0, 0, Math.PI * 2);
+    g.fill();
+    // handle
+    g.strokeStyle = '#7c4526';
+    g.lineWidth = mw2 * 0.38;
+    g.beginPath();
+    g.arc(mugX + mw2 * 1.35, mugY - mh * 0.55, mw2 * 0.62, -Math.PI / 2.4, Math.PI / 2.4);
+    g.stroke();
+    // tiny glow: the tea is warm
+    stampAt(g, glowBokeh, mugX, mugY - mh * 1.4, mw2 * 4, 0.10);
+  }
+
+  // mullions live on their own layer: the glass stuff (view, fog,
+  // bokeh) goes under them, exactly as the real window is built
+  let mullionLayer;
+  function paintMullions() {
+    mullionLayer = document.createElement('canvas');
+    mullionLayer.width = Math.floor(W * DPR); mullionLayer.height = Math.floor(H * DPR);
+    const g = mullionLayer.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+    const mw = mullionW();
+    g.fillStyle = '#38210e';
+    g.fillRect((fx0 + fx1) / 2 - mw / 2, fy0, mw, fy1 - fy0);
+    for (const r of [1, 2]) {
+      const yy = fy0 + r * (fy1 - fy0) / 3;
+      g.fillRect(fx0, yy - mw / 2, fx1 - fx0, mw);
+    }
+    g.fillStyle = 'rgba(255, 214, 150, .10)';
+    g.fillRect((fx0 + fx1) / 2 - mw / 2, fy0, mw * 0.3, fy1 - fy0);
+    for (const r of [1, 2]) {
+      const yy = fy0 + r * (fy1 - fy0) / 3;
+      g.fillRect(fx0, yy - mw / 2, fx1 - fx0, mw * 0.3);
+    }
+  }
+
+  // -------------------- condensation --------------------
+  let fogCanvas, fogCtx, fogBlobs = [], droplets = [];
+  function buildFog() {
+    fogCanvas = document.createElement('canvas');
+    fogCanvas.width = Math.floor(W * DPR); fogCanvas.height = Math.floor(H * DPR);
+    fogCtx = fogCanvas.getContext('2d');
+    fogCtx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    fogBlobs = [];
+    for (let i = 0; i < CONFIG.fogBlobs; i++) {
+      fogBlobs.push({
+        // bias toward pane bottoms and side edges, where real
+        // condensation collects
+        x: Math.random() < 0.5
+          ? rand(fx0, fx0 + (fx1 - fx0) * 0.24) + (Math.random() < 0.35 ? (fx1 - fx0) * 0.76 : 0)
+          : rand(fx0, fx1),
+        y: rand(fy0, fy1) * 0.35 + (fy1 - fy0) * rand(0.42, 0.72),
+        r: rand(0.04, 0.11) * W,
+        a: rand(0.04, 0.09),
+        drift: rand(2, 7),
+        ph: rand(0, Math.PI * 2),
+      });
+    }
+    // base fog: soft blotches, denser toward pane bottoms
+    for (const b of fogBlobs) {
+      stampAt(fogCtx, glowSteam, b.x, b.y, b.r * 2, b.a);
+    }
+    droplets = [];
+  }
+  // fog regrows very slowly; droplets carve trails out
+  function stepFog(t, dt) {
+    // slow regrow: paint a whisper of fog back
+    if (Math.random() < dt * 2.2) {
+      const b = fogBlobs[(Math.random() * fogBlobs.length) | 0];
+      fogCtx.globalCompositeOperation = 'source-over';
+      stampAt(fogCtx, glowSteam, b.x + Math.sin(t * 0.05 + b.ph) * 12 * U, b.y, b.r * 2, b.a * 0.3);
+    }
+    // droplets
+    for (let i = droplets.length - 1; i >= 0; i--) {
+      const d = droplets[i];
+      d.t += dt;
+      // jiggle downward: mostly waiting, then a quick run
+      const crawl = d.run > 0 ? d.speed : (Math.sin(t * 1.7 + d.ph) > 0.86 ? d.speed * 0.25 : 0);
+      d.run = Math.max(0, d.run - dt);
+      if (crawl > 0 && Math.random() < dt * 0.5) d.run = rand(0.25, 0.8);
+      const yPrev = d.y;
+      d.y += crawl * dt;
+      d.x += Math.sin(t * 2.3 + d.ph) * 6 * dt;
+      if (d.y > fy1 - 4 * U) { droplets.splice(i, 1); continue; }
+      // erase the trail on the fog layer
+      fogCtx.globalCompositeOperation = 'destination-out';
+      fogCtx.strokeStyle = 'rgba(0,0,0,.5)';
+      fogCtx.lineWidth = d.r * 1.5;
+      fogCtx.lineCap = 'round';
+      fogCtx.beginPath();
+      fogCtx.moveTo(d.x, yPrev);
+      fogCtx.lineTo(d.x, d.y);
+      fogCtx.stroke();
+      fogCtx.globalCompositeOperation = 'source-over';
+    }
+    if (droplets.length < 3 && Math.random() < dt / CONFIG.dropletGap[0] * 2) {
+      droplets.push({
+        x: rand(fx0 + 10 * U, fx1 - 10 * U),
+        y: rand(fy0 + (fy1 - fy0) * 0.25, fy0 + (fy1 - fy0) * 0.6),
+        r: rand(1.6, 3.2) * U,
+        speed: rand(9, 26) * U,
+        run: rand(0.3, 1),
+        ph: rand(0, Math.PI * 2),
+        t: 0,
+      });
+    }
+  }
+  function drawFogAndDroplets(t) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(fx0, fy0, fx1 - fx0, fy1 - fy0);
+    ctx.clip();
+    ctx.drawImage(fogCanvas, 0, 0, W, H);
+    // the droplets themselves, bright specks
+    ctx.fillStyle = 'rgba(214, 220, 235, .55)';
+    for (const d of droplets) {
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255, 255, 255, .5)';
+      ctx.beginPath();
+      ctx.arc(d.x - d.r * 0.3, d.y - d.r * 0.35, d.r * 0.3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(214, 220, 235, .55)';
+    }
+    ctx.restore();
+  }
+
+  // -------------------- lamp bokeh on the glass --------------------
+  const bokeh = [
+    { fx: 0.24, fy: 0.30, s: 0.075, a: 0.16, ph: 0.0 },
+    { fx: 0.205, fy: 0.44, s: 0.048, a: 0.12, ph: 2.1 },
+    { fx: 0.27, fy: 0.575, s: 0.032, a: 0.10, ph: 4.0 },
+    { fx: 0.80, fy: 0.62, s: 0.040, a: 0.07, ph: 1.2 },   // faint second source
+  ];
+  function drawBokeh(t) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (const b of bokeh) {
+      const x = fx0 + (fx1 - fx0) * b.fx + Math.sin(t * 0.4 + b.ph) * 3 * U;
+      const y = fy0 + (fy1 - fy0) * b.fy + Math.cos(t * 0.33 + b.ph) * 2.4 * U;
+      stampAt(ctx, glowBokeh, x, y, W * b.s, b.a);
+      // rim ring reads it as an out-of-focus reflection
+      ctx.strokeStyle = `rgba(255, 196, 110, ${(b.a * 0.28).toFixed(3)})`;
+      ctx.lineWidth = Math.max(1, W * b.s * 0.02);
+      ctx.beginPath();
+      ctx.arc(x, y, W * b.s * 0.30, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // -------------------- steam --------------------
+  let steam = [];
+  function mugPos() {
+    const mw2 = mullionW();
+    return { x: fx0 + (fx1 - fx0) * 0.66, y: sillY - mullionW() * 1.2 - mw2 * 3.6 };
+  }
+  function stepSteam(t, dt) {
+    const m = mugPos();
+    for (let i = steam.length - 1; i >= 0; i--) {
+      const s = steam[i];
+      s.life += dt;
+      if (s.life >= s.max) { steam.splice(i, 1); continue; }
+      s.x += (fbm1(t * 0.9 + s.ph * 3) - 0.5) * 30 * dt + 5 * dt;
+      s.y -= s.vy * dt;
+      s.r += 7 * U * dt;
+    }
+    if (steam.length < 26 && Math.random() < dt * CONFIG.steamRate) {
+      const mws = mullionW();
+      steam.push({
+        x: m.x + rand(-mws * 1.6, mws * 1.6),
+        y: m.y - mullionW() * 0.4,
+        vy: rand(16, 26) * U * 1.6,
+        r: rand(4, 9) * U,
+        life: 0, max: rand(2.4, 4.2),
+        ph: rand(0, Math.PI * 2),
+      });
+    }
+  }
+  function drawSteam() {
+    ctx.save();
+    for (const s of steam) {
+      const k = s.life / s.max;
+      const a = Math.sin(Math.min(1, k) * Math.PI) * 0.075;
+      stampAt(ctx, glowSteam, s.x, s.y, s.r * 4, a);
+    }
+    ctx.restore();
+  }
+
+  // -------------------- the leaf that flutters past --------------------
+  let leaf = null, leafNext = 6;
+  function makeLeafSprite(color) {
+    const s = 24, c = document.createElement('canvas');
+    c.width = c.height = s;
+    const g = c.getContext('2d');
+    g.translate(s / 2, s / 2);
+    g.fillStyle = color;
+    g.beginPath();
+    const R = s * 0.42;
+    for (let i = 0; i < 5; i++) {
+      const a = -Math.PI / 2 + (i / 5) * Math.PI * 2;
+      const mid = a + Math.PI / 5;
+      g.quadraticCurveTo(Math.cos(a - 0.28) * R * 0.55, Math.sin(a - 0.28) * R * 0.55,
+                         Math.cos(a) * R, Math.sin(a) * R);
+      g.quadraticCurveTo(Math.cos(mid + 0.16) * R * 0.5, Math.sin(mid + 0.16) * R * 0.5,
+                         Math.cos(mid) * R * 0.18, Math.sin(mid) * R * 0.18);
+    }
+    g.closePath();
+    g.fill();
+    return c;
+  }
+  let leafSpr;
+  function stepLeaf(t, dt) {
+    if (!leaf) {
+      leafNext -= dt;
+      if (leafNext <= 0) {
+        const dir = Math.random() < 0.5 ? 1 : -1;
+        leaf = {
+          x: dir === 1 ? fx0 - 20 : fx1 + 20,
+          y: rand(fy0 + (fy1 - fy0) * 0.35, fy0 + (fy1 - fy0) * 0.75),
+          vx: dir * rand(70, 120),
+          rot: rand(0, Math.PI * 2), vr: rand(-4, 4),
+          s: rand(10, 17) * U,
+          ph: rand(0, Math.PI * 2),
+        };
+      }
+      return;
+    }
+    leaf.x += leaf.vx * dt;
+    leaf.y += Math.sin(t * 2.6 + leaf.ph) * 26 * dt;
+    leaf.rot += leaf.vr * dt;
+    if (leaf.x < fx0 - 40 || leaf.x > fx1 + 40) { leaf = null; leafNext = rand(...CONFIG.leafGap); }
+  }
+  function drawLeaf(t) {
+    if (!leaf) return;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(fx0, fy0, fx1 - fx0, fy1 - fy0);
+    ctx.clip();
+    ctx.translate(leaf.x, leaf.y);
+    ctx.rotate(leaf.rot);
+    ctx.globalAlpha = 0.85;
+    ctx.drawImage(leafSpr, -leaf.s / 2, -leaf.s / 2, leaf.s, leaf.s);
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  // -------------------- resize / build --------------------
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    U = W / 1600;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    layout();
+    paintView();
+    paintRoom();
+    paintMullions();
+    buildFog();
+    leafSpr = makeLeafSprite('#b0561e');
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  // -------------------- loop --------------------
+  let last = performance.now();
+  let ready = false;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const t = now / 1000;
+
+    // room
+    ctx.drawImage(roomLayer, 0, 0, W, H);
+
+    // view through the glass
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(fx0, fy0, fx1 - fx0, fy1 - fy0);
+    ctx.clip();
+    ctx.drawImage(viewLayer, 0, 0, W, H);
+    // glass tint: the room is warmer than the night
+    ctx.fillStyle = 'rgba(46, 28, 16, .18)';
+    ctx.fillRect(fx0, fy0, fx1 - fx0, fy1 - fy0);
+    ctx.restore();
+
+    stepLeaf(t, dt);
+    drawLeaf(t);
+
+    stepFog(t, dt);
+    drawFogAndDroplets(t);
+    ctx.drawImage(mullionLayer, 0, 0, W, H);
+    drawBokeh(t);
+
+    stepSteam(t, dt);
+    drawSteam();
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
