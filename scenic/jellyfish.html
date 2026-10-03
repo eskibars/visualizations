@@ -303,13 +303,22 @@
 
     ctx.globalAlpha = 0.08 + j.depth * 0.18;
     ctx.fillStyle = `hsla(${j.hue}, 90%, 72%, 0.22)`;
-    ctx.shadowBlur = j.glow;
-    ctx.shadowColor = `hsla(${j.hue}, 90%, 68%, 0.85)`;
+    //  No shadowBlur here. A blurred canvas shadow is one of the most
+    //  expensive 2D operations there is, and at 15 bells per frame it was
+    //  costing about a fifth of this page's frame time. The glow is painted
+    //  as a layered translucent ellipse instead, which reads the same over a
+    //  dark background.
+    for (let g = 0; g < 3; g++) {
+      ctx.globalAlpha = (0.05 + j.depth * 0.10) * (1 - g * 0.25);
+      ctx.beginPath();
+      ctx.ellipse(0, bellH * 0.15, bellW * (0.95 + g * 0.5), bellH * (1.3 + g * 0.55), 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 0.08 + j.depth * 0.18;
     ctx.beginPath();
     ctx.ellipse(0, bellH * 0.15, bellW * 0.95, bellH * 1.3, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.shadowBlur = 0;
     ctx.globalAlpha = 1;
 
     const bellGrad = ctx.createRadialGradient(0, -bellH * 0.32, bellW * 0.05, 0, 0, bellW);
