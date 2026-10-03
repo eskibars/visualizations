@@ -1,0 +1,845 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Transporter Room</title>
+  <style>
+    html, body {
+      margin: 0; height: 100%; overflow: hidden; background: #02040a;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: #cfe9ff;
+    }
+    canvas { display: block; width: 100vw; height: 100vh; }
+
+    /*  The console is authored at a design size and scaled to fit by --fit,
+        measured against the rendered rect so it does not depend on which layout
+        property reports the untransformed size. */
+    .screen {
+      position: absolute; inset: 0;
+      display: grid;
+      grid-template-columns: 30% 1fr 26%;
+      grid-template-rows: auto 1fr;
+      grid-template-areas:
+        "head head head"
+        "left stage right";
+      gap: 1.0vw;
+      padding: 1.1vw;
+      transform-origin: 0 0;
+      transform: scale(var(--fit, 1));
+    }
+    .screen > * { min-height: 0; min-width: 0; }
+
+    .head { grid-area: head; display: flex; align-items: center; justify-content: space-between; gap: 1.2vw;
+      padding: .7vw 1vw; border-radius: .9vw;
+      background: linear-gradient(180deg, rgba(9,22,54,.82), rgba(5,13,38,.72));
+      border: 1px solid rgba(90,232,255,.22); }
+    .head h1 { margin: 0; font-size: clamp(12px, 1.05vw, 20px); letter-spacing: .20em; text-transform: uppercase; color: #8fecff; }
+    .head .sub { margin: .25em 0 0; font: 500 clamp(9px, .70vw, 13px)/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: #6f8db4; letter-spacing: .10em; text-transform: uppercase; }
+    .pills { display: flex; gap: .7vw; flex-wrap: wrap; }
+    .pill { display: inline-flex; align-items: center; gap: .5em; padding: .4em .8em; border-radius: 999px;
+      background: rgba(8,18,44,.78); border: 1px solid rgba(90,232,255,.24);
+      font: 600 clamp(9px, .70vw, 13px)/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .10em; text-transform: uppercase; white-space: nowrap; }
+    .dot { width: .6em; height: .6em; border-radius: 999px; background: #63f0d0; box-shadow: 0 0 10px rgba(99,240,208,.75); }
+
+    .panel { position: relative; overflow: hidden; border-radius: .9vw;
+      display: flex; flex-direction: column;
+      background: linear-gradient(180deg, rgba(9,22,54,.76), rgba(5,12,34,.66));
+      border: 1px solid rgba(90,232,255,.18); }
+    .panel > .title { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between;
+      padding: .55vw .8vw; border-bottom: 1px solid rgba(90,232,255,.14);
+      font: 700 clamp(9px, .72vw, 13px)/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .16em; text-transform: uppercase; color: #8fd8ff; }
+    .panel > .title .hint { color: #5d7ba0; font-weight: 600; letter-spacing: .12em; }
+    .panel .body { flex: 1 1 auto; min-height: 0; padding: .55vw .8vw .8vw;
+      display: flex; flex-direction: column; gap: .4vw; }
+
+    .left { grid-area: left; }
+    .right { grid-area: right; }
+    .stage { grid-area: stage; display: flex; flex-direction: column; }
+    .stage .body { flex: 1 1 auto; min-height: 0; position: relative; padding: 0; }
+    .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+    .row { display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: .6em;
+      font: 600 clamp(9px, .70vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .06em; }
+    .row .k { color: #6f8bd0; text-transform: uppercase; }
+    .row .v { color: #dcf3ff; font-variant-numeric: tabular-nums; }
+    .row.warn .v { color: #ffc46b; }
+    .row.ok .v { color: #63f0d0; }
+
+    .bar { height: .55vw; min-height: 5px; border-radius: 999px; background: rgba(20,40,80,.7); overflow: hidden; margin: .1em 0 .3em; }
+    .bar > i { display: block; height: 100%; border-radius: 999px;
+      background: linear-gradient(90deg, #2b8cff, #6fe0ff); transition: width .18s linear; }
+    .bar.warn > i { background: linear-gradient(90deg, #ff9a3c, #ffd47a); }
+    .bar.ok > i { background: linear-gradient(90deg, #22c9a8, #7cf5dd); }
+
+    .sep { height: 1px; background: rgba(90,232,255,.14); margin: .3em 0; }
+    .spacer { flex: 1 1 auto; min-height: 0; }
+
+    .pads { display: grid; grid-template-columns: repeat(3, 1fr); gap: .35vw; }
+    .pad { position: relative; padding: .5vw .3vw .35vw; border-radius: .4vw; text-align: center;
+      background: rgba(12,28,64,.85); border: 1px solid rgba(90,232,255,.20);
+      font: 700 clamp(8px, .62vw, 12px)/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .12em; color: #9fd8ff; }
+    .pad .n { display: block; font-size: 1.35em; letter-spacing: .06em; }
+    .pad.on { background: rgba(34,110,180,.95); border-color: rgba(140,245,255,.60); color: #eafcff;
+      box-shadow: 0 0 16px rgba(100,230,255,.40); }
+    .pad.lock { background: rgba(40,150,130,.92); border-color: rgba(120,255,225,.55); }
+
+    .log { flex: 1 1 auto; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: .1em;
+      font: 600 clamp(8px, .63vw, 12px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .04em; }
+    .log .l { color: #9fc4e8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .log .l.dim { color: #5b7699; }
+    .log .l.warn { color: #ffc46b; }
+    .log .l.ok { color: #63f0d0; }
+
+    .fx { pointer-events: none; position: absolute; inset: 0; z-index: 30; }
+    .scan { background: repeating-linear-gradient(0deg, rgba(0,0,0,.15) 0 1px, rgba(0,0,0,0) 1px 3px); mix-blend-mode: multiply; }
+    .vig { background: radial-gradient(ellipse 120% 100% at 50% 46%, rgba(0,0,0,0) 46%, rgba(0,0,0,.44) 86%, rgba(0,0,0,.78) 100%); }
+
+    /*  Portrait: a three-column console scaled into a tall frame leaves most of
+        it empty, so re-flow to two rows with the stage across full width. */
+    @media (min-width: 781px) and (max-aspect-ratio: 1/1) {
+      .screen {
+        grid-template-columns: 1fr 1fr;
+        grid-template-rows: auto minmax(0, 1.9fr) minmax(0, 1fr);
+        grid-template-areas:
+          "head head"
+          "stage stage"
+          "left right";
+      }
+    }
+
+    @media (max-width: 780px) {
+      .screen { position: static; grid-template-columns: 1fr; grid-template-rows: auto;
+        grid-template-areas: "head" "stage" "left" "right"; transform: none; height: auto; }
+      .stage .body { min-height: 46vh; }
+      .left, .right { min-height: 34vh; }
+      html, body { overflow: auto; }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="bg"></canvas>
+
+  <div class="screen" id="screen">
+    <header class="head">
+      <div>
+        <h1>Transporter Room · Pattern Buffer</h1>
+        <p class="sub" id="roomLine">U.S.S. ORION · NX-91872 · TRANSPORTER ROOM 2</p>
+      </div>
+      <div class="pills">
+        <span class="pill"><span class="dot" id="statusDot"></span><span id="statusText">BUFFER READY</span></span>
+        <span class="pill">PAD <span id="padText">1 / 6</span></span>
+        <span class="pill">LOCK <span id="lockText">—</span></span>
+      </div>
+    </header>
+
+    <section class="panel left">
+      <div class="title"><span>Sequence</span><span class="hint" id="phaseText">IDLE</span></div>
+      <div class="body">
+        <div class="row"><span class="k">Target</span><span class="v" id="targetText">—</span></div>
+        <div class="row"><span class="k">Destination</span><span class="v" id="destText">—</span></div>
+        <div class="sep"></div>
+        <div class="row"><span class="k">Pattern integrity</span><span class="v" id="integText">—</span></div>
+        <div class="bar ok"><i id="integBar" style="width:0%"></i></div>
+        <div class="row"><span class="k">Annular confinement</span><span class="v" id="confText">—</span></div>
+        <div class="bar"><i id="confBar" style="width:0%"></i></div>
+        <div class="row"><span class="k">Matter stream</span><span class="v" id="streamText">—</span></div>
+        <div class="bar"><i id="streamBar" style="width:0%"></i></div>
+        <div class="row warn"><span class="k">Heisenberg error</span><span class="v" id="heisText">—</span></div>
+        <div class="sep"></div>
+        <div class="row"><span class="k">Bio-filter</span><span class="v" id="bioText">STANDBY</span></div>
+        <div class="row"><span class="k">Buffer cycles</span><span class="v" id="cyclesText">0</span></div>
+        <div class="row"><span class="k">Power draw</span><span class="v" id="powerText">—</span></div>
+        <div class="spacer"></div>
+        <div class="row"><span class="k">Last transport</span><span class="v" id="lastText">—</span></div>
+      </div>
+    </section>
+
+    <section class="panel stage">
+      <div class="title"><span>Transporter Stage · Pad 1</span><span class="hint" id="stageHint">STANDBY</span></div>
+      <div class="body"><canvas id="pad"></canvas></div>
+    </section>
+
+    <section class="panel right">
+      <div class="title"><span>Pads</span><span class="hint">6 × PERSONNEL</span></div>
+      <div class="body">
+        <div class="pads" id="pads"></div>
+        <div class="sep"></div>
+        <div class="row"><span class="k">Site-to-site</span><span class="v" id="stsText">READY</span></div>
+        <div class="row"><span class="k">Energise lockout</span><span class="v" id="lockoutText">CLEAR</span></div>
+        <div class="sep"></div>
+        <div class="title" style="padding:0 0 .25em; border:0;"><span>Transport Log</span></div>
+        <div class="log" id="log"></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="fx scan"></div>
+  <div class="fx vig"></div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  TRANSPORTER ROOM — the stage of the same ship as the other
+  //  consoles. A personnel pad seen from the operator's side: six
+  //  positions on a hexagonal dais, six emitter columns around it,
+  //  and the annular confinement beam that rises between them when
+  //  someone transports. The sequence runs itself: a target
+  //  materialises over several seconds, holds, then dematerialises
+  //  into the buffer, and the pads and log follow along.
+  //
+  //  Construction notes
+  //  ------------------
+  //  The stage canvas is the only real drawing: the dais, columns
+  //  and room are static per resize, and the moving parts are the
+  //  confinement cylinder, the sparkle field and the figure. The
+  //  figure is drawn as a point cloud rather than a person, which
+  //  is both closer to the fiction and far cheaper than an
+  //  articulated body.
+  // ============================================================
+  const CFG = {
+    //  A console of hairlines and a sparkle field; 1.6 is plenty for both.
+    dprCap: 1.6,
+
+    pads: 6,
+    padRadius: 0.60,        // dais radius, fraction of the stage's short side
+    figureHeight: 0.52,     // figure height at full materialisation, same units
+    columns: 6,
+
+    /* ---- sequence, in seconds ---- */
+    idleGap: [3.5, 7.0],
+    materialise: 4.2,
+    holdWhile: [6, 12],
+    dematerialise: 3.4,
+
+    /* ---- sparkle field ---- */
+    sparkles: 520,
+    sparkleSize: [0.6, 2.2],
+  };
+
+  const el = (id) => document.getElementById(id);
+  const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const smooth = (t) => { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); };
+  const TAU = Math.PI * 2;
+
+  /* ---------------- stage ---------------- */
+  const pad = el('pad');
+  const pctx = pad.getContext('2d');
+  let sw = 1, sh = 1, sdpr = 1, S = 1;
+
+  function sizeStage() {
+    const r = pad.getBoundingClientRect();
+    sdpr = Math.min(CFG.dprCap, window.devicePixelRatio || 1);
+    sw = Math.max(1, r.width);
+    sh = Math.max(1, r.height);
+    pad.width = Math.round(sw * sdpr);
+    pad.height = Math.round(sh * sdpr);
+    pctx.setTransform(sdpr, 0, 0, sdpr, 0, 0);
+    S = Math.min(sw, sh * 1.35);        // dais scale: height is the scarce axis
+  }
+
+  // The dais is drawn in a squashed perspective: a circle seen from slightly
+  // above is an ellipse, and that alone is what makes it read as a floor.
+  const TILT = 0.34;
+  function daisR() { return S * CFG.padRadius; }
+  function centre() { return { x: sw / 2, y: sh * 0.70 }; }
+
+  // ---------------- sparkle field ----------------
+  //  Positions are in dais space (radius 0..1, angle, height 0..1) so the field
+  //  survives a resize and can be precomputed once.
+  const sparkles = [];
+  function seedSparkles() {
+    sparkles.length = 0;
+    for (let i = 0; i < CFG.sparkles; i++) {
+      const a = Math.random() * TAU;
+      const rr = Math.pow(Math.random(), 0.55);
+      sparkles.push({
+        a, rr,
+        y: Math.random(),
+        ph: rand(0, TAU),
+        sp: rand(0.8, 3.4),
+        size: rand(CFG.sparkleSize[0], CFG.sparkleSize[1]),
+      });
+    }
+  }
+
+  /* ---------------- sequence ---------------- */
+  const PHASES = ['IDLE', 'MATERIALISING', 'HELD', 'DEMATERIALISING'];
+  const TARGETS = [
+    { name: 'CMDR. T. RAI', dest: 'PLANETSIDE · SHUTTLE BAY 2' },
+    { name: 'LT. M. OKONKWO', dest: 'STARBASE K-7 · OPS' },
+    { name: 'DR. S. VAHAN', dest: 'MEDICAL · DECK 12' },
+    { name: 'CREWMAN J. PARK', dest: 'ENGINEERING · DECK 9' },
+    { name: 'AMB. L. FERRO', dest: 'DIPLOMATIC · DECK 3' },
+    { name: 'ENS. R. BLUME', dest: 'BRIDGE · DECK 1' },
+  ];
+
+  const st = {
+    phase: 'IDLE',
+    t: 0,
+    wait: 1.2,
+    progress: 0,        // 0..1 through the current transport
+    target: TARGETS[0],
+    padIndex: 0,
+    buffers: 0,
+    lastAt: null,
+    integrity: 0,
+    confinement: 0,
+    stream: 0,
+    heisenberg: 0,
+    bio: 'STANDBY',
+    power: 0,
+    locks: new Array(CFG.pads).fill(0),
+    log: [],
+  };
+
+  function pushLog(text, kind) {
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const ss = String(now.getSeconds()).padStart(2, '0');
+    st.log.unshift({ t: `${hh}:${mm}:${ss}`, text, kind: kind || '' });
+    if (st.log.length > 14) st.log.length = 14;
+  }
+
+  function startTransport() {
+    st.target = TARGETS[Math.floor(Math.random() * TARGETS.length)];
+    st.padIndex = Math.floor(Math.random() * CFG.pads);
+    st.phase = 'MATERIALISING';
+    st.t = 0;
+    st.bio = 'SCANNING';
+    pushLog(`DEMATERIALISATION AUTHORISED · ${st.target.name}`, 'ok');
+    pushLog(`PAD ${st.padIndex + 1} LOCKED · ANNULAR CONFINEMENT ENGAGED`, 'dim');
+  }
+
+  function updateSequence(dt) {
+    st.t += dt;
+    switch (st.phase) {
+      case 'IDLE':
+        st.progress = Math.max(0, st.progress - dt * 1.4);
+        if (st.t >= st.wait) startTransport();
+        break;
+
+      case 'MATERIALISING':
+        st.progress = clamp(st.t / CFG.materialise, 0, 1);
+        if (st.progress >= 1) {
+          st.phase = 'HELD';
+          st.t = 0;
+          st.wait = rand(CFG.holdWhile[0], CFG.holdWhile[1]);
+          st.buffers++;
+          st.bio = 'PATTERN NOMINAL';
+          pushLog(`MATERIALISATION COMPLETE · ${st.target.name} ON PAD ${st.padIndex + 1}`, 'ok');
+          pushLog(`BIO-FILTER: NO CONTAMINANTS DETECTED`, 'dim');
+        }
+        break;
+
+      case 'HELD':
+        if (st.t >= st.wait) {
+          st.phase = 'DEMATERIALISING';
+          st.t = 0;
+          st.bio = 'BUFFERING';
+          pushLog(`REMOTE SITE ACKNOWLEDGED · ${st.target.dest}`, 'dim');
+          pushLog(`DEMATERIALISING PAD ${st.padIndex + 1} …`, '');
+        }
+        break;
+
+      case 'DEMATERIALISING':
+        st.progress = clamp(1 - st.t / CFG.dematerialise, 0, 1);
+        if (st.t >= CFG.dematerialise) {
+          const who = st.target;
+          st.phase = 'IDLE';
+          st.t = 0;
+          st.wait = rand(CFG.idleGap[0], CFG.idleGap[1]);
+          st.progress = 0;
+          st.bio = 'STANDBY';
+          st.lastAt = new Date();
+          pushLog(`TRANSPORT COMPLETE · ${who.name} → ${who.dest}`, 'ok');
+        }
+        break;
+    }
+
+    // Instrumentation follows the phase. The values are derived rather than
+    // random, so every readout rises and falls with the thing it describes.
+    const p = st.progress;
+    const swinging = st.phase === 'MATERIALISING' || st.phase === 'DEMATERIALISING';
+    st.integrity = swinging ? lerp(0.55, 0.999, smooth(p)) : (st.phase === 'HELD' ? 0.999 : 0);
+    st.confinement = swinging ? lerp(0.30, 1.0, smooth(p)) : (st.phase === 'HELD' ? 1 : 0);
+    st.stream = swinging ? lerp(0.10, 0.94, Math.pow(p, 0.7)) : (st.phase === 'HELD' ? 0.06 : 0);
+    // Heisenberg error is worst in the middle of a transport, which is why the
+    // compensator exists: a small, believable arc rather than noise.
+    st.heisenberg = swinging ? Math.sin(p * Math.PI) * 0.42 : 0;
+    st.power = swinging ? lerp(0.42, 1.0, Math.sin(p * Math.PI)) : (st.phase === 'HELD' ? 0.22 : 0.06);
+
+    // Pad locks ease on and off.
+    for (let i = 0; i < CFG.pads; i++) {
+      const want = (i === st.padIndex && st.phase !== 'IDLE') ? (st.phase === 'HELD' ? 1 : 0.8) : 0;
+      st.locks[i] = lerp(st.locks[i], want, dt * 2.4);
+    }
+  }
+
+  /* ---------------- stage drawing ---------------- */
+  function drawStage(time) {
+    const { x: cx, y: cy } = centre();
+    const R = daisR();
+
+    pctx.setTransform(sdpr, 0, 0, sdpr, 0, 0);
+    // Room: dark, with a pool of light over the dais.
+    pctx.fillStyle = '#02040a';
+    pctx.fillRect(0, 0, sw, sh);
+    const room = pctx.createRadialGradient(cx, cy - R * 0.5, 0, cx, cy - R * 0.5, R * 3.2);
+    room.addColorStop(0, 'rgba(20, 58, 108, 0.55)');
+    room.addColorStop(0.42, 'rgba(10, 30, 66, 0.26)');
+    room.addColorStop(1, 'rgba(2, 4, 10, 0)');
+    pctx.fillStyle = room;
+    pctx.fillRect(0, 0, sw, sh);
+
+    // --- confinement cylinder behind the dais ---
+    //  Drawn as a gradient cylinder rather than a real 3D beam: a tall ellipse
+    //  pair with a vertical gradient reads as a column of light and costs two
+    //  paths.
+    const intensity = swingIntensity(time);
+    if (intensity > 0.01) {
+      const colTop = cy - R * (0.9 + CFG.figureHeight * 1.55);
+      const colBot = cy;
+      const cylTop = R * 0.72, cylBot = R * 0.98;
+      pctx.save();
+      pctx.globalCompositeOperation = 'lighter';
+      pctx.beginPath();
+      pctx.moveTo(cx - cylBot, colBot);
+      pctx.lineTo(cx - cylTop, colTop);
+      pctx.lineTo(cx + cylTop, colTop);
+      pctx.lineTo(cx + cylBot, colBot);
+      pctx.closePath();
+      pctx.clip();
+      // Vertical fade: bright at the base, gone at the top.
+      const vg = pctx.createLinearGradient(0, colTop, 0, colBot);
+      vg.addColorStop(0, 'rgba(120, 220, 255, 0)');
+      vg.addColorStop(0.55, `rgba(130, 226, 255, ${(0.10 * intensity).toFixed(3)})`);
+      vg.addColorStop(1, `rgba(180, 244, 255, ${(0.30 * intensity).toFixed(3)})`);
+      pctx.fillStyle = vg;
+      pctx.fillRect(cx - cylBot, colTop, cylBot * 2, colBot - colTop);
+      // Horizontal falloff, so the column has edges rather than being a slab.
+      const hg = pctx.createLinearGradient(cx - cylBot, 0, cx + cylBot, 0);
+      hg.addColorStop(0, 'rgba(0,0,0,0)');
+      hg.addColorStop(0.22, 'rgba(150, 236, 255, 0.22)');
+      hg.addColorStop(0.5, 'rgba(0,0,0,0)');
+      hg.addColorStop(0.78, 'rgba(150, 236, 255, 0.22)');
+      hg.addColorStop(1, 'rgba(0,0,0,0)');
+      pctx.globalCompositeOperation = 'source-over';
+      pctx.fillStyle = hg;
+      pctx.fillRect(cx - cylBot, colTop, cylBot * 2, colBot - colTop);
+      pctx.restore();
+
+      // Travelling bright bands up the column: what sells it as a beam in
+      // motion rather than a lit tube.
+      pctx.save();
+      pctx.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < 5; i++) {
+        const t = ((time * 0.55 + i / 5) % 1);
+        const y = lerp(colBot, colTop, t);
+        const w = lerp(cylBot, cylTop, t);
+        const a = 0.20 * intensity * Math.sin(t * Math.PI);
+        pctx.strokeStyle = `rgba(190, 246, 255, ${a.toFixed(3)})`;
+        pctx.lineWidth = Math.max(1, S * 0.004);
+        pctx.beginPath();
+        pctx.ellipse(cx, y, w, w * TILT, 0, 0, TAU);
+        pctx.stroke();
+      }
+      pctx.restore();
+    }
+
+    // --- emitter columns around the dais ---
+    for (let i = 0; i < CFG.columns; i++) {
+      const a = (i / CFG.columns) * TAU + Math.PI / CFG.columns;
+      const colX = cx + Math.sin(a) * R * 1.02;
+      const colY = cy - Math.cos(a) * R * 1.02 * TILT;
+      // The two columns nearest the viewer are drawn after the dais.
+      const front = Math.cos(a) > 0.2;
+      if (front && intensity < 0.01) continue;   // handled below in the normal case
+      drawColumn(colX, colY, R, intensity, i);
+    }
+
+    // --- dais ---
+    pctx.save();
+    const dg = pctx.createRadialGradient(cx, cy, 0, cx, cy, R);
+    dg.addColorStop(0, 'rgba(26, 52, 96, 0.95)');
+    dg.addColorStop(0.7, 'rgba(14, 30, 62, 0.95)');
+    dg.addColorStop(1, 'rgba(8, 16, 36, 0.98)');
+    pctx.fillStyle = dg;
+    pctx.beginPath();
+    pctx.ellipse(cx, cy, R, R * TILT, 0, 0, TAU);
+    pctx.fill();
+    pctx.strokeStyle = 'rgba(110, 210, 255, 0.42)';
+    pctx.lineWidth = Math.max(1.2, S * 0.005);
+    pctx.stroke();
+    // Inner rings, which is what makes a dais read as machined.
+    for (const k of [0.82, 0.6, 0.28]) {
+      pctx.strokeStyle = `rgba(110, 210, 255, ${(0.10 + k * 0.14).toFixed(3)})`;
+      pctx.lineWidth = Math.max(0.8, S * 0.0026);
+      pctx.beginPath();
+      pctx.ellipse(cx, cy, R * k, R * k * TILT, 0, 0, TAU);
+      pctx.stroke();
+    }
+    // Radial spokes between the pads.
+    for (let i = 0; i < CFG.columns; i++) {
+      const a = (i / CFG.columns) * TAU + Math.PI / CFG.columns;
+      pctx.strokeStyle = 'rgba(110, 210, 255, 0.16)';
+      pctx.lineWidth = Math.max(0.8, S * 0.0022);
+      pctx.beginPath();
+      pctx.moveTo(cx + Math.sin(a) * R * 0.28, cy - Math.cos(a) * R * 0.28 * TILT);
+      pctx.lineTo(cx + Math.sin(a) * R * 0.98, cy - Math.cos(a) * R * 0.98 * TILT);
+      pctx.stroke();
+    }
+    pctx.restore();
+
+    // --- per-pad position markers ---
+    for (let i = 0; i < CFG.pads; i++) {
+      const a = (i / CFG.pads) * TAU + Math.PI / CFG.pads;
+      const rr = R * 0.46;
+      const px = cx + Math.sin(a) * rr;
+      const py = cy - Math.cos(a) * rr * TILT;
+      const lock = st.locks[i] || 0;
+      pctx.save();
+      pctx.globalCompositeOperation = 'lighter';
+      pctx.strokeStyle = `rgba(120, 240, 255, ${(0.28 + 0.55 * lock).toFixed(3)})`;
+      pctx.lineWidth = Math.max(1, S * (0.003 + 0.003 * lock));
+      pctx.beginPath();
+      pctx.ellipse(px, py, R * 0.135, R * 0.135 * TILT, 0, 0, TAU);
+      pctx.stroke();
+      if (lock > 0.02) {
+        pctx.fillStyle = `rgba(160, 248, 255, ${(0.14 * lock).toFixed(3)})`;
+        pctx.beginPath();
+        pctx.ellipse(px, py, R * 0.135, R * 0.135 * TILT, 0, 0, TAU);
+        pctx.fill();
+      }
+      pctx.restore();
+    }
+
+    // --- figure, as a sparkle cloud ---
+    const vis = st.progress;
+    if (vis > 0.01) {
+      const figH = S * CFG.figureHeight * 1.35;
+      const figR = R * 0.30;
+      pctx.save();
+      pctx.globalCompositeOperation = 'lighter';
+      // Deterministic per-sparkle flicker, so the cloud shimmers rather than
+      // boiling; the field is fixed and only its brightness moves.
+      for (const sp of sparkles) {
+        const yT = sp.y;
+        // A body silhouette: wider at the shoulders, narrow at the feet and
+        // head. A point cloud with a human-ish envelope reads as a person
+        // without any articulated geometry.
+        const env = 0.42 + 0.58 * Math.sin(Math.min(1, yT * 1.15) * Math.PI * 0.92);
+        const shrink = 0.55 + 0.45 * env;
+        const rr = sp.rr * figR * shrink;
+        const a = sp.a;
+        const px = cx + Math.sin(a) * rr;
+        const py = cy - yT * figH - 4;
+        // Sparkles fade in from the feet up while materialising, and out from
+        // the head down while dematerialising. That direction is the whole
+        // visual difference between the two phases.
+        const gate = st.phase === 'DEMATERIALISING' ? (1 - yT) : yT;
+        const on = clamp(vis * 1.45 - gate * 0.55, 0, 1);
+        if (on <= 0.02) continue;
+        const flick = 0.55 + 0.45 * Math.sin(time * sp.sp + sp.ph);
+        const alpha = on * flick * 0.85;
+        pctx.fillStyle = `rgba(206, 246, 255, ${alpha.toFixed(3)})`;
+        const s = sp.size * Math.max(0.6, S * 0.0034);
+        pctx.fillRect(px, py, s, s);
+      }
+      // A soft body glow under the cloud, so the figure has presence and not
+      // just points.
+      const bg = pctx.createRadialGradient(cx, cy - figH * 0.55, 0, cx, cy - figH * 0.55, figR * 2.1);
+      bg.addColorStop(0, `rgba(150, 232, 255, ${(0.16 * vis).toFixed(3)})`);
+      bg.addColorStop(1, 'rgba(60, 150, 220, 0)');
+      pctx.fillStyle = bg;
+      pctx.fillRect(cx - figR * 2.2, cy - figH - figR * 1.4, figR * 4.4, figH + figR * 2.6);
+      pctx.restore();
+    }
+
+    // --- front columns, drawn over the dais so the stage has depth ---
+    for (let i = 0; i < CFG.columns; i++) {
+      const a = (i / CFG.columns) * TAU + Math.PI / CFG.columns;
+      const front = Math.cos(a) > 0.2;
+      if (!front) continue;
+      const colX = cx + Math.sin(a) * R * 1.02;
+      const colY = cy - Math.cos(a) * R * 1.02 * TILT;
+      drawColumn(colX, colY, R, intensity, i);
+    }
+  }
+
+  function swingIntensity(time) {
+    if (st.phase === 'IDLE') return 0;
+    if (st.phase === 'HELD') return 0.55 + 0.06 * Math.sin(time * 2.4);
+    // Ramp up while materialising, and out while dematerialising.
+    return st.phase === 'MATERIALISING' ? 0.35 + 0.65 * smooth(st.progress) : 0.35 + 0.65 * smooth(st.progress);
+  }
+
+  function drawColumn(x, y, R, intensity, i) {
+    const h = R * (0.85 + CFG.figureHeight * 0.9);
+    pctx.save();
+    // The column is a slim rounded bar with an emitter head.
+    pctx.fillStyle = 'rgba(18, 36, 68, 0.95)';
+    pctx.beginPath();
+    if (pctx.roundRect) pctx.roundRect(x - R * 0.045, y - h, R * 0.09, h, R * 0.03);
+    else pctx.rect(x - R * 0.045, y - h, R * 0.09, h);
+    pctx.fill();
+    pctx.strokeStyle = 'rgba(110, 210, 255, 0.30)';
+    pctx.lineWidth = Math.max(0.8, S * 0.0022);
+    pctx.stroke();
+    // Emitter head, which glows with the beam.
+    const lit = 0.18 + 0.82 * intensity;
+    pctx.globalCompositeOperation = 'lighter';
+    const g = pctx.createRadialGradient(x, y - h, 0, x, y - h, R * 0.22);
+    g.addColorStop(0, `rgba(190, 246, 255, ${(0.60 * lit).toFixed(3)})`);
+    g.addColorStop(0.45, `rgba(120, 216, 255, ${(0.20 * lit).toFixed(3)})`);
+    g.addColorStop(1, 'rgba(60, 140, 220, 0)');
+    pctx.fillStyle = g;
+    pctx.fillRect(x - R * 0.24, y - h - R * 0.24, R * 0.48, R * 0.48);
+    pctx.restore();
+  }
+
+  /* ---------------- DOM readouts ---------------- */
+  const padEls = [];
+  function buildPads() {
+    const host = el('pads');
+    host.replaceChildren();
+    padEls.length = 0;
+    for (let i = 0; i < CFG.pads; i++) {
+      const d = document.createElement('div');
+      d.className = 'pad';
+      const n = document.createElement('span');
+      n.className = 'n';
+      n.textContent = String(i + 1);
+      d.appendChild(n);
+      host.appendChild(d);
+      padEls.push(d);
+    }
+  }
+
+  function buildLog() {
+    const host = el('log');
+    host.replaceChildren();
+    for (const l of st.log) {
+      const d = document.createElement('div');
+      d.className = 'l ' + (l.kind || '');
+      d.textContent = `${l.t}  ${l.text}`;
+      host.appendChild(d);
+    }
+  }
+
+  let lastLogTop = '';
+  function updateReadouts(time) {
+    // Phase.
+    const phaseLabel = {
+      IDLE: 'IDLE',
+      MATERIALISING: 'ENERGISING',
+      HELD: 'PATTERN LOCKED',
+      DEMATERIALISING: 'DE-ENERGISING',
+    }[st.phase];
+    el('phaseText').textContent = phaseLabel;
+    el('stageHint').textContent = st.phase === 'IDLE' ? 'STANDBY' : phaseLabel;
+
+    el('targetText').textContent = st.phase === 'IDLE' ? '—' : st.target.name;
+    el('destText').textContent = st.phase === 'IDLE' ? '—' : st.target.dest;
+
+    const pct = (v) => Math.round(v * 100) + '%';
+    el('integText').textContent = st.integrity > 0 ? pct(st.integrity) : '—';
+    el('integBar').style.width = pct(st.integrity);
+    el('confText').textContent = st.confinement > 0 ? pct(st.confinement) : '—';
+    el('confBar').style.width = pct(st.confinement);
+    el('streamText').textContent = st.stream > 0 ? pct(st.stream) : '—';
+    el('streamBar').style.width = pct(st.stream);
+    el('heisText').textContent = st.heisenberg > 0 ? pct(st.heisenberg) : 'NIL';
+    el('heisText').className = 'v';
+    el('bioText').textContent = st.bio;
+    el('cyclesText').textContent = st.buffers.toLocaleString('en-US');
+    el('powerText').textContent = (st.power * 14.8).toFixed(2) + ' GW';
+    el('lastText').textContent = st.lastAt
+      ? st.lastAt.toTimeString().slice(0, 8)
+      : '—';
+
+    el('padText').textContent = st.phase === 'IDLE' ? '— / 6' : `${st.padIndex + 1} / 6`;
+    const lock = st.phase === 'HELD' ? 'SOLID' : (st.phase === 'IDLE' ? '—' : 'ACQUIRING');
+    el('lockText').textContent = lock;
+    el('stsText').textContent = st.phase === 'IDLE' ? 'READY' : 'BUSY';
+    el('lockoutText').textContent = st.phase === 'IDLE' ? 'CLEAR' : 'ENGAGED';
+    // The lockout row turns amber while it is held, because that is the one
+    // state an operator has to notice.
+    el('lockoutText').parentElement.classList.toggle('warn', st.phase !== 'IDLE');
+
+    // Header status.
+    const busy = st.phase !== 'IDLE';
+    el('statusText').textContent = busy ? 'TRANSPORT IN PROGRESS' : 'BUFFER READY';
+    const dot = el('statusDot');
+    dot.style.background = busy ? '#ffc46b' : '#63f0d0';
+    dot.style.boxShadow = busy ? '0 0 10px rgba(255,196,107,.8)' : '0 0 10px rgba(99,240,208,.75)';
+
+    // Pads.
+    for (let i = 0; i < padEls.length; i++) {
+      const lock = st.locks[i] || 0;
+      padEls[i].classList.toggle('on', lock > 0.15);
+      padEls[i].classList.toggle('lock', lock > 0.85);
+    }
+
+    // Log: rebuild only when the newest entry changes, so the DOM is not
+    // rewritten every frame.
+    const top = st.log.length ? st.log[0].t + st.log[0].text : '';
+    if (top !== lastLogTop) {
+      lastLogTop = top;
+      buildLog();
+    }
+  }
+
+  /* ---------------- background ---------------- */
+  const bg = el('bg');
+  const bctx = bg.getContext('2d');
+  const bstars = [];
+  function sizeBg() {
+    //  The background is a soft glow and one-pixel stars over black, redrawn
+    //  every frame. A 1.6 store costs 2.6x the fill of 1x for no visible gain at
+    //  this scale, so it is deliberately drawn at 1x.
+    const dpr = 1;
+    bg.width = Math.max(1, Math.floor(window.innerWidth * dpr));
+    bg.height = Math.max(1, Math.floor(window.innerHeight * dpr));
+    bg.style.width = window.innerWidth + 'px';
+    bg.style.height = window.innerHeight + 'px';
+    bctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    bstars.length = 0;
+    const n = Math.floor((window.innerWidth * window.innerHeight) / 18000);
+    for (let i = 0; i < n; i++) {
+      bstars.push({
+        x: Math.random() * window.innerWidth,
+        y: Math.random() * window.innerHeight,
+        r: rand(0.4, 1.2), a: rand(0.08, 0.34), ph: rand(0, TAU),
+      });
+    }
+  }
+  function drawBg(time) {
+    const w = window.innerWidth, h = window.innerHeight;
+    bctx.clearRect(0, 0, w, h);
+    bctx.fillStyle = '#02040a';
+    bctx.fillRect(0, 0, w, h);
+    const g = bctx.createRadialGradient(w * 0.5, h * 0.16, 0, w * 0.5, h * 0.16, Math.max(w, h) * 0.75);
+    g.addColorStop(0, 'rgba(16, 56, 116, 0.28)');
+    g.addColorStop(0.5, 'rgba(8, 28, 66, 0.11)');
+    g.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    bctx.fillStyle = g;
+    bctx.fillRect(0, 0, w, h);
+    for (const s of bstars) {
+      const tw = 0.6 + 0.4 * Math.sin(time * 1.1 + s.ph);
+      bctx.fillStyle = `rgba(198, 224, 255, ${(s.a * tw).toFixed(3)})`;
+      bctx.fillRect(s.x, s.y, s.r, s.r);
+    }
+  }
+
+  /* ---------------- fit ---------------- */
+  let fittedKey = '';
+  function isStacked() { return window.matchMedia('(max-width: 780px)').matches; }
+  function fit() {
+    const screen = el('screen');
+    if (!screen) return;
+    if (isStacked()) {
+      screen.style.removeProperty('--fit');
+      screen.style.removeProperty('margin-left');
+      screen.style.removeProperty('margin-top');
+      fittedKey = '';
+      return;
+    }
+    const vw = window.innerWidth, vh = window.innerHeight, padpx = CFG.pad || 14;
+    const portrait = window.innerWidth <= window.innerHeight;
+    const designW = portrait
+      ? Math.max(760, Math.min(vw, 1000))
+      : Math.max(1120, Math.min(1900, Math.max(vw, 1120)));
+    screen.style.marginLeft = '0px';
+    screen.style.marginTop = '0px';
+    screen.style.width = designW + 'px';
+    screen.style.setProperty('--fit', '1');
+
+    let s = 1;
+    for (let i = 0; i < 6; i++) {
+      screen.style.setProperty('--fit', String(s));
+      const r = screen.getBoundingClientRect();
+      if (!r.height || !r.width) return;
+      const over = Math.max(r.height / (vh - 14), r.width / (vw - 14));
+      if (over > 0.995 && over < 1.005) break;
+      if (over > 1) s = Math.max(0.25, s / over);
+      else s = Math.min(1.6, s / over);
+    }
+    screen.style.setProperty('--fit', String(s));
+    fittedKey = designW + 'x' + vw + 'x' + vh + 'x' + Math.round(screen.scrollHeight);
+
+    const r = screen.getBoundingClientRect();
+    screen.style.marginLeft = Math.max(0, (vw - r.width) / 2) + 'px';
+    screen.style.marginTop = Math.max(0, (vh - r.height) / 2) + 'px';
+  }
+
+  let relayoutTimer = 0;
+  window.addEventListener('resize', () => {
+    sizeBg();
+    sizeStage();
+    clearTimeout(relayoutTimer);
+    relayoutTimer = setTimeout(fit, 140);
+  }, { passive: true });
+
+  let fitObsPending = false;
+  if (window.ResizeObserver) {
+    new ResizeObserver(() => {
+      if (fitObsPending) return;
+      fitObsPending = true;
+      requestAnimationFrame(() => {
+        fitObsPending = false;
+        if (isStacked()) return;
+        const screen = el('screen');
+        const key = window.innerWidth + 'x' + window.innerHeight + 'x' + Math.round(screen.scrollHeight);
+        if (key !== fittedKey) fit();
+      });
+    }).observe(el('screen'));
+  }
+
+  /* ---------------- boot ---------------- */
+  seedSparkles();
+  buildPads();
+  sizeBg();
+  sizeStage();
+  fit();
+  requestAnimationFrame(fit);
+
+  el('roomLine').textContent =
+    `${['U.S.S. ORION', 'U.S.S. VESPER', 'U.S.S. CALYPSO'][(Math.random() * 3) | 0]} · ` +
+    `NX-${10000 + ((Math.random() * 80000) | 0)} · TRANSPORTER ROOM ${1 + ((Math.random() * 4) | 0)}`;
+
+  pushLog('TRANSPORTER ROOM ONLINE · PATTERN BUFFER AT NOMINAL', 'ok');
+  pushLog('EMITTER ALIGNMENT: 6 / 6 COLUMNS GREEN', 'dim');
+  pushLog('STANDBY FOR TRANSPORT AUTHORISATION', 'dim');
+
+  let last = performance.now();
+  const start = last;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = (now - start) / 1000;
+
+    updateSequence(dt);
+    drawBg(time);
+    drawStage(time);
+    updateReadouts(time);
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
