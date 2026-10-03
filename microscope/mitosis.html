@@ -38,7 +38,6 @@
   const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
   const lerp = (a, b, t) => a + (b - a) * t;
   const rand = (a, b) => a + Math.random() * (b - a);
-  const randSign = () => (Math.random() < 0.5 ? -1 : 1);
 
   // Smooth 0→1 ramp, used for every stage transition.
   const smooth = (a, b, x) => {
@@ -108,7 +107,6 @@
       a: rand(0, TAU),                 // where it idles inside the nucleus
       jitter: rand(0.6, 1.3),
       wob: rand(0, TAU),
-      spin: rand(0.6, 1.6) * randSign(),
       plate: (i - (n - 1) / 2),       // slot along the metaphase plate
       length: rand(0.82, 1.2),
     }));

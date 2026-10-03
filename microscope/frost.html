@@ -26,7 +26,7 @@
     dprCap: 2,
     arms: 6,
     gridCell: 13,          // crowding grid, in CSS px
-    maxTips: 340,
+    maxTips: 430,
     baseSpeed: 70,         // px per second at full speed
     growSeconds: 26,
     holdSeconds: 8,
@@ -80,7 +80,7 @@
         gen: 0,
         speed: rand(0.85, 1.15),
         budget: reach * rand(0.82, 0.98),
-        branch: rand(3, 8),
+        branch: rand(2.5, 7),
         wobble: rand(0, TAU),
       });
     }
@@ -181,18 +181,22 @@
       // Side branches peel off at 60°, the angle ice likes. Once the tip budget
       // is spent, branching stops but every tip already alive keeps growing.
       t.branch -= travel;
-      if (t.branch <= 0 && tips.length < CFG.maxTips && t.gen < 4 && dist < 0.94) {
-        t.branch = rand(3.5, 9);
+      // The tip budget is global, but a crowded core must not starve the thin
+      // outer arms: at the cap, only sparse ground is allowed to branch.
+      const atCap = tips.length >= CFG.maxTips;
+      const mayBranch = !atCap || mass[gridIndex(t.x, t.y)] < 2.5;
+      if (t.branch <= 0 && mayBranch && t.gen < 4 && dist < 0.99) {
+        t.branch = rand(2.5, 7);
         const side = Math.random() < 0.5 ? 1 : -1;
         tips.push({
           x: t.x, y: t.y,
           ang: t.ang + side * (Math.PI / 3),
           gen: t.gen + 1,
           speed: t.speed * rand(0.6, 0.9),
-          // Side branches are short. Letting them scale with the parent turns a
-          // dendrite into a handful of long scratches.
-          budget: Math.min(t.budget * rand(0.16, 0.34), reach * 0.2),
-          branch: rand(3, 8),
+          // Side branches are short, and never so short they vanish — a branch
+          // that scales straight off a spent parent leaves a bare arm.
+          budget: clamp(Math.min(t.budget * rand(0.25, 0.45), reach * 0.22), reach * 0.05, reach * 0.24),
+          branch: rand(2.5, 7),
           wobble: rand(0, TAU),
         });
       }
@@ -213,6 +217,22 @@
 
   let droplets = [];
   let haze = null;
+  let puff = null;        // one soft blob, blitted instead of rebuilding gradients
+
+  function buildPuff() {
+    const size = 256;
+    const c = document.createElement('canvas');
+    c.width = size;
+    c.height = size;
+    const g2 = c.getContext('2d');
+    const g = g2.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    g.addColorStop(0, 'rgba(90,150,210,1)');
+    g.addColorStop(0.55, 'rgba(90,150,210,0.34)');
+    g.addColorStop(1, 'rgba(90,150,210,0)');
+    g2.fillStyle = g;
+    g2.fillRect(0, 0, size, size);
+    return c;
+  }
 
   function buildScene() {
     mass = new Float32Array(gw * gh);
@@ -236,6 +256,7 @@
     drawSeedFacet();
 
     droplets = Array.from({ length: CFG.droplets }, () => makeDroplet(true));
+    puff = buildPuff();
 
     haze = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W, H) * 0.8);
     haze.addColorStop(0, 'rgba(40,90,150,0.34)');
@@ -289,17 +310,15 @@
     ctx.fillStyle = haze;
     ctx.fillRect(0, 0, W, H);
 
-    // Breath of vapour off the cold plate: soft blobs, never rings.
+    // Breath of vapour off the cold plate. One pre-baked blob, scaled and
+    // faded, beats building three full-screen gradients every frame.
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
     for (let i = 0; i < 3; i++) {
       const t = (time * 0.035 + i * 0.33) % 1;
       const r = lerp(reach * 0.45, Math.max(W, H) * 0.8, t);
-      const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
-      g.addColorStop(0, `rgba(90,150,210,${0.035 * (1 - t)})`);
-      g.addColorStop(1, 'rgba(90,150,210,0)');
-      ctx.fillStyle = g;
-      ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+      ctx.globalAlpha = 0.035 * (1 - t);
+      ctx.drawImage(puff, cx - r, cy - r, r * 2, r * 2);
     }
     ctx.restore();
   }
