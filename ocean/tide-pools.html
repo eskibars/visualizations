@@ -1,0 +1,700 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Tide Pools</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0a1218; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 126% 102% at 50% 52%,
+        rgba(0,0,0,0) 48%, rgba(0,0,0,.26) 82%, rgba(0,0,0,.66) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(206, 236, 226, .28);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">low water · everything holding on</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  TIDE POOLS — a rock shelf at low water, seen from above and
+  //  to one side. Three pools of different depths hold their own
+  //  life: anemones that open and close, a starfish creeping across
+  //  a pool floor, limpets and periwinkles on the rock, weed that
+  //  lifts with the swell, and a slow sheet of water that now and
+  //  then washes over the shelf and drains away.
+  //
+  //  Construction notes
+  //  ------------------
+  //  The rock, the pools' geometry and their bed shading are painted
+  //  once per resize. Per frame: the water surface line in each
+  //  pool, the weed's sway, the animals' own motion, the wash, and
+  //  the foam left in the rock's seams by the last wave.
+  // ============================================================
+  const CONFIG = {
+    //  Wet rock and soft pool gradients; 1.4 is visually identical to 2 and
+    //  noticeably cheaper to fill on a low-power device.
+    dprCap: 1.4,
+
+    pools: [
+      { x: 0.20, y: 0.58, rx: 0.155, ry: 0.105, depth: 1.00 },
+      { x: 0.55, y: 0.72, rx: 0.220, ry: 0.140, depth: 1.35 },
+      { x: 0.82, y: 0.50, rx: 0.125, ry: 0.090, depth: 0.75 },
+    ],
+
+    rockBarnacles: 190,
+    rockSeams: 26,
+    pebbles: 60,
+
+    anemones: 6,
+    starfish: 1,
+    limpets: 14,
+    weedStalks: 22,
+    seaweedBlades: 46,
+
+    washEvery: [12, 26],     // s between waves washing over the shelf
+    washSeconds: 4.2,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  const TAU = Math.PI * 2;
+
+  // ---------------- pool geometry ----------------
+  //  A pool's rim is an irregular ellipse: sampled once per resize and reused
+  //  by everything that needs to know where the water ends.
+  let pools = [];
+
+  function buildPools() {
+    pools = CONFIG.pools.map((p, i) => {
+      const cx = p.x * W;
+      const cy = p.y * H;
+      const rx = p.rx * U;
+      const ry = p.ry * U;
+      const bumps = 20;
+      const rim = [];
+      for (let k = 0; k < bumps; k++) {
+        const a = (k / bumps) * TAU;
+        // Low-frequency wobble only: high frequency makes the pool look torn.
+        const wob = 1
+          + Math.sin(a * 3 + i * 2.1) * 0.075
+          + Math.sin(a * 5 + i) * 0.035;
+        rim.push({ a, r: wob });
+      }
+      return { ...p, i, cx, cy, rx, ry, rim, phase: rand(0, TAU) };
+    });
+  }
+
+  function rimPoint(pool, k) {
+    const kk = ((k % pool.rim.length) + pool.rim.length) % pool.rim.length;
+    const e = pool.rim[kk];
+    return { x: pool.cx + Math.cos(e.a) * pool.rx * e.r, y: pool.cy + Math.sin(e.a) * pool.ry * e.r };
+  }
+
+  function poolPath(g, pool, inset) {
+    g.beginPath();
+    for (let k = 0; k < pool.rim.length; k++) {
+      const pt = rimPoint(pool, k);
+      const s = inset || 0;
+      const x = pool.cx + (pt.x - pool.cx) * (1 - s);
+      const y = pool.cy + (pt.y - pool.cy) * (1 - s);
+      if (k === 0) g.moveTo(x, y); else g.lineTo(x, y);
+    }
+    g.closePath();
+  }
+
+  // ---------------- creatures ----------------
+  const anemones = [];
+  const limpets = [];
+  const weed = [];
+  const pebbles = [];
+  const barnacles = [];
+  const seams = [];
+  let starfish = null;
+
+  function seedLife() {
+    anemones.length = 0;
+    for (let i = 0; i < CONFIG.anemones; i++) {
+      const pool = pools[(Math.random() * pools.length) | 0];
+      // Inside the rim, biased toward the edges where anemones actually sit.
+      const a = rand(0, TAU);
+      const rr = Math.pow(rand(0.30, 0.86), 0.7);
+      anemones.push({
+        x: pool.cx + Math.cos(a) * pool.rx * rr,
+        y: pool.cy + Math.sin(a) * pool.ry * rr,
+        r: rand(0.014, 0.030) * U,
+        hue: rand(300, 350),
+        tentacles: 12 + ((Math.random() * 8) | 0),
+        phase: rand(0, TAU),
+        open: rand(0.55, 1),
+        // Anemones on a shore open and close with the wash.
+        sensitivity: rand(0.5, 1.0),
+      });
+    }
+
+    starfish = {
+      x: pools[1].cx - pools[1].rx * 0.35,
+      y: pools[1].cy + pools[1].ry * 0.10,
+      ang: rand(0, TAU),
+      arm: 5,
+      r: rand(0.030, 0.040) * U,
+      // Creeps a few centimetres a minute; on screen that is a slow crawl.
+      speed: rand(0.0016, 0.0034),
+      phase: rand(0, TAU),
+    };
+
+    limpets.length = 0;
+    for (let i = 0; i < CONFIG.limpets; i++) {
+      const x = rand(W * 0.03, W * 0.97);
+      const y = rand(H * 0.10, H * 0.96);
+      // Keep them off the pools.
+      let inPool = false;
+      for (const p of pools) {
+        const dx = (x - p.cx) / p.rx, dy = (y - p.cy) / p.ry;
+        if (dx * dx + dy * dy < 1.05) { inPool = true; break; }
+      }
+      if (inPool) continue;
+      limpets.push({
+        x, y,
+        r: rand(0.006, 0.013) * U,
+        hue: rand(20, 40),
+        ang: rand(0, TAU),
+        phase: rand(0, TAU),
+      });
+    }
+
+    weed.length = 0;
+    for (let i = 0; i < CONFIG.seaweedBlades; i++) {
+      const x = rand(W * 0.02, W * 0.98);
+      const y = rand(H * 0.08, H * 0.98);
+      weed.push({
+        x, y,
+        h: rand(0.05, 0.17) * U,
+        hue: rand(72, 128),
+        // Narrow blades at the top of the frame read as further away.
+        w: rand(1.2, 3.4) * (U / 1080) * (0.5 + y / H),
+        phase: rand(0, TAU),
+        stiff: rand(0.3, 1.0),
+      });
+    }
+
+    pebbles.length = 0;
+    for (let i = 0; i < CONFIG.pebbles; i++) {
+      pebbles.push({
+        x: rand(0, W), y: rand(H * 0.06, H),
+        r: rand(0.004, 0.018) * U * (0.5 + Math.random()),
+        hue: rand(180, 230),
+        lum: rand(16, 40),
+        ang: rand(0, TAU),
+      });
+    }
+
+    barnacles.length = 0;
+    for (let i = 0; i < CONFIG.rockBarnacles; i++) {
+      barnacles.push({
+        x: rand(0, W), y: rand(H * 0.04, H),
+        r: rand(0.0026, 0.0075) * U,
+        ring: Math.random() < 0.5,
+      });
+    }
+
+    seams.length = 0;
+    for (let i = 0; i < CONFIG.rockSeams; i++) {
+      const x0 = rand(-W * 0.05, W * 1.05);
+      const y0 = rand(H * 0.02, H);
+      const pts = [{ x: x0, y: y0 }];
+      let x = x0, y = y0;
+      const len = rand(4, 12);
+      for (let k = 1; k < len; k++) {
+        x += rand(-0.05, 0.10) * W;
+        y += rand(-0.03, 0.06) * H;
+        pts.push({ x, y });
+      }
+      seams.push({ pts, w: rand(0.8, 2.8) * (U / 1080) });
+    }
+  }
+
+  // ---------------- backdrop ----------------
+  //  Rock, pool basins and the bed shading inside them. Painted once per resize.
+  let backdrop = null;
+
+  function paintBackdrop() {
+    if (!backdrop) backdrop = document.createElement('canvas');
+    backdrop.width = Math.max(1, Math.floor(W * DPR));
+    backdrop.height = Math.max(1, Math.floor(H * DPR));
+    const g = backdrop.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    // Rock base: dark, wet, with a cool cast because this is a shore in shade.
+    const rock = g.createLinearGradient(0, 0, W * 0.4, H);
+    rock.addColorStop(0, '#243038');
+    rock.addColorStop(0.45, '#1a242c');
+    rock.addColorStop(1, '#111a20');
+    g.fillStyle = rock;
+    g.fillRect(0, 0, W, H);
+
+    // Large tonal patches, so the rock is not a flat field.
+    for (let i = 0; i < 22; i++) {
+      const x = rand(0, W), y = rand(0, H);
+      const r = rand(0.10, 0.34) * U;
+      const s = g.createRadialGradient(x, y, 0, x, y, r);
+      const dark = Math.random() < 0.6;
+      s.addColorStop(0, dark
+        ? `rgba(8, 14, 18, ${rand(0.14, 0.34).toFixed(3)})`
+        : `rgba(120, 140, 148, ${rand(0.05, 0.16).toFixed(3)})`);
+      s.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = s;
+      g.beginPath(); g.arc(x, y, r, 0, TAU); g.fill();
+    }
+
+    // Seams and cracks, which is what makes rock read as rock.
+    for (const seam of seams) {
+      g.strokeStyle = 'rgba(6, 10, 14, 0.55)';
+      g.lineWidth = seam.w;
+      g.lineCap = 'round';
+      g.beginPath();
+      g.moveTo(seam.pts[0].x, seam.pts[0].y);
+      for (let k = 1; k < seam.pts.length; k++) g.lineTo(seam.pts[k].x, seam.pts[k].y);
+      g.stroke();
+      // A highlight on the upper side of the seam, as a lit edge.
+      g.strokeStyle = 'rgba(140, 160, 168, 0.10)';
+      g.lineWidth = seam.w * 0.6;
+      g.beginPath();
+      g.moveTo(seam.pts[0].x, seam.pts[0].y - seam.w);
+      for (let k = 1; k < seam.pts.length; k++) g.lineTo(seam.pts[k].x, seam.pts[k].y - seam.w);
+      g.stroke();
+    }
+
+    // Pebbles.
+    for (const p of pebbles) {
+      g.save();
+      g.translate(p.x, p.y);
+      g.rotate(p.ang);
+      const pg = g.createLinearGradient(-p.r, -p.r, p.r, p.r);
+      pg.addColorStop(0, `hsla(${p.hue}, 12%, ${p.lum + 16}%, 1)`);
+      pg.addColorStop(1, `hsla(${p.hue}, 14%, ${p.lum}%, 1)`);
+      g.fillStyle = pg;
+      g.beginPath();
+      g.ellipse(0, 0, p.r, p.r * rand(0.6, 0.86), 0, 0, TAU);
+      g.fill();
+      g.fillStyle = 'rgba(0,0,0,0.30)';
+      g.beginPath();
+      g.ellipse(0, p.r * 0.34, p.r * 0.9, p.r * 0.28, 0, 0, TAU);
+      g.fill();
+      g.restore();
+    }
+
+    // Barnacles: small pale cones with a dark aperture.
+    for (const b of barnacles) {
+      const bg2 = g.createRadialGradient(b.x, b.y, 0, b.x, b.y, b.r);
+      bg2.addColorStop(0, 'rgba(196, 200, 190, 0.62)');
+      bg2.addColorStop(0.7, 'rgba(140, 148, 142, 0.42)');
+      bg2.addColorStop(1, 'rgba(70, 78, 76, 0.10)');
+      g.fillStyle = bg2;
+      g.beginPath(); g.arc(b.x, b.y, b.r, 0, TAU); g.fill();
+      if (b.ring) {
+        g.strokeStyle = 'rgba(20, 26, 26, 0.55)';
+        g.lineWidth = Math.max(0.5, b.r * 0.30);
+        g.beginPath(); g.arc(b.x, b.y, b.r * 0.55, 0, TAU); g.stroke();
+      }
+    }
+
+    // --- pools ---
+    for (const pool of pools) {
+      // Damp halo around the rim: the rock stays wet just beyond the water.
+      g.save();
+      poolPath(g, pool, -0.10);
+      const halo = g.createRadialGradient(pool.cx, pool.cy, pool.rx * 0.7, pool.cx, pool.cy, pool.rx * 1.28);
+      halo.addColorStop(0, 'rgba(0, 0, 0, 0)');
+      halo.addColorStop(0.55, 'rgba(12, 24, 30, 0.34)');
+      halo.addColorStop(1, 'rgba(12, 24, 30, 0)');
+      g.fillStyle = halo;
+      g.fillRect(pool.cx - pool.rx * 1.5, pool.cy - pool.ry * 1.5, pool.rx * 3, pool.ry * 3);
+      g.restore();
+
+      // The basin: water depth reads as brightness, shallow edges are lighter.
+      g.save();
+      poolPath(g, pool, 0);
+      const basin = g.createRadialGradient(
+        pool.cx - pool.rx * 0.24, pool.cy - pool.ry * 0.28, pool.rx * 0.10,
+        pool.cx, pool.cy, pool.rx * 1.02
+      );
+      const dark = clamp(0.30 / pool.depth, 0.14, 0.42);
+      basin.addColorStop(0, `hsla(186, 42%, ${(34 / pool.depth).toFixed(0)}%, 0.96)`);
+      basin.addColorStop(0.55, `hsla(190, 46%, ${(24 / pool.depth).toFixed(0)}%, 0.96)`);
+      basin.addColorStop(1, `hsla(196, 40%, ${(14 / pool.depth).toFixed(0)}%, 0.98)`);
+      g.fillStyle = basin;
+      g.fill();
+
+      // The bed: sand and shell visible through the water, plus a shelf edge.
+      const bedRings = 5;
+      for (let k = 1; k <= bedRings; k++) {
+        const t = k / (bedRings + 1);
+        g.strokeStyle = `hsla(180, 26%, ${(38 - t * 12).toFixed(0)}%, ${(0.12 + t * 0.08).toFixed(3)})`;
+        g.lineWidth = Math.max(1, U * (0.004 + t * 0.010));
+        g.beginPath();
+        for (let m = 0; m <= 48; m++) {
+          const a = (m / 48) * TAU;
+          const rr = 1 - t;
+          const x = pool.cx + Math.cos(a) * pool.rx * rr;
+          const y = pool.cy + Math.sin(a) * pool.ry * rr;
+          if (m === 0) g.moveTo(x, y); else g.lineTo(x, y);
+        }
+        g.stroke();
+      }
+      // Mottling on the bed, as shell grit.
+      for (let k = 0; k < 26; k++) {
+        const a = rand(0, TAU);
+        const rr = Math.sqrt(Math.random()) * 0.92;
+        const x = pool.cx + Math.cos(a) * pool.rx * rr;
+        const y = pool.cy + Math.sin(a) * pool.ry * rr;
+        const r = rand(0.006, 0.024) * U;
+        g.fillStyle = `hsla(${rand(150, 200)}, ${rand(14, 34) | 0}%, ${rand(30, 54) | 0}%, ${rand(0.10, 0.30).toFixed(3)})`;
+        g.beginPath(); g.ellipse(x, y, r, r * rand(0.5, 0.9), rand(0, TAU), 0, TAU); g.fill();
+      }
+      // A wet rim: the bright waterline where the rock meets the pool.
+      g.strokeStyle = 'rgba(176, 214, 214, 0.30)';
+      g.lineWidth = Math.max(1.2, U * 0.0035);
+      poolPath(g, pool, 0.012);
+      g.stroke();
+      g.restore();
+    }
+
+    // The drop shadow each pool's rim casts on the rock below it.
+    for (const pool of pools) {
+      g.save();
+      poolPath(g, pool, -0.04);
+      g.strokeStyle = 'rgba(4, 8, 12, 0.42)';
+      g.lineWidth = Math.max(2, U * 0.010);
+      g.stroke();
+      g.restore();
+    }
+  }
+
+  // ---------------- frame-time life ----------------
+  function drawAnemones(time, wash) {
+    for (const a of anemones) {
+      // The wash makes them close; otherwise they breathe slowly.
+      const closeBy = clamp(wash * a.sensitivity, 0, 1);
+      const open = clamp(a.open * (1 - closeBy * 0.86)
+        + 0.06 * Math.sin(time * 0.7 + a.phase), 0.06, 1);
+      const r = a.r * (0.5 + 0.5 * open);
+      const base = a.r * 0.42;
+
+      // Column: a short cylinder from the rock to the disc.
+      ctx.save();
+      const cg = ctx.createLinearGradient(a.x, a.y, a.x, a.y - r);
+      cg.addColorStop(0, `hsla(${a.hue - 12}, 34%, 22%, 0.9)`);
+      cg.addColorStop(1, `hsla(${a.hue}, 44%, 40%, 0.9)`);
+      ctx.fillStyle = cg;
+      ctx.beginPath();
+      ctx.moveTo(a.x - base * 0.7, a.y);
+      ctx.lineTo(a.x - base * 0.5, a.y - r * 0.8);
+      ctx.lineTo(a.x + base * 0.5, a.y - r * 0.8);
+      ctx.lineTo(a.x + base * 0.7, a.y);
+      ctx.closePath();
+      ctx.fill();
+
+      // Disc and tentacles.
+      const dg = ctx.createRadialGradient(a.x, a.y - r * 0.85, 0, a.x, a.y - r * 0.85, r);
+      dg.addColorStop(0, `hsla(${a.hue + 16}, 62%, ${(34 + open * 22).toFixed(0)}%, 0.95)`);
+      dg.addColorStop(1, `hsla(${a.hue}, 48%, 26%, 0.9)`);
+      ctx.fillStyle = dg;
+      ctx.beginPath();
+      ctx.ellipse(a.x, a.y - r * 0.85, r, r * 0.80, 0, 0, TAU);
+      ctx.fill();
+
+      if (open > 0.12) {
+        ctx.strokeStyle = `hsla(${a.hue + 26}, 66%, ${(58 + open * 18).toFixed(0)}%, ${(open * 0.75).toFixed(3)})`;
+        ctx.lineWidth = Math.max(0.7, r * 0.10);
+        ctx.lineCap = 'round';
+        for (let k = 0; k < a.tentacles; k++) {
+          const ang = (k / a.tentacles) * TAU + a.phase;
+          // Tentacles reach outward and slightly up, and retract as it closes.
+          const reach = r * (0.55 + 0.85 * open);
+          const tipX = a.x + Math.cos(ang) * reach;
+          const tipY = a.y - r * 0.85 + Math.sin(ang) * reach * 0.62
+            + Math.sin(time * 1.4 + k) * r * 0.06 * open;
+          ctx.beginPath();
+          ctx.moveTo(a.x + Math.cos(ang) * r * 0.30 * open, a.y - r * 0.85 + Math.sin(ang) * r * 0.24 * open);
+          ctx.quadraticCurveTo(
+            a.x + Math.cos(ang) * reach * 0.7, a.y - r * 0.85 + Math.sin(ang) * reach * 0.42,
+            tipX, tipY
+          );
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
+  }
+
+  function drawStarfish(time) {
+    const s = starfish;
+    // Creeps along its own heading; wraps so it never leaves the pool.
+    s.x += Math.cos(s.ang) * s.speed * U * (1 / 60);
+    s.y += Math.sin(s.ang) * s.speed * U * (1 / 60);
+    // Turn slightly, forever, so its path is a long curve rather than a line.
+    s.ang += Math.sin(time * 0.13 + s.phase) * 0.006;
+    // Keep it inside the middle pool.
+    const pool = pools[1];
+    const dx = (s.x - pool.cx) / pool.rx, dy = (s.y - pool.cy) / pool.ry;
+    if (dx * dx + dy * dy > 0.62) {
+      s.ang += Math.PI * (0.5 + Math.random());
+    }
+
+    ctx.save();
+    ctx.translate(s.x, s.y);
+    ctx.rotate(s.ang + Math.sin(time * 0.4 + s.phase) * 0.03);
+    // Arms: five tapering, slightly sinuous lobes.
+    ctx.beginPath();
+    for (let k = 0; k < s.arm; k++) {
+      const base = (k / s.arm) * TAU;
+      const span = TAU / s.arm;
+      for (let m = 0; m <= 12; m++) {
+        const t = m / 12;
+        const ang = base - span * 0.42 + span * 0.84 * t;
+        // Radius grows to a point at the arm's middle, back in at the webs.
+        const taper = 0.30 + 0.70 * Math.pow(Math.sin(t * Math.PI), 0.65);
+        const wob = 1 + Math.sin(time * 0.8 + k + t * 3) * 0.035;
+        const rr = s.r * taper * wob;
+        const x = Math.cos(ang) * rr;
+        const y = Math.sin(ang) * rr * 0.92;
+        if (k === 0 && m === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+    }
+    ctx.closePath();
+    const sg = ctx.createRadialGradient(0, 0, 0, 0, 0, s.r);
+    sg.addColorStop(0, 'hsla(14, 58%, 56%, 0.96)');
+    sg.addColorStop(0.55, 'hsla(8, 52%, 44%, 0.96)');
+    sg.addColorStop(1, 'hsla(2, 44%, 30%, 0.94)');
+    ctx.fillStyle = sg;
+    ctx.fill();
+    // Papulae: the little bumps along each arm, as a row of bright dots.
+    ctx.fillStyle = 'hsla(30, 66%, 72%, 0.42)';
+    for (let k = 0; k < s.arm; k++) {
+      const ang = (k / s.arm) * TAU;
+      for (let m = 3; m <= 10; m++) {
+        const t = m / 12;
+        const rr = s.r * (0.30 + 0.70 * Math.pow(Math.sin(t * Math.PI), 0.65)) * 0.86;
+        ctx.beginPath();
+        ctx.arc(Math.cos(ang) * rr, Math.sin(ang) * rr * 0.92, Math.max(0.6, s.r * 0.028), 0, TAU);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawLimpets(time) {
+    for (const l of limpets) {
+      ctx.save();
+      ctx.translate(l.x, l.y);
+      ctx.rotate(l.ang);
+      // A limpet is a low cone seen from slightly above: an ellipse with a
+      // bright apex and a dark skirt.
+      const g = ctx.createRadialGradient(-l.r * 0.3, -l.r * 0.4, l.r * 0.05, 0, 0, l.r * 1.15);
+      g.addColorStop(0, `hsla(${l.hue + 18}, 26%, 62%, 0.92)`);
+      g.addColorStop(0.5, `hsla(${l.hue}, 22%, 44%, 0.92)`);
+      g.addColorStop(1, `hsla(${l.hue - 10}, 20%, 22%, 0.94)`);
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, l.r, l.r * 0.72, 0, 0, TAU);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(8, 12, 14, 0.5)';
+      ctx.lineWidth = Math.max(0.5, l.r * 0.16);
+      ctx.beginPath();
+      ctx.ellipse(0, 0, l.r, l.r * 0.72, 0, 0, TAU);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  function drawWeed(time, wash) {
+    ctx.save();
+    ctx.lineCap = 'round';
+    for (const w of weed) {
+      //  Blades lift with the swell and lie down under the wash. The sway is a
+      //  travelling phase down the blade's length, so each one bends rather
+      //  than swinging rigidly from its base.
+      const lift = Math.sin(time * 0.7 + w.phase) * 0.32 + 0.5 - wash * 0.85;
+      const dir = clamp(lift, -0.4, 1.0);
+      for (let k = 0; k < 3; k++) {
+        const spread = (k - 1) * 0.16;
+        const ang = -Math.PI / 2 + spread + dir * (0.55 - w.stiff * 0.25);
+        const len = w.h * (0.72 + k * 0.14);
+        ctx.strokeStyle = `hsla(${w.hue + k * 6}, ${(34 + w.stiff * 22).toFixed(0)}%, ${(18 + w.stiff * 16).toFixed(0)}%, ${(0.55 - k * 0.10).toFixed(3)})`;
+        ctx.lineWidth = w.w * (1 - k * 0.18);
+        ctx.beginPath();
+        ctx.moveTo(w.x, w.y);
+        ctx.quadraticCurveTo(
+          w.x + Math.cos(ang) * len * 0.42, w.y + Math.sin(ang) * len * 0.62,
+          w.x + Math.cos(ang) * len * 0.9 + Math.sin(time * 1.1 + w.phase) * len * 0.10,
+          w.y + Math.sin(ang) * len
+        );
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawWater(time, wash) {
+    //  Still water in each pool: a bright surface sheen, a couple of travelling
+    //  ripple rings, and the wash's own film crossing the rock.
+    ctx.save();
+    for (const pool of pools) {
+      poolPath(ctx, pool, 0.008);
+      ctx.save();
+      ctx.clip();
+
+      // Sheen: brighter on the side away from the light.
+      const sh = ctx.createLinearGradient(
+        pool.cx - pool.rx, pool.cy - pool.ry,
+        pool.cx + pool.rx, pool.cy + pool.ry
+      );
+      const lift = 0.10 + wash * 0.16;
+      sh.addColorStop(0, `rgba(196, 236, 238, ${(lift * 0.5).toFixed(3)})`);
+      sh.addColorStop(0.5, `rgba(150, 208, 216, ${(lift * 0.9).toFixed(3)})`);
+      sh.addColorStop(1, `rgba(120, 180, 196, ${(lift * 0.4).toFixed(3)})`);
+      ctx.fillStyle = sh;
+      ctx.fillRect(pool.cx - pool.rx * 1.2, pool.cy - pool.ry * 1.2, pool.rx * 2.4, pool.ry * 2.4);
+
+      // Ripples: two rings per pool, expanding and fading on their own clocks.
+      for (let k = 0; k < 2; k++) {
+        const t = ((time * (0.18 + k * 0.07) + pool.phase + k * 0.5) % 1);
+        const a = (1 - t) * (0.16 + wash * 0.10);
+        if (a <= 0.004) continue;
+        ctx.strokeStyle = `rgba(214, 246, 248, ${a.toFixed(3)})`;
+        ctx.lineWidth = Math.max(0.8, U * 0.0028 * (1 - t * 0.6));
+        ctx.beginPath();
+        for (let m = 0; m <= 54; m++) {
+          const ang = (m / 54) * TAU;
+          const rr = t * 0.96;
+          const x = pool.cx + Math.cos(ang) * pool.rx * rr;
+          const y = pool.cy + Math.sin(ang) * pool.ry * rr;
+          if (m === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+
+  function drawWash(time, wash) {
+    if (wash <= 0.004) return;
+    //  A sheet of water crossing the whole shelf on a diagonal, thickest in the
+    //  middle of its pass. Drawn over the rock and under the pools' own sheen
+    //  would be more correct, but over everything reads better: the pools do get
+    //  covered by a wave at high water here.
+    ctx.save();
+    const t = wash;
+    ctx.globalAlpha = 0.20 * Math.sin(t * Math.PI);
+    const g = ctx.createLinearGradient(0, H * (1 - t * 0.7), W, H * (0.3 - t * 0.2));
+    g.addColorStop(0, 'rgba(160, 214, 220, 0)');
+    g.addColorStop(0.35, 'rgba(190, 234, 238, 0.55)');
+    g.addColorStop(0.55, 'rgba(210, 244, 248, 0.70)');
+    g.addColorStop(0.75, 'rgba(180, 226, 232, 0.40)');
+    g.addColorStop(1, 'rgba(150, 206, 216, 0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+    // A ragged leading edge, so the wash does not look like a moving band.
+    ctx.globalAlpha = 0.28 * Math.sin(t * Math.PI);
+    ctx.strokeStyle = 'rgba(240, 252, 254, 0.75)';
+    ctx.lineWidth = Math.max(1.5, U * 0.0035);
+    const edgeY = H * (1 - t * 0.85);
+    ctx.beginPath();
+    for (let x = 0; x <= W; x += Math.max(12, W * 0.012)) {
+      const yy = edgeY + Math.sin(x * 0.010 + time * 1.4) * H * 0.012
+        + Math.sin(x * 0.026 + time * 2.1) * H * 0.005;
+      if (x === 0) ctx.moveTo(x, yy); else ctx.lineTo(x, yy);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // ---------------- loop ----------------
+  let last = performance.now();
+  let ready = false;
+  const start = performance.now();
+  let washT = -1;
+  let nextWash = 0;
+
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.max(1, Math.floor(window.innerWidth));
+    H = Math.max(1, Math.floor(window.innerHeight));
+    U = Math.min(W, H);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    buildPools();
+    seedLife();
+    paintBackdrop();
+  }
+  window.addEventListener('resize', resize, { passive: true });
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = (now - start) / 1000;
+
+    // The wash: a wave crosses the shelf now and then.
+    if (washT < 0 && time >= nextWash) {
+      washT = 0;
+      nextWash = time + rand(CONFIG.washEvery[0], CONFIG.washEvery[1]);
+    }
+    let wash = 0;
+    if (washT >= 0) {
+      washT += dt;
+      const t = washT / CONFIG.washSeconds;
+      //  Rise fast, then drain slow. The drain term has to be clamped before the
+      //  pow: on the frame the wash ends t exceeds 1, the base goes negative, and
+      //  Math.pow(negative, 0.8) is NaN. That NaN then spread through the
+      //  anemones' open/closed state and blew up createLinearGradient.
+      wash = t < 0.35 ? t / 0.35 : Math.pow(Math.max(0, 1 - (t - 0.35) / 0.65), 0.8);
+      wash = clamp(wash, 0, 1);
+      if (washT >= CONFIG.washSeconds) { washT = -1; wash = 0; }
+    }
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.drawImage(backdrop, 0, 0, W, H);
+
+    drawLimpets(time);
+    drawWeed(time, wash);
+    drawAnemones(time, wash);
+    drawStarfish(time);
+    drawWater(time, wash);
+    drawWash(time, wash);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  nextWash = 2.5;
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
