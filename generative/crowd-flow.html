@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Crowd Flow</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #06080e; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 128% 104% at 50% 46%,
+        rgba(0,0,0,0) 46%, rgba(0,0,0,.28) 82%, rgba(0,0,0,.70) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(180, 214, 255, .26);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">flow field · curl noise</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  CROWD FLOW — a few thousand agents each following their own
+  //  curl-noise heading, each drawing one short fading stroke
+  //  behind itself, over a slowly travelling field. It is the
+  //  cheapest way to see a flow field: the field itself is never
+  //  drawn, only the trails the agents leave in it, and the trails
+  //  fade so the pattern is always the last few seconds of motion.
+  //
+  //  Construction notes
+  //  ------------------
+  //  Cost control is the whole design here, because the naive
+  //  version (a few thousand individual strokes per frame) is far
+  //  too slow to run at 60fps on a tablet. Three rules:
+  //    1. the fade is a translucent full-screen fill, not a
+  //       per-trail alpha, so nothing is cleared individually;
+  //    2. headings are sampled from a precomputed grid and
+  //       interpolated, so no per-agent noise evaluation;
+  //    3. agents are batched into a handful of Path2D objects by
+  //       colour and drawn with a few strokes, rather than one
+  //       stroke per agent.
+  //  The grid is rebuilt cheaply over time, so the flow slowly
+  //  reorganises without ever being recomputed wholesale.
+  // ============================================================
+  const CONFIG = {
+    //  Additive trails over a dark ground; resolution beyond 1.4 adds nothing
+    //  visible and costs fill, which is exactly what this page is bounded by.
+    dprCap: 1.4,
+
+    agents: 2500,
+    agentMax: 4200,
+
+    step: 1.5,               // px per frame at 1080h
+    trailWidth: [0.5, 1.5],
+    fade: 0.030,             // alpha of the full-screen fade per frame
+
+    // Heading grid: fieldSize x fieldSize samples, wrapped in space.
+    fieldSize: 64,
+    fieldSpeed: 0.010,       // how fast the flow pattern evolves
+    fieldScale: 2.1,         // noise frequency across the grid
+
+    palette: [
+      [90, 190, 255],
+      [140, 226, 255],
+      [70, 140, 240],
+      [190, 200, 255],
+      [60, 220, 200],
+    ],
+    batchCount: 5,           // one Path2D per palette entry
+
+    // The frame-rate governor: if we cannot hold the budget, agents are shed.
+    frameBudgetMs: 15.5,
+    checkEveryMs: 1400,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+
+  // ---------------- heading field ----------------
+  //  A wrapped grid of angles. Every frame a few cells are re-seeded from
+  //  smooth noise, and agents read the grid with bilinear interpolation, so the
+  //  flow reorganises continuously without a full recompute.
+  let field = null;
+  const FS = CONFIG.fieldSize;
+
+  function hash2(x, y) {
+    const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+    return s - Math.floor(s);
+  }
+
+  function fbm(x, y) {
+    // Three octaves is plenty for a heading field.
+    let v = 0, amp = 0.5, fx = x, fy = y;
+    for (let o = 0; o < 3; o++) {
+      const xi = Math.floor(fx), yi = Math.floor(fy);
+      const xf = fx - xi, yf = fy - yi;
+      const u = xf * xf * (3 - 2 * xf);
+      const w = yf * yf * (3 - 2 * yf);
+      const a = hash2(xi, yi), b = hash2(xi + 1, yi);
+      const c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1);
+      v += amp * ((a * (1 - u) + b * u) * (1 - w) + (c * (1 - u) + d * u) * w);
+      fx *= 2.03; fy *= 2.01;
+      amp *= 0.5;
+    }
+    return v;
+  }
+
+  function seedField(t) {
+    field = new Float32Array(FS * FS);
+    for (let y = 0; y < FS; y++) {
+      for (let x = 0; x < FS; x++) {
+        // Curl of a scalar potential: taking the difference of two offset
+        // samples gives a divergence-free heading, so the flow never bunches
+        // into sinks the way raw noise does.
+        const e = 0.7;
+        const n1 = fbm(x / FS * CONFIG.fieldScale + 11.3, y / FS * CONFIG.fieldScale + t);
+        const n2 = fbm(x / FS * CONFIG.fieldScale + 11.3 + e, y / FS * CONFIG.fieldScale + t);
+        const n3 = fbm(x / FS * CONFIG.fieldScale + 11.3, y / FS * CONFIG.fieldScale + t + e);
+        const dx = (n1 - n2) * 6.0;
+        const dy = (n1 - n3) * 6.0;
+        field[y * FS + x] = Math.atan2(dy, dx) + Math.PI * 0.5;
+      }
+    }
+  }
+
+  let fieldTick = 0;
+  function evolveField(t) {
+    // Re-seed a scattered subset of cells rather than the whole grid. With
+    // enough of them per frame the pattern drifts as a whole, and the cost per
+    // frame is a few hundred noise samples instead of four thousand.
+    const n = Math.max(24, (FS * FS * 0.02) | 0);
+    for (let i = 0; i < n; i++) {
+      const x = (Math.random() * FS) | 0;
+      const y = (Math.random() * FS) | 0;
+      const e = 0.7;
+      const sx = x / FS * CONFIG.fieldScale + 11.3;
+      const sy = y / FS * CONFIG.fieldScale;
+      const n1 = fbm(sx, sy + t);
+      const n2 = fbm(sx + e, sy + t);
+      const n3 = fbm(sx, sy + t + e);
+      field[y * FS + x] = Math.atan2((n1 - n3) * 6.0, (n1 - n2) * 6.0) + Math.PI * 0.5;
+    }
+    fieldTick = t;
+  }
+
+  function headingAt(px, py) {
+    // Bilinear sample of the wrapped grid, with the shortest angular
+    // difference, so a cell pair straddling 0/2pi does not tear.
+    const fx = (px / W) * FS;
+    const fy = (py / H) * FS;
+    const x0 = Math.floor(fx), y0 = Math.floor(fy);
+    const tx = fx - x0, ty = fy - y0;
+    const xa = ((x0 % FS) + FS) % FS, xb = (xa + 1) % FS;
+    const ya = ((y0 % FS) + FS) % FS, yb = (ya + 1) % FS;
+    const a = field[ya * FS + xa], b = field[ya * FS + xb];
+    const c = field[yb * FS + xa], d = field[yb * FS + xb];
+    const mix = (p, q, u) => {
+      let diff = q - p;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      return p + diff * u;
+    };
+    const top = mix(a, b, tx);
+    const bot = mix(c, d, tx);
+    return mix(top, bot, ty);
+  }
+
+  // ---------------- agents ----------------
+  //  Stored in typed arrays: a few thousand objects would dominate the frame.
+  let ax, ay, alen, abatch;
+  let agentCount = 0;
+
+  function seedAgents() {
+    const cap = CONFIG.agentMax;
+    ax = new Float32Array(cap);
+    ay = new Float32Array(cap);
+    alen = new Float32Array(cap);
+    abatch = new Uint8Array(cap);
+    for (let i = 0; i < cap; i++) place(i);
+    agentCount = CONFIG.agents;
+  }
+
+  function place(i) {
+    ax[i] = Math.random() * W;
+    ay[i] = Math.random() * H;
+    alen[i] = rand(CONFIG.trailWidth[0], CONFIG.trailWidth[1]) * (U / 1080);
+    abatch[i] = (Math.random() * CONFIG.batchCount) | 0;
+  }
+
+  // ---------------- loop ----------------
+  let paths = [];
+  let last = performance.now();
+  let lastCheck = last;
+  let ema = 16;
+  let ready = false;
+  const start = performance.now();
+
+  function buildPaths() {
+    paths = [];
+    for (let b = 0; b < CONFIG.batchCount; b++) paths.push(new Path2D());
+  }
+
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.max(1, Math.floor(window.innerWidth));
+    H = Math.max(1, Math.floor(window.innerHeight));
+    U = Math.min(W, H);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    // Start from a dark ground rather than painting one every frame.
+    ctx.fillStyle = '#06080e';
+    ctx.fillRect(0, 0, W, H);
+    buildPaths();
+    seedField(0);
+    seedAgents();
+  }
+  window.addEventListener('resize', resize, { passive: true });
+
+  function frame(now) {
+    const dtMs = now - last;
+    last = now;
+    const time = (now - start) / 1000;
+
+    ema = ema * 0.93 + Math.min(dtMs, 100) * 0.07;
+
+    // Governor: shed agents on a slow frame, recover gently.
+    if (now - lastCheck > CONFIG.checkEveryMs) {
+      lastCheck = now;
+      if (ema > CONFIG.frameBudgetMs * 1.45 && agentCount > 700) {
+        agentCount = Math.max(700, Math.floor(agentCount * 0.80));
+      } else if (ema < CONFIG.frameBudgetMs * 0.66 && agentCount < CONFIG.agentMax) {
+        agentCount = Math.min(CONFIG.agentMax, Math.floor(agentCount * 1.10) + 1);
+      }
+    }
+
+    evolveField(time * CONFIG.fieldSpeed);
+
+    // The fade: one translucent fill darkens every trail a little, which is
+    // what keeps the picture to the last few seconds of motion. Drawing it
+    // first means agents then add on top within the same frame.
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = `rgba(6, 8, 14, ${CONFIG.fade})`;
+    ctx.fillRect(0, 0, W, H);
+
+    // Step every agent and accumulate its segment into its colour's path.
+    const step = CONFIG.step * (U / 1080);
+    // Path2D has no cheap reset, so a fresh set is built each frame. These are
+    // small objects and there are only batchCount of them, which is the whole
+    // reason the strokes are batched in the first place.
+    for (let b = 0; b < CONFIG.batchCount; b++) paths[b] = new Path2D();
+
+    for (let i = 0; i < agentCount; i++) {
+      const ang = headingAt(ax[i], ay[i]);
+      const nx = ax[i] + Math.cos(ang) * step;
+      const ny = ay[i] + Math.sin(ang) * step;
+      const p = paths[abatch[i]];
+      p.moveTo(ax[i], ay[i]);
+      p.lineTo(nx, ny);
+      ax[i] = nx;
+      ay[i] = ny;
+      // Respawn off the edge it left by, so the field stays evenly seeded.
+      if (nx < -4 || nx > W + 4 || ny < -4 || ny > H + 4) place(i);
+    }
+
+    ctx.globalCompositeOperation = 'lighter';
+    for (let b = 0; b < CONFIG.batchCount; b++) {
+      const c = CONFIG.palette[b];
+      ctx.strokeStyle = `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
+      ctx.lineWidth = 1.1 * (U / 1080) + 0.4;
+      ctx.lineCap = 'round';
+      ctx.stroke(paths[b]);
+    }
+    ctx.globalCompositeOperation = 'source-over';
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
