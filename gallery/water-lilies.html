@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Water Lilies</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #1d3a31; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 130% 104% at 48% 44%,
+        rgba(0,0,0,0) 44%, rgba(0,0,0,.24) 84%, rgba(0,0,0,.58) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(222, 232, 214, .28);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">giverny · late afternoon</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  WATER LILIES — the pond at Giverny, seen at the pace the
+  //  paintings move. The water is a field of impressionist
+  //  dabs painted once; lily pads and their flowers drift on
+  //  almost-imperceptible orbits; ripples let go of the pads
+  //  now and then; willow strands sway along the top; and the
+  //  light moves over the whole thing like weather.
+  //
+  //  Construction notes
+  //  ------------------
+  //  The Impressionist surface is ~1800 short elliptical dabs
+  //  pre-rendered per resize — greens toward the depth, sky
+  //  lilacs near the top where the water reflects the evening.
+  //  Everything that moves is small and cheap: pads (drifting,
+  //  very slowly rotating, drawn as notched ellipses with rim
+  //  light), flowers (two petal whorls over a pad), ripple
+  //  rings from a pooled set, willow strands redrawn per frame
+  //  with a sway phase, and the shimmer — three wide soft
+  //  patches drifting under 'screen'.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1.6,
+
+    pads: 17,
+    flowers: 7,
+    ripples: 5,
+
+    dabs: 1800,
+    willowStrands: 9,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  // -------------------- static: the painted pond --------------------
+  let pondLayer;
+  function paintPond() {
+    pondLayer = document.createElement('canvas');
+    pondLayer.width = Math.floor(W * DPR); pondLayer.height = Math.floor(H * DPR);
+    const g = pondLayer.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    // depth gradient: sky-lit at the top, dark green at the bottom
+    const grad = g.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, '#7a9a86');
+    grad.addColorStop(0.3, '#4f7a66');
+    grad.addColorStop(0.65, '#3a6153');
+    grad.addColorStop(1, '#27443a');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, W, H);
+
+    // impressionist dabs: short ellipses, palette varies by depth
+    const deep = ['#2f5244', '#3a6152', '#27453a', '#456e5c'];
+    const mid = ['#527d67', '#63917a', '#4a7361', '#6f9a84'];
+    const sky = ['#8fa895', '#9aa9a0', '#a3b3a2', '#8c9aa8', '#a89bb0'];
+    for (let i = 0; i < CONFIG.dabs; i++) {
+      const y = Math.random() * H;
+      const yn = y / H;
+      const pal = yn < 0.28 ? sky : (yn < 0.62 ? mid : deep);
+      const col = pal[(Math.random() * pal.length) | 0];
+      const a = (yn < 0.28 ? rand(0.10, 0.26) : rand(0.08, 0.22));
+      const rx = rand(6, 22) * U * (0.8 + yn * 0.6);
+      const ry = rx * rand(0.28, 0.45);
+      g.fillStyle = col;
+      g.globalAlpha = a;
+      g.beginPath();
+      g.ellipse(Math.random() * W, y, rx, ry, rand(-0.35, 0.35), 0, Math.PI * 2);
+      g.fill();
+    }
+    g.globalAlpha = 1;
+
+    // broad soft patches of depth and light, so the field isn't uniform
+    for (let i = 0; i < 9; i++) {
+      const dark = i % 3 === 0;
+      const x = Math.random() * W, y = Math.random() * H;
+      const r = W * rand(0.08, 0.2);
+      const pg = g.createRadialGradient(x, y, 0, x, y, r);
+      pg.addColorStop(0, dark ? 'rgba(24, 48, 40, .18)' : 'rgba(168, 186, 168, .12)');
+      pg.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = pg;
+      g.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+
+    // a few long horizontal streaks: reflected sky bands
+    for (let i = 0; i < 7; i++) {
+      const y = H * rand(0.02, 0.3);
+      g.globalAlpha = rand(0.05, 0.1);
+      g.fillStyle = '#c3c2c8';
+      g.fillRect(Math.random() * W * 0.6, y, W * rand(0.2, 0.5), H * 0.008);
+    }
+    g.globalAlpha = 1;
+  }
+
+  // -------------------- lily pads --------------------
+  const pads = [];
+  const PAD_GREENS = ['#4a6b48', '#557a50', '#5f8457', '#4f7350', '#68895c', '#5a7d54'];
+  function buildPads() {
+    pads.length = 0;
+    for (let i = 0; i < CONFIG.pads; i++) {
+      const depth = Math.random();             // 0 far (top), 1 near
+      const r = W * (0.018 + 0.03 * depth) * rand(0.8, 1.2);
+      pads.push({
+        x: rand(0.04, 0.96) * W,
+        y: H * (0.08 + 0.84 * Math.pow(depth, 0.85)),
+        r,
+        squash: rand(0.62, 0.8),
+        rot: rand(0, Math.PI * 2),
+        vr: rand(-0.05, 0.05),
+        ox: rand(0, Math.PI * 2),
+        oy: rand(0, Math.PI * 2),
+        orbit: rand(6, 16),                    // px of slow drift
+        col: PAD_GREENS[(Math.random() * PAD_GREENS.length) | 0],
+        flower: null,
+      });
+    }
+    // put flowers on pads with room
+    let placed = 0;
+    const order = pads.slice().sort(() => Math.random() - 0.5);
+    for (const p of order) {
+      if (placed >= CONFIG.flowers) break;
+      if (p.r < W * 0.02) continue;
+      p.flower = {
+        ph: rand(0, Math.PI * 2),
+        petals: 8 + (Math.random() * 4 | 0),
+        tint: Math.random() < 0.5 ? '#f2ead9' : '#f4dfe0',
+      };
+      placed++;
+    }
+  }
+
+  function drawPad(p, t) {
+    const x = p.x + Math.sin(t * 0.05 + p.ox) * p.orbit;
+    const y = p.y + Math.cos(t * 0.043 + p.oy) * p.orbit * 0.6;
+    const bob = Math.sin(t * 0.5 + p.ox) * 1.2 * U;
+
+    ctx.save();
+    ctx.translate(x, y + bob);
+    ctx.rotate(p.rot);
+
+    // shadow under the pad
+    ctx.fillStyle = 'rgba(16, 36, 28, .35)';
+    ctx.beginPath();
+    ctx.ellipse(p.r * 0.12, p.r * p.squash * 0.35, p.r * 1.02, p.r * p.squash * 1.02, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // the pad: two overlapping ellipses read as an organic leaf
+    ctx.fillStyle = p.col;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, p.r, p.r * p.squash, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(p.r * 0.22, -p.r * 0.1, p.r * 0.72, p.r * p.squash * 0.78, 0.4, 0, Math.PI * 2);
+    ctx.fill();
+    // subtle notch: thin water wedge at the rim
+    ctx.save();
+    ctx.rotate(-0.7);
+    ctx.fillStyle = 'rgba(48, 78, 66, .75)';
+    ctx.beginPath();
+    ctx.moveTo(p.r * 0.15, 0);
+    ctx.arc(0, 0, p.r * 1.04, -0.09, 0.09);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+    // water tint over the leaf: it sits IN the pond, not on it
+    ctx.fillStyle = 'rgba(58, 97, 83, .16)';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, p.r, p.r * p.squash, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // rim light upper-left, shade lower-right
+    ctx.strokeStyle = 'rgba(188, 210, 172, .30)';
+    ctx.lineWidth = Math.max(1, p.r * 0.05);
+    ctx.beginPath();
+    ctx.ellipse(0, 0, p.r * 0.93, p.r * p.squash * 0.93, 0, Math.PI * 1.05, Math.PI * 1.7);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(26, 48, 40, .30)';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, p.r * 0.95, p.r * p.squash * 0.95, 0, Math.PI * 0.1, Math.PI * 0.7);
+    ctx.stroke();
+
+    // flower: two whorls of petals
+    if (p.flower) {
+      const f = p.flower;
+      const fr = p.r * 0.46;
+      const sway = Math.sin(t * 0.6 + f.ph) * 0.06;
+      ctx.rotate(sway);
+      for (const [layer, scale, alpha] of [[0, 1, 0.92], [1, 0.6, 1]]) {
+        const col = layer === 0 ? f.tint : '#faf5ea';
+        for (let k = 0; k < f.petals; k++) {
+          const a = f.ph + k / f.petals * Math.PI * 2 + layer * 0.4;
+          const lenJit = 1 + 0.28 * Math.sin(k * 12.9 + f.ph * 5);
+          ctx.save();
+          ctx.rotate(a);
+          ctx.globalAlpha = alpha;
+          ctx.fillStyle = col;
+          ctx.beginPath();
+          ctx.ellipse(fr * scale * 0.58 * lenJit, 0, fr * scale * 0.5 * lenJit, fr * scale * 0.17, 0.3, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+      ctx.globalAlpha = 1;
+      // heart of the flower
+      ctx.fillStyle = '#e8c86a';
+      ctx.beginPath();
+      ctx.arc(0, 0, fr * 0.16, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+    return { x, y };
+  }
+
+  // -------------------- ripples --------------------
+  const ripples = [];
+  function stepRipples(t, dt) {
+    if (ripples.length < CONFIG.ripples && Math.random() < dt / 2.8) {
+      const p = pads[(Math.random() * pads.length) | 0];
+      ripples.push({
+        x: p.x + Math.sin(t * 0.05 + p.ox) * p.orbit,
+        y: p.y + Math.cos(t * 0.043 + p.oy) * p.orbit * 0.6,
+        r: p.r * 1.1,
+        life: 0, max: rand(2.2, 3.4),
+      });
+    }
+    for (let i = ripples.length - 1; i >= 0; i--) {
+      const r = ripples[i];
+      r.life += dt;
+      if (r.life >= r.max) { ripples.splice(i, 1); continue; }
+    }
+  }
+  function drawRipples() {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(214, 228, 210, .5)';
+    for (const r of ripples) {
+      const k = r.life / r.max;
+      ctx.globalAlpha = 0.4 * Math.sin(k * Math.PI);
+      ctx.lineWidth = Math.max(1, 2 * U * (1 - k));
+      ctx.beginPath();
+      ctx.ellipse(r.x, r.y, r.r + k * W * 0.055, (r.r + k * W * 0.055) * 0.42, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 0.25 * Math.sin(k * Math.PI);
+      ctx.beginPath();
+      ctx.ellipse(r.x, r.y, (r.r + k * W * 0.055) * 0.7, (r.r + k * W * 0.055) * 0.3, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  // -------------------- willow --------------------
+  function drawWillow(t) {
+    ctx.save();
+    ctx.lineCap = 'round';
+    for (let i = 0; i < CONFIG.willowStrands; i++) {
+      const baseX = ((i * 0.137 + 0.04) % 1) * W * 1.06 - W * 0.03;
+      const len = H * (0.12 + ((i * 61.7) % 1) * 0.12);
+      const sway = Math.sin(t * 0.35 + i * 1.7) * 16 * U;
+      const green = ['#33502f', '#3d5c38', '#47683f', '#2c4629'][i % 4];
+      ctx.strokeStyle = green;
+      ctx.globalAlpha = 0.34;
+      ctx.lineWidth = Math.max(1.4, 2.6 * U);
+      // the strand droops: steeper as it falls
+      ctx.beginPath();
+      ctx.moveTo(baseX, -4);
+      ctx.quadraticCurveTo(baseX + sway * 0.35 - 14 * U, len * 0.55, baseX + sway - 40 * U, len);
+      ctx.stroke();
+      // leaves hang along it, angled down
+      for (let k = 1; k <= 5; k++) {
+        const kk = k / 5;
+        const lx = baseX + (sway - 40 * U) * kk * kk;
+        const ly = len * kk;
+        const ll = (7 + (k % 3) * 4) * U;
+        ctx.lineWidth = Math.max(1, 1.8 * U);
+        ctx.beginPath();
+        ctx.moveTo(lx, ly);
+        ctx.quadraticCurveTo(lx - 4 * U, ly + ll * 0.6, lx - 9 * U, ly + ll);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  // -------------------- light shimmer --------------------
+  const shimmers = [
+    { x: 0.3, y: 0.3, s: 0.5, a: 0.05, sp: 0.05, ph: 0 },
+    { x: 0.7, y: 0.55, s: 0.6, a: 0.045, sp: 0.037, ph: 2.4 },
+    { x: 0.45, y: 0.8, s: 0.55, a: 0.04, sp: 0.045, ph: 4.1 },
+  ];
+  let glowWarmLily;
+  function drawShimmer(t) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    for (const s of shimmers) {
+      const x = (s.x + Math.sin(t * s.sp + s.ph) * 0.08) * W;
+      const y = (s.y + Math.cos(t * s.sp * 0.8 + s.ph) * 0.05) * H;
+      const a = s.a * (0.7 + 0.3 * Math.sin(t * 0.23 + s.ph * 3));
+      ctx.globalAlpha = a;
+      ctx.drawImage(glowWarmLily, x - W * s.s / 2, y - W * s.s / 2, W * s.s, W * s.s);
+    }
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  // -------------------- resize / build --------------------
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    U = W / 1600;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    glowWarmLily = makeGlow(240, 232, 200);
+    paintPond();
+    buildPads();
+  }
+  function makeGlow(r, g, b) {
+    const s = 128, c = document.createElement('canvas');
+    c.width = c.height = s;
+    const g2 = c.getContext('2d');
+    const grad = g2.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    grad.addColorStop(0, `rgba(${r},${g},${b},1)`);
+    grad.addColorStop(0.4, `rgba(${r},${g},${b},.4)`);
+    grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    g2.fillStyle = grad;
+    g2.fillRect(0, 0, s, s);
+    return c;
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  // -------------------- loop --------------------
+  let last = performance.now();
+  let ready = false;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const t = now / 1000;
+
+    ctx.drawImage(pondLayer, 0, 0, W, H);
+
+    drawShimmer(t);
+    drawWillow(t);
+
+    // far pads first
+    const drawn = pads.slice().sort((a, b) => a.y - b.y);
+    for (const p of drawn) drawPad(p, t);
+
+    stepRipples(t, dt);
+    drawRipples();
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
