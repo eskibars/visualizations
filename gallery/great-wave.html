@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>The Great Wave</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #171310; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 130% 104% at 50% 42%,
+        rgba(0,0,0,0) 44%, rgba(0,0,0,.26) 84%, rgba(0,0,0,.6) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(235, 224, 195, .30);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">kanagawa · the wave that never breaks</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  THE GREAT WAVE — the print, kept breathing. The wave is a
+  //  parametric silhouette: face, curling lip, three claw
+  //  fingers, the trough where the boats wait. Each frame the
+  //  whole mass swells on its swell cycle, the claws flex on
+  //  their own offsets, the scalloped foam crawls along the
+  //  crest, and spray lifts off the tips. Fuji and the banded
+  //  sky hold still, as Fuji does.
+  //
+  //  Construction notes
+  //  ------------------
+  //  The silhouette is a chain of quadratic segments through
+  //  hand-placed control points, rebuilt per frame so breath
+  //  (a slow swell of the whole mass) and flex (per-claw phase
+  //  offsets) can move the points before the path is filled.
+  //  Foam is chains of arcs laid along the crest polylines,
+  //  their positions drifting with time so the foam seems to
+  //  travel. Everything static — sky bands, cloud bar, Fuji,
+  //  the sea with its row curves, the frozen spray field — is
+  //  painted once per resize.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1.6,
+
+    fuji: { x: 0.855, y: 0.50, w: 0.082, h: 0.10 },
+
+    boats: [
+      { x: 0.665, y: 0.62, s: 0.115, rot: -0.10 },
+      { x: 0.80, y: 0.72, s: 0.125, rot: 0.06 },
+      { x: 0.925, y: 0.80, s: 0.135, rot: -0.03 },
+    ],
+
+    breathe: { rate: 0.42, ampY: 0.013, ampX: 0.007 },
+    spray: 26,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  // -------------------- static scenery --------------------
+  let bgLayer;
+  function paintBg() {
+    bgLayer = document.createElement('canvas');
+    bgLayer.width = Math.floor(W * DPR); bgLayer.height = Math.floor(H * DPR);
+    const g = bgLayer.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    // sky: pale at the horizon, smoke grey above, print-style bands
+    const sky = g.createLinearGradient(0, 0, 0, H * 0.56);
+    sky.addColorStop(0, '#5d5648');
+    sky.addColorStop(0.35, '#8d8168');
+    sky.addColorStop(0.75, '#c2b088');
+    sky.addColorStop(1, '#d9c9a0');
+    g.fillStyle = sky;
+    g.fillRect(0, 0, W, H * 0.56);
+
+    // the dark cloud bar, flat and stylised, drifting nothing
+    g.fillStyle = '#4a443a';
+    g.beginPath();
+    g.moveTo(-2, H * 0.10);
+    for (let x = -2; x <= W * 0.62; x += 24) {
+      const t = x / W;
+      g.lineTo(x, H * 0.10 - Math.abs(Math.sin(t * 9 + 1)) * H * 0.012 - Math.sin(t * 23) * H * 0.004);
+    }
+    g.lineTo(W * 0.62, H * 0.155);
+    for (let x = W * 0.62; x >= -2; x -= 24) {
+      const t = x / W;
+      g.lineTo(x, H * 0.155 + Math.abs(Math.sin(t * 11 + 3)) * H * 0.008);
+    }
+    g.closePath();
+    g.fill();
+    // pale gap band under the cloud (the print's echo stripe)
+    g.fillStyle = 'rgba(217, 201, 160, .5)';
+    g.fillRect(-2, H * 0.155, W * 0.55, H * 0.016);
+
+    // paper grain
+    for (let i = 0; i < 900; i++) {
+      g.fillStyle = `rgba(${Math.random() < 0.5 ? '70,62,48' : '235,225,200'}, ${rand(0.015, 0.05).toFixed(3)})`;
+      g.fillRect(Math.random() * W, Math.random() * H, 1.4 * U, 1.4 * U);
+    }
+
+    // Fuji: flat cone with snow cap, small, centre distance
+    const fx = W * CONFIG.fuji.x, fy = H * CONFIG.fuji.y;
+    const fw = W * CONFIG.fuji.w, fh = H * CONFIG.fuji.h;
+    g.fillStyle = '#6e6152';
+    g.beginPath();
+    g.moveTo(fx - fw / 2, fy);
+    g.quadraticCurveTo(fx - fw * 0.18, fy - fh * 0.75, fx - fw * 0.14, fy - fh);
+    g.lineTo(fx + fw * 0.14, fy - fh);
+    g.quadraticCurveTo(fx + fw * 0.18, fy - fh * 0.75, fx + fw / 2, fy);
+    g.closePath();
+    g.fill();
+    // snowcap with the print's jagged lower edge
+    g.fillStyle = '#e8e0cc';
+    g.beginPath();
+    g.moveTo(fx - fw * 0.14, fy - fh);
+    g.lineTo(fx + fw * 0.14, fy - fh);
+    g.lineTo(fx + fw * 0.10, fy - fh * 0.82);
+    g.lineTo(fx + fw * 0.045, fy - fh * 0.88);
+    g.lineTo(fx, fy - fh * 0.78);
+    g.lineTo(fx - fw * 0.05, fy - fh * 0.88);
+    g.lineTo(fx - fw * 0.10, fy - fh * 0.8);
+    g.closePath();
+    g.fill();
+
+    // sea: deep prussian with rows of dark curved scallop lines
+    const sea = g.createLinearGradient(0, H * 0.52, 0, H);
+    sea.addColorStop(0, '#2d5273');
+    sea.addColorStop(0.5, '#24466a');
+    sea.addColorStop(1, '#1b3a58');
+    g.fillStyle = sea;
+    g.fillRect(0, H * 0.52, W, H * 0.48);
+    g.strokeStyle = 'rgba(16, 34, 56, .55)';
+    for (let row = 0; row < 9; row++) {
+      const y = H * (0.545 + row * 0.052);
+      const amp = H * 0.012 * (1 + row * 0.18);
+      g.lineWidth = Math.max(1, (1 + row * 0.35) * U);
+      g.beginPath();
+      for (let x = -2; x <= W + 2; x += 10) {
+        const yy = y - Math.abs(Math.sin(x * 0.008 / (1 + row * 0.2) + row * 2.4)) * amp;
+        if (x < 0) g.moveTo(x, yy); else g.lineTo(x, yy);
+      }
+      g.stroke();
+    }
+  }
+
+  // -------------------- wave geometry --------------------
+  //  Control points, in fractions of W/H. The chain runs up the
+  //  face, over the lip, down through the three claws, and away
+  //  under the trough. Each point: [x, y, flexGroup]
+  //  flexGroup: 0 = none, 1..3 = claw index (sways), 9 = lip.
+  const SIL = [
+    [-0.03, 0.585, 0],
+    [0.13, 0.492, 0],
+    [0.30, 0.365, 0],
+    [0.44, 0.245, 0],
+    [0.53, 0.155, 9],
+    [0.615, 0.178, 9],
+    [0.672, 0.248, 9],
+    [0.705, 0.318, 9],      // lip tip
+    [0.79, 0.335, 1],
+    [0.858, 0.395, 1],
+    [0.868, 0.442, 1],      // claw 1 tip: long, hooks down
+    [0.792, 0.392, 1],
+    [0.722, 0.330, 1],      // notch 1 — deep V back to the lip
+    [0.79, 0.415, 2],
+    [0.825, 0.49, 2],
+    [0.812, 0.548, 2],      // claw 2 tip
+    [0.748, 0.505, 2],
+    [0.706, 0.415, 2],      // notch 2
+    [0.698, 0.492, 3],
+    [0.682, 0.575, 3],
+    [0.652, 0.608, 3],      // claw 3 tip, curling toward the boats
+    [0.626, 0.548, 3],
+    [0.615, 0.468, 3],      // notch 3
+    [0.626, 0.53, 0],
+    [0.668, 0.648, 0],
+    [0.762, 0.742, 0],
+    [0.86, 0.80, 0],
+    [1.03, 0.868, 0],
+  ];
+
+  //  Quadratic-smooth the chain: control point at each joint is
+  //  the joint itself; the curve passes through midpoints. This
+  //  gives the woodblock roundedness.
+  function buildWavePath(t) {
+    const br = CONFIG.breathe;
+    const swellY = 1 + br.ampY * Math.sin(t * br.rate);
+    const swellX = 1 + br.ampX * Math.sin(t * br.rate + 0.9);
+    const anchorY = 0.75;   // swell about the trough line
+
+    const P = SIL.map(([fx, fy, grp]) => {
+      let x = fx * W, y = fy * H;
+      // breath about the trough anchor
+      y = anchorY * H + (y - anchorY * H) * swellY;
+      x = 0.5 * W + (x - 0.5 * W) * swellX;
+      // per-claw flex and lip sway
+      if (grp >= 1 && grp <= 3) {
+        x += Math.sin(t * 0.85 + grp * 1.9) * 7 * U;
+        y += Math.sin(t * 0.72 + grp * 2.6) * 6 * U;
+      } else if (grp === 9) {
+        x += Math.sin(t * 0.5 + 1.2) * 5 * U;
+        y += Math.sin(t * 0.62) * 4 * U;
+      }
+      return { x, y };
+    });
+
+    const path = new Path2D();
+    path.moveTo(P[0].x, P[0].y);
+    for (let i = 1; i < P.length - 1; i++) {
+      const mx = (P[i].x + P[i + 1].x) / 2;
+      const my = (P[i].y + P[i + 1].y) / 2;
+      path.quadraticCurveTo(P[i].x, P[i].y, mx, my);
+    }
+    const last = P[P.length - 1];
+    path.lineTo(last.x, last.y);
+    path.lineTo(last.x, H + 4);
+    path.lineTo(P[0].x, H + 4);
+    path.closePath();
+    return { path, P };
+  }
+
+  // -------------------- foam --------------------
+  //  Scallop chains laid along a polyline; arcs bulge to the
+  //  upper-left of travel; phase drifts so foam crawls.
+  function foamAlong(P, i0, i1, spacing, radius, t, phase) {
+    ctx.fillStyle = '#ece4cf';
+    ctx.beginPath();
+    // accumulate arc-length positions along the sub-polyline
+    let dist = (t * 14 + phase) % spacing;   // crawl
+    for (let i = i0; i < i1; i++) {
+      const a = P[i], b = P[i + 1];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const len = Math.hypot(dx, dy) || 1;
+      let d = dist;
+      while (d < len) {
+        const px = a.x + dx * (d / len);
+        const py = a.y + dy * (d / len);
+        // normal pointing up-left of travel
+        const nx = -dy / len, ny = dx / len;
+        const r = radius * (0.8 + 0.35 * Math.sin(i * 3.1 + d * 0.05 + phase));
+        ctx.moveTo(px + nx * r, py + ny * r);
+        ctx.arc(px, py, r, Math.atan2(ny, nx) - Math.PI * 0.5, Math.atan2(ny, nx) + Math.PI * 0.5);
+        d += spacing;
+      }
+      dist = d - len;
+    }
+    ctx.fill();
+  }
+
+  // -------------------- spray --------------------
+  const spray = [];
+  function buildSpray() {
+    spray.length = 0;
+    for (let i = 0; i < CONFIG.spray; i++) {
+      spray.push(newSprayBit(true));
+    }
+  }
+  function newSprayBit(anywhere) {
+    return {
+      // born at the claw tips / lip
+      x: W * rand(0.62, 0.88),
+      y: H * rand(0.28, 0.55),
+      vx: rand(12, 44),
+      vy: anywhere ? rand(-8, 30) : rand(-26, -6),
+      r: rand(1.2, 3.4) * U,
+      life: 0, max: rand(1.4, 3.2),
+    };
+  }
+  function stepSpray(t2, dt) {
+    for (let i = 0; i < spray.length; i++) {
+      const s = spray[i];
+      s.life += dt;
+      if (s.life >= s.max) { spray[i] = newSprayBit(false); continue; }
+      s.vy += 26 * dt;
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+    }
+  }
+  function drawSpray(t2) {
+    ctx.fillStyle = 'rgba(236, 228, 207, .8)';
+    for (const s of spray) {
+      const k = s.life / s.max;
+      ctx.globalAlpha = 0.75 * Math.sin(k * Math.PI);
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // -------------------- boats --------------------
+  function drawBoats(t) {
+    for (const b of CONFIG.boats) {
+      const bx = W * b.x, by = H * b.y;
+      const s = W * b.s * 0.5;
+      const heave = Math.sin(t * 0.7 + b.x * 9) * 4.5 * U;
+      const rock = b.rot + Math.sin(t * 0.52 + b.x * 5) * 0.035;
+      ctx.save();
+      ctx.translate(bx, by + heave);
+      ctx.rotate(rock);
+      // hull: elongated crescent
+      ctx.fillStyle = '#141b26';
+      ctx.beginPath();
+      ctx.moveTo(-s, 0);
+      ctx.quadraticCurveTo(0, s * 0.30, s, -s * 0.06);
+      ctx.quadraticCurveTo(s * 0.4, s * 0.22, -s * 0.6, s * 0.16);
+      ctx.quadraticCurveTo(-s * 0.9, s * 0.1, -s, 0);
+      ctx.closePath();
+      ctx.fill();
+      // gunwale line
+      ctx.strokeStyle = 'rgba(226, 216, 192, .8)';
+      ctx.lineWidth = Math.max(1, 2.2 * U);
+      ctx.beginPath();
+      ctx.moveTo(-s * 0.94, -s * 0.02);
+      ctx.quadraticCurveTo(0, s * 0.26, s * 0.96, -s * 0.08);
+      ctx.stroke();
+      // crew marks
+      ctx.fillStyle = '#141b26';
+      for (let i = 0; i < 4; i++) {
+        const px = -s * 0.55 + i * s * 0.34;
+        ctx.fillRect(px, -s * 0.20 - Math.sin(i * 1.8) * s * 0.05, Math.max(1.5, s * 0.05), s * 0.22);
+      }
+      ctx.restore();
+    }
+  }
+
+  // -------------------- resize / build --------------------
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    U = W / 1600;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    paintBg();
+    buildSpray();
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  // -------------------- loop --------------------
+  let last = performance.now();
+  let ready = false;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const t = now / 1000;
+
+    ctx.drawImage(bgLayer, 0, 0, W, H);
+
+    const { path, P } = buildWavePath(t);
+
+    // the mass
+    const grad = ctx.createLinearGradient(0, H * 0.16, 0, H);
+    grad.addColorStop(0, '#274d70');
+    grad.addColorStop(0.45, '#1f4160');
+    grad.addColorStop(1, '#152f4a');
+    ctx.fillStyle = grad;
+    ctx.fill(path);
+
+    // darker band inlays following the face, print-style
+    ctx.save();
+    ctx.clip(path);
+    ctx.strokeStyle = 'rgba(13, 29, 48, .55)';
+    ctx.lineWidth = Math.max(1.6, 5 * U);
+    for (const off of [0.022, 0.05, 0.086]) {
+      ctx.beginPath();
+      ctx.moveTo(P[1].x, P[1].y + H * off * 1.6);
+      for (let i = 2; i < Math.min(8, P.length); i++) {
+        const mx = (P[i].x + P[i + 1].x) / 2;
+        const my = (P[i].y + P[i + 1].y) / 2 + H * off;
+        ctx.quadraticCurveTo(P[i].x, P[i].y + H * off, mx, my);
+      }
+      ctx.stroke();
+    }
+    // lighter sweep where the face catches sky
+    ctx.strokeStyle = 'rgba(120, 160, 190, .18)';
+    ctx.lineWidth = Math.max(2, 10 * U);
+    ctx.beginPath();
+    ctx.moveTo(P[0].x, P[0].y + H * 0.02);
+    for (let i = 1; i < Math.min(8, P.length); i++) {
+      const mx = (P[i].x + P[i + 1].x) / 2;
+      const my = (P[i].y + P[i + 1].y) / 2 + H * 0.018;
+      ctx.quadraticCurveTo(P[i].x, P[i].y + H * 0.018, mx, my);
+    }
+    ctx.stroke();
+    ctx.restore();
+
+    // foam: crest run, lip run, and the three claws' outer edges
+    foamAlong(P, 2, 7, 24 * U, 8.5 * U, t, 0);
+    foamAlong(P, 7, 9, 20 * U, 7 * U, t, 2.2);
+    foamAlong(P, 8, 11, 18 * U, 5 * U, t, 4.1);
+    foamAlong(P, 12, 15, 17 * U, 4.6 * U, t, 1.3);
+    foamAlong(P, 16, 19, 17 * U, 4.6 * U, t, 5.4);
+    // foam pad at the lip tip
+    const lip = P[7];
+    ctx.fillStyle = '#ece4cf';
+    ctx.beginPath();
+    ctx.ellipse(lip.x + 4 * U, lip.y + 4 * U, 30 * U, 16 * U, 0.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    // claw tips get a foam blob each
+    for (const idx of [10, 15, 19]) {
+      const p = P[idx];
+      ctx.beginPath();
+      ctx.ellipse(p.x, p.y, 10 * U, 6.5 * U, 0.7, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    drawBoats(t);
+    stepSpray(t, dt);
+    drawSpray(t);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
