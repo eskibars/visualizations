@@ -37,14 +37,6 @@
       position: absolute; left: 50%; transform: translateX(-50%);
       bottom: 9vh; opacity: .55; letter-spacing: .3em; text-transform: uppercase;
     }
-    .caption {
-      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.6vh;
-      text-align: center;
-      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-      letter-spacing: .34em; text-transform: uppercase;
-      color: rgba(140, 220, 255, .30);
-      text-shadow: 0 1px 14px rgba(0,0,0,.95);
-    }
   </style>
 </head>
 <body>
@@ -56,7 +48,6 @@
     <div class="gear">GEAR <span id="gear">3</span></div>
     <div class="rev">checkpoint <span id="cp">0</span></div>
   </div>
-  <div class="caption">insert coin</div>
 <script>
 (() => {
   "use strict";

@@ -16,22 +16,11 @@
         radial-gradient(ellipse 130% 105% at 50% 42%,
           rgba(0,0,0,0) 26%, rgba(0,0,0,.40) 68%, rgba(0,0,0,.88) 100%);
     }
-    .caption {
-      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
-      text-align: center;
-      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-      letter-spacing: .34em; text-transform: uppercase;
-      color: rgba(214, 228, 255, .30);
-      text-shadow: 0 1px 14px rgba(0,0,0,.95);
-      opacity: 0; transition: opacity 3s ease 2s;
-    }
-    body.ready .caption { opacity: 1; }
   </style>
 </head>
 <body>
   <canvas id="c"></canvas>
   <div class="glass"></div>
-  <div class="caption" id="caption">reaction · diffusion</div>
 <script>
 (() => {
   "use strict";
@@ -322,7 +311,6 @@
   //  WebGL2 plumbing
   // ============================================================
   const canvas = document.getElementById("c");
-  const caption = document.getElementById("caption");
   const params = new URLSearchParams(location.search);
   const num = (key, fallback) => {
     const v = Number(params.get(key));
@@ -585,7 +573,6 @@
 
     // --- running order ----------------------------------------
     let regimeIndex = startRegime, phase = "hold", phaseStart = performance.now();
-    let label = REGIMES[startRegime].label;
 
     function setRegime(index, now) {
       regimeIndex = ((index % REGIMES.length) + REGIMES.length) % REGIMES.length;
@@ -597,8 +584,6 @@
       glaze.posFrom.set(glaze.pos);
       glaze.posTo.set(glaze.pos);
       glaze.countFrom = glaze.countTo = glaze.count;
-      label = r.label;
-      caption.textContent = label;
       phase = "hold";
       phaseStart = now;
     }
@@ -612,8 +597,6 @@
         glaze.countFrom = loadGlaze(REGIMES[regimeIndex].glaze, glaze.from, glaze.posFrom);
         glaze.countTo = loadGlaze(REGIMES[next].glaze, glaze.to, glaze.posTo);
         glaze.count = Math.max(glaze.countFrom, glaze.countTo);
-        label = REGIMES[next].label;
-        caption.textContent = label;
         phase = "morph";
         phaseStart = now;
         return;
@@ -763,7 +746,6 @@
       const r = REGIMES[regimeIndex];
       feed = r.f; kill = r.k;
       stops = loadGlaze(r.glaze);
-      caption.textContent = r.label;
       phase = "hold"; phaseStart = now;
     }
     setRegime(0, phaseStart);

@@ -13,22 +13,11 @@
       background: radial-gradient(ellipse 125% 100% at 50% 40%,
         rgba(0,0,0,0) 42%, rgba(0,0,0,.32) 80%, rgba(0,0,0,.72) 100%);
     }
-    .caption {
-      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
-      text-align: center;
-      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-      letter-spacing: .34em; text-transform: uppercase;
-      color: rgba(255, 210, 150, .30);
-      text-shadow: 0 1px 14px rgba(0,0,0,.95);
-      opacity: 0; transition: opacity 3s ease 2s;
-    }
-    body.ready .caption { opacity: 1; }
   </style>
 </head>
 <body>
   <canvas id="c"></canvas>
   <div class="vignette"></div>
-  <div class="caption">pingxi · sky lanterns</div>
 <script>
 (() => {
   "use strict";

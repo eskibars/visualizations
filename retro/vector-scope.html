@@ -19,23 +19,12 @@
       background: radial-gradient(ellipse 60% 46% at 34% 24%,
         rgba(180, 255, 220, .06) 0%, rgba(120, 255, 200, 0) 60%);
     }
-    .caption {
-      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
-      text-align: center;
-      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-      letter-spacing: .34em; text-transform: uppercase;
-      color: rgba(120, 255, 190, .30);
-      text-shadow: 0 1px 14px rgba(0,0,0,.95);
-      opacity: 0; transition: opacity 3s ease 2s;
-    }
-    body.ready .caption { opacity: 1; }
   </style>
 </head>
 <body>
   <canvas id="c"></canvas>
   <div class="glass"></div>
   <div class="vignette"></div>
-  <div class="caption">phosphor · ch1 / ch2</div>
 <script>
 (() => {
   "use strict";

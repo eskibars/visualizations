@@ -13,22 +13,11 @@
       background: radial-gradient(ellipse 128% 104% at 50% 52%,
         rgba(0,0,0,0) 44%, rgba(0,0,0,.30) 82%, rgba(0,0,0,.72) 100%);
     }
-    .caption {
-      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
-      text-align: center;
-      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-      letter-spacing: .34em; text-transform: uppercase;
-      color: rgba(200, 234, 255, .28);
-      text-shadow: 0 1px 14px rgba(0,0,0,.95);
-      opacity: 0; transition: opacity 3s ease 2s;
-    }
-    body.ready .caption { opacity: 1; }
   </style>
 </head>
 <body>
   <canvas id="c"></canvas>
   <div class="vignette"></div>
-  <div class="caption">sets every eleven seconds</div>
 <script>
 (() => {
   "use strict";

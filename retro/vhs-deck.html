@@ -41,14 +41,6 @@
       animation: blink 1.6s steps(1, end) infinite;
     }
     @keyframes blink { 0%, 50% { opacity: 1 } 50.01%, 100% { opacity: .15 } }
-    .caption {
-      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 5.2vh;
-      text-align: center;
-      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-      letter-spacing: .34em; text-transform: uppercase;
-      color: rgba(240, 240, 240, .40);
-      text-shadow: 0 0 8px rgba(0,0,0,.9);
-    }
   </style>
 </head>
 <body>
@@ -61,7 +53,6 @@
     <div class="tr" id="counter">0:00:00</div>
     <div class="bl" id="spMode">SP &nbsp; HI-FI &nbsp; STEREO</div>
   </div>
-  <div class="caption">please rewind</div>
 <script>
 (() => {
   "use strict";

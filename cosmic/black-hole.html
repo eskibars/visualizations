@@ -13,16 +13,6 @@
       background: radial-gradient(ellipse 135% 105% at 50% 45%,
         rgba(0,0,0,0) 30%, rgba(0,0,0,.35) 72%, rgba(0,0,0,.8) 100%);
     }
-    .caption {
-      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
-      text-align: center;
-      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-      letter-spacing: .34em; text-transform: uppercase;
-      color: rgba(255, 214, 170, .28);
-      text-shadow: 0 1px 14px rgba(0,0,0,.95);
-      opacity: 0; transition: opacity 3s ease 2s;
-    }
-    body.ready .caption { opacity: 1; }
     .nogl {
       display: none; position: fixed; inset: 0; place-items: center;
       color: #8b93a8; font: 14px system-ui; letter-spacing: .08em;
@@ -32,7 +22,6 @@
 <body>
   <canvas id="c"></canvas>
   <div class="vignette"></div>
-  <div class="caption">sagittarius a* · event horizon</div>
   <div class="nogl" id="nogl">WebGL2 unavailable</div>
 <script>
 (() => {
