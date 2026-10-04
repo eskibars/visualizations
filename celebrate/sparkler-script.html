@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Sparkler Script</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #060508; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 128% 104% at 50% 44%,
+        rgba(0,0,0,0) 42%, rgba(0,0,0,.32) 82%, rgba(0,0,0,.8) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(255, 226, 180, .28);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">written in light</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  SPARKLER SCRIPT — a sparkler writes the evening's words.
+  //  It flies along each letterform shedding sparks, the stroke
+  //  it leaves burning bright and slowly dying to a whisper,
+  //  then lifts, swirls, and takes up the next word somewhere
+  //  else on the dark.
+  //
+  //  Construction notes
+  //  ------------------
+  //  The letterforms are hand-drawn single-stroke cursive
+  //  glyphs — quadratic chains in a small design space — because
+  //  a sparkler draws strokes, not filled type; the word list
+  //  only needs the glyphs it uses. Each glyph is sampled to a
+  //  point list with pen-lift breaks, letters are chained with
+  //  their cursive connectors, and the sparkler walks the
+  //  combined path at writing speed. The burn is a persistent
+  //  ink canvas decaying exponentially; sparks are pooled
+  //  particles under gravity and drag.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1.6,
+
+    words: ['hello', 'joy', 'hooray', 'cheers', '2026'],
+
+    glyphHeight: 0.34,        // design space maps to this fraction of H (x-height ~ 45% of it)
+    writeSpeed: 300,          // px/s along the path
+    sparksPerFrame: 9,
+    inkFade: 0.085,           // 1/s exponential decay of the burn
+    holdAfterWord: [2.2, 3.2],
+  };
+
+  // -------------------- glyph table --------------------
+  //  Quadratic chains. Design space: baseline y=0, x-height ~-56,
+  //  ascender ~-118, descender ~+42. One glyph per needed letter;
+  //  'adv' is the advance width.
+  const GLYPHS = {
+    h: { adv: 66, segs: [[
+      ['M', 2, 8], ['Q', 8, -60, 14, -96], ['Q', 18, -118, 24, -110],
+      ['Q', 28, -102, 25, -78], ['Q', 20, -36, 24, -4],
+    ], [
+      ['M', 24, -4], ['Q', 28, -48, 36, -60], ['Q', 47, -68, 49, -46],
+      ['Q', 50, -22, 53, -8], ['Q', 56, 2, 64, 4],
+    ]] },
+    e: { adv: 48, segs: [[
+      ['M', 0, 4], ['Q', 16, -28, 34, -54], ['Q', 46, -66, 45, -46],
+      ['Q', 42, -18, 29, -7], ['Q', 18, 1, 28, 3], ['Q', 37, 4, 46, 2],
+    ]] },
+    l: { adv: 40, segs: [[
+      ['M', 2, 8], ['Q', 6, -56, 11, -96], ['Q', 14, -118, 19, -111],
+      ['Q', 23, -104, 21, -80], ['Q', 17, -36, 20, -4], ['Q', 22, 4, 32, 2],
+    ]] },
+    o: { adv: 52, segs: [[
+      ['M', 38, -28], ['Q', 36, -52, 23, -60], ['Q', 8, -66, 4, -43],
+      ['Q', 1, -22, 13, -8], ['Q', 24, 3, 34, -9], ['Q', 40, -18, 38, -28],
+      ['Q', 39, -6, 50, 2],
+    ]] },
+    j: { adv: 30, segs: [[
+      ['M', 6, -56], ['Q', 8, -20, 8, 8], ['Q', 8, 34, 20, 40], ['Q', 30, 44, 34, 36],
+    ], [
+      ['M', 11, -78], ['L', 12, -72],
+    ]] },
+    y: { adv: 46, segs: [[
+      ['M', 2, 2], ['Q', 6, -30, 12, -54], ['Q', 16, -66, 18, -52],
+      ['Q', 20, -30, 22, -10], ['Q', 24, 4, 30, -6], ['Q', 38, -22, 42, -40],
+      ['Q', 46, -14, 42, 10], ['Q', 38, 30, 28, 38],
+    ]] },
+    r: { adv: 40, segs: [[
+      ['M', 0, 2], ['Q', 10, -30, 22, -52], ['Q', 26, -60, 26, -50],
+      ['Q', 26, -38, 31, -50], ['Q', 37, -62, 46, -56],
+    ]] },
+    a: { adv: 52, segs: [[
+      ['M', 38, -28], ['Q', 36, -52, 23, -60], ['Q', 8, -66, 4, -43],
+      ['Q', 1, -22, 13, -8], ['Q', 24, 3, 34, -9], ['Q', 40, -18, 38, -28],
+      ['Q', 37, -26, 39, -10], ['Q', 40, -2, 48, 4],
+    ]] },
+    c: { adv: 40, segs: [[
+      ['M', 34, -14], ['Q', 31, -52, 13, -56], ['Q', 0, -58, 2, -36],
+      ['Q', 4, -14, 16, -4], ['Q', 26, 3, 36, 0],
+    ]] },
+    s: { adv: 38, segs: [[
+      ['M', 2, -4], ['Q', 16, -14, 24, -30], ['Q', 31, -46, 20, -51],
+      ['Q', 10, -54, 8, -41], ['Q', 6, -26, 20, -16], ['Q', 32, -8, 30, 2],
+      ['Q', 28, 10, 18, 8],
+    ]] },
+    2: { adv: 40, segs: [[
+      ['M', 4, -18], ['Q', 2, -48, 20, -58], ['Q', 36, -64, 38, -44],
+      ['Q', 39, -24, 6, 2], ['Q', 20, -2, 40, 0],
+    ]] },
+    0: { adv: 40, segs: [[
+      ['M', 30, -40], ['Q', 28, -70, 18, -75], ['Q', 6, -78, 5, -48],
+      ['Q', 4, -18, 14, -8], ['Q', 24, 0, 28, -18], ['Q', 30, -30, 30, -40],
+    ]] },
+    6: { adv: 40, segs: [[
+      ['M', 30, -70], ['Q', 12, -64, 8, -36], ['Q', 5, -12, 18, -6],
+      ['Q', 28, -1, 32, -14], ['Q', 35, -28, 26, -34], ['Q', 14, -40, 10, -24],
+    ]] },
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  // -------------------- sprites --------------------
+  function makeGlow(r, g, b) {
+    const s = 128, c = document.createElement('canvas');
+    c.width = c.height = s;
+    const g2 = c.getContext('2d');
+    const grad = g2.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    grad.addColorStop(0, `rgba(${r},${g},${b},1)`);
+    grad.addColorStop(0.25, `rgba(${r},${g},${b},.55)`);
+    grad.addColorStop(0.6, `rgba(${r},${g},${b},.16)`);
+    grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    g2.fillStyle = grad;
+    g2.fillRect(0, 0, s, s);
+    return c;
+  }
+  const glowHot = makeGlow(255, 240, 214);
+  const glowWarm = makeGlow(255, 198, 120);
+
+  function stampAt(g, sprite, x, y, size, alpha) {
+    if (alpha <= 0.004) return;
+    g.globalAlpha = Math.min(1, alpha);
+    g.drawImage(sprite, x - size / 2, y - size / 2, size, size);
+    g.globalAlpha = 1;
+  }
+
+  // -------------------- word path building --------------------
+  //  Sample a glyph's segments into points: {x, y, ink} where
+  //  ink=false marks the first point after a pen lift.
+  function sampleGlyph(glyph, s) {
+    const pts = [];
+    for (const seg of glyph.segs) {
+      let cx = 0, cy = 0;
+      let first = true;
+      for (const cmd of seg) {
+        if (cmd[0] === 'M') {
+          cx = cmd[1] * s; cy = cmd[2] * s;
+          pts.push({ x: cx, y: cy, ink: !first || pts.length === 0 });
+          first = false;
+        } else {   // Q
+          const qx = cmd[1] * s, qy = cmd[2] * s;
+          const ex = cmd[3] * s, ey = cmd[4] * s;
+          const steps = 9;
+          for (let i = 1; i <= steps; i++) {
+            const u = i / steps, v = 1 - u;
+            pts.push({
+              x: v * v * cx + 2 * v * u * qx + u * u * ex,
+              y: v * v * cy + 2 * v * u * qy + u * u * ey,
+              ink: true,
+            });
+          }
+          cx = ex; cy = ey;
+        }
+      }
+    }
+    return pts;
+  }
+
+  //  A word is one combined path: letters in order, joined by
+  //  cursive connectors (inked), with per-point cumulative length.
+  function buildWord(word, ox, oy, unit) {
+    const pts = [];
+    let penX = 0;
+    for (const ch of word) {
+      const glyph = GLYPHS[ch];
+      if (!glyph) { penX += 30 * unit; continue; }
+      const gp = sampleGlyph(glyph, unit);
+      for (const p of gp) {
+        pts.push({ x: ox + (penX + p.x), y: oy + p.y, ink: p.ink });
+      }
+      penX += glyph.adv * unit;
+    }
+    // two rounds of Chaikin corner-cutting, never across a pen
+    // lift, so the sampled chains flow like real script
+    for (let round = 0; round < 2; round++) {
+      const out = [];
+      for (let i = 0; i < pts.length; i++) {
+        const a = pts[i];
+        const b = pts[i + 1];
+        const cut = !b || !a.ink || !b.ink;   // segment ends here
+        if (cut) { out.push({ x: a.x, y: a.y, ink: a.ink }); continue; }
+        out.push({ x: a.x * 0.75 + b.x * 0.25, y: a.y * 0.75 + b.y * 0.25, ink: i === 0 ? a.ink : true });
+        out.push({ x: a.x * 0.25 + b.x * 0.75, y: a.y * 0.25 + b.y * 0.75, ink: true });
+      }
+      pts.length = 0;
+      for (const p of out) pts.push(p);
+    }
+    const cum = [0];
+    for (let i = 1; i < pts.length; i++) {
+      cum.push(cum[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y));
+    }
+    return { pts, cum, len: cum[cum.length - 1] };
+  }
+
+  function pathPos(wr, d) {
+    const { pts, cum } = wr;
+    let lo = 0, hi = cum.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (cum[mid] < d) lo = mid + 1; else hi = mid;
+    }
+    const i = Math.max(1, lo);
+    const t = (d - cum[i - 1]) / Math.max(1e-6, cum[i] - cum[i - 1]);
+    const a = pts[i - 1], b = pts[i];
+    return {
+      x: a.x + (b.x - a.x) * t,
+      y: a.y + (b.y - a.y) * t,
+      ink: a.ink && b.ink,
+    };
+  }
+
+  // -------------------- ink layer --------------------
+  let ink, inkCtx;
+  function buildInk() {
+    ink = document.createElement('canvas');
+    ink.width = Math.floor(W); ink.height = Math.floor(H);
+    inkCtx = ink.getContext('2d');
+  }
+  function stampInk(x0, y0, x1, y1, strength) {
+    inkCtx.globalCompositeOperation = 'lighter';
+    inkCtx.lineCap = 'round';
+    inkCtx.strokeStyle = `rgba(255, 214, 150, ${(0.20 * strength).toFixed(3)})`;
+    inkCtx.lineWidth = 9;
+    inkCtx.beginPath(); inkCtx.moveTo(x0, y0); inkCtx.lineTo(x1, y1); inkCtx.stroke();
+    inkCtx.strokeStyle = `rgba(255, 246, 224, ${(0.8 * strength).toFixed(3)})`;
+    inkCtx.lineWidth = 2.6;
+    inkCtx.beginPath(); inkCtx.moveTo(x0, y0); inkCtx.lineTo(x1, y1); inkCtx.stroke();
+    inkCtx.globalCompositeOperation = 'source-over';
+  }
+  function fadeInk(dt) {
+    const a = 1 - Math.exp(-CONFIG.inkFade * dt);
+    inkCtx.globalCompositeOperation = 'destination-out';
+    inkCtx.fillStyle = `rgba(0,0,0,${a.toFixed(4)})`;
+    inkCtx.fillRect(0, 0, W, H);
+    inkCtx.globalCompositeOperation = 'source-over';
+  }
+
+  // -------------------- sparkler state --------------------
+  const sp = {
+    state: 'writing',
+    wordIdx: 0,
+    wr: null,
+    d: 0,
+    x: 0, y: 0, px: 0, py: 0,
+    t: 0,
+    hold: 0,
+    ember: 1,
+  };
+
+  function nextWord() {
+    const unit = (H * CONFIG.glyphHeight) / 120;   // design space 120 tall
+    const word = CONFIG.words[sp.wordIdx % CONFIG.words.length];
+    sp.wordIdx++;
+    const ox = W * (0.5 + rand(-0.07, 0.07));
+    const oy = H * (0.52 + rand(-0.06, 0.06));
+    // measure: total advance, then start so the word centres
+    let adv = 0;
+    for (const ch of word) adv += (GLYPHS[ch] ? GLYPHS[ch].adv : 30) * unit;
+    sp.wr = buildWord(word, ox - adv / 2, oy, unit);
+    sp.d = 0;
+    sp.state = 'writing';
+    const p = pathPos(sp.wr, 0);
+    sp.x = p.x; sp.y = p.y;
+    sp.px = sp.x; sp.py = sp.y;
+    sp.ember = Math.min(1, sp.ember + 0.4);
+  }
+
+  function stepSparkler(t, dt) {
+    sp.t += dt;
+    if (!sp.wr) { nextWord(); return; }
+
+    if (sp.state === 'writing') {
+      sp.d += CONFIG.writeSpeed * (0.92 + 0.16 * Math.sin(t * 3.1)) * dt * (sp.ember * 0.4 + 0.6);
+      sp.ember = Math.min(1, sp.ember + dt * 1.4);
+      const p = pathPos(sp.wr, sp.d);
+      sp.px = sp.x; sp.py = sp.y;
+      sp.x = p.x; sp.y = p.y;
+      if (p.ink) stampInk(sp.px, sp.py, sp.x, sp.y, sp.ember);
+      if (sp.d >= sp.wr.len) {
+        sp.state = 'flourish';
+        sp.t = 0;
+        sp.hold = rand(...CONFIG.holdAfterWord);
+        sp.fx0 = sp.x; sp.fy0 = sp.y;
+      }
+    } else if (sp.state === 'flourish') {
+      // a small celebratory loop above the finished word
+      const k = sp.t / 1.4;
+      const r = H * 0.045;
+      sp.px = sp.x; sp.py = sp.y;
+      sp.x = sp.fx0 + Math.sin(k * Math.PI * 2.2) * r * 1.4;
+      sp.y = sp.fy0 - Math.sin(k * Math.PI) * r * 1.1 - k * H * 0.02;
+      sp.ember = Math.max(0.35, 1 - sp.t / 1.6);
+      if (sp.t > 1.4) { sp.state = 'hold'; sp.t = 0; }
+    } else if (sp.state === 'hold') {
+      sp.ember = Math.max(0, sp.ember - dt * 0.5);
+      if (sp.t > sp.hold) nextWord();
+    }
+  }
+
+  // -------------------- sparks --------------------
+  const MAX_SPARKS = 420;
+  const sparks = [];
+  for (let i = 0; i < MAX_SPARKS; i++) sparks.push({ x: 0, y: 0, vx: 0, vy: 0, life: 0, max: 1, hue: 0 });
+  let sparkCursor = 0;
+  function emitSpark(x, y, vx0, vy0, vigor) {
+    const s = sparks[sparkCursor++ % MAX_SPARKS];
+    const a = rand(0, Math.PI * 2);
+    const v = rand(24, 130) * vigor;
+    s.x = x; s.y = y;
+    s.vx = Math.cos(a) * v + vx0 * 0.25;
+    s.vy = Math.sin(a) * v + vy0 * 0.25 - 16;
+    s.life = s.max = rand(0.35, 1.05);
+    s.hue = Math.random();
+  }
+  function stepSparks(t, dt) {
+    for (const s of sparks) {
+      if (s.life <= 0) continue;
+      s.life -= dt;
+      s.vy += 105 * dt;
+      s.vx *= Math.exp(-1.15 * dt);
+      s.vy *= Math.exp(-0.65 * dt);
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+    }
+  }
+  function drawSparks() {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineCap = 'round';
+    for (const s of sparks) {
+      if (s.life <= 0) continue;
+      const k = s.life / s.max;
+      const warm = s.hue < 0.7;
+      ctx.strokeStyle = warm
+        ? `rgba(255, ${(190 + 50 * k) | 0}, ${(120 + 90 * k) | 0}, ${(0.85 * k).toFixed(3)})`
+        : `rgba(255, 246, 230, ${(0.9 * k).toFixed(3)})`;
+      ctx.lineWidth = 1.3 * U + 0.7 * k;
+      ctx.beginPath();
+      ctx.moveTo(s.x, s.y);
+      ctx.lineTo(s.x - s.vx * 0.03, s.y - s.vy * 0.03);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // -------------------- head --------------------
+  function drawHead(t) {
+    if (sp.ember <= 0.01) return;
+    const flick = 0.8 + 0.2 * Math.sin(t * 21) * Math.sin(t * 7.3);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const sz = 26 * U * (0.6 + sp.ember * 0.8) * flick;
+    stampAt(ctx, glowWarm, sp.x, sp.y, sz * 3.4, 0.4 * sp.ember);
+    stampAt(ctx, glowHot, sp.x, sp.y, sz * 1.5, 0.9 * sp.ember);
+    ctx.fillStyle = `rgba(255, 250, 240, ${0.95 * sp.ember})`;
+    ctx.beginPath();
+    ctx.arc(sp.x, sp.y, 1.9 * U, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // -------------------- ambient ember drift --------------------
+  const motes = [];
+  function buildMotes() {
+    motes.length = 0;
+    for (let i = 0; i < 26; i++) {
+      motes.push({
+        x: Math.random() * W, y: Math.random() * H,
+        vy: -rand(4, 14), ph: rand(0, Math.PI * 2),
+        s: rand(2, 5) * U, a: rand(0.04, 0.12),
+      });
+    }
+  }
+  function drawMotes(t, dt) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const m of motes) {
+      m.y += m.vy * dt;
+      m.x += Math.sin(t * 0.7 + m.ph) * 8 * dt;
+      if (m.y < -10) { m.y = H + 10; m.x = Math.random() * W; }
+      const tw = 0.6 + 0.4 * Math.sin(t * 1.7 + m.ph * 3);
+      stampAt(ctx, glowWarm, m.x, m.y, m.s * 5, m.a * tw);
+    }
+    ctx.restore();
+  }
+
+  // -------------------- resize / build --------------------
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    U = W / 1600;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    buildInk();
+    buildMotes();
+    sp.wr = null;
+    sp.wordIdx = 0;
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  // -------------------- loop --------------------
+  let last = performance.now();
+  let ready = false;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const t = now / 1000;
+
+    ctx.fillStyle = '#060508';
+    ctx.fillRect(0, 0, W, H);
+
+    stepSparkler(t, dt);
+
+    if (sp.ember > 0.05) {
+      const vigor = sp.state === 'writing' ? 1 : 0.7;
+      const hvx = (sp.x - sp.px) / Math.max(dt, 1e-4);
+      const hvy = (sp.y - sp.py) / Math.max(dt, 1e-4);
+      const n = Math.max(1, Math.round(CONFIG.sparksPerFrame * sp.ember));
+      for (let i = 0; i < n; i++) emitSpark(sp.x, sp.y, hvx, hvy, vigor);
+    }
+
+    fadeInk(dt);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.drawImage(ink, 0, 0, W, H);
+    ctx.restore();
+
+    drawMotes(t, dt);
+    stepSparks(t, dt);
+    drawSparks();
+    drawHead(t);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
