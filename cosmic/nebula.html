@@ -52,11 +52,13 @@
     renderScaleMax: 0.9,
     renderScaleMin: 0.4,
     frameBudgetMs: 15.5,
-    checkEveryMs: 1200,
+    checkEveryMs: 700,
     scaleStep: 0.85,
+    panicEmaMs: 60,
 
     exposure: 1.25,
     maxSteps: 48,
+    stepsMin: 16,
     marchNear: 2.0,
     marchFar: 16.0,
     absorption: 1.0,
@@ -86,6 +88,7 @@
   uniform vec2 uResolution;
   uniform float uTime;
   uniform float uGrain;
+  uniform int uSteps;
   out vec4 outColor;
 
   const int   STEPS = ${CONFIG.maxSteps};
@@ -228,46 +231,62 @@
     vec3 rd = normalize(fw * 1.8 + rt * uv.x + up * uv.y);
 
     // -------------------- volumetric march --------------------
-    float stepL = (FAR - NEAR) / float(STEPS);
+    float stepL = (FAR - NEAR) / float(uSteps);
     float jitter = hash12(frag + fract(uTime) * 61.7);
+
+    // the march itself records how much gas sits in front of each newborn
+    // star (via Ts, with lighter absorption), so no second density loop
+    // is needed for their occlusion
+    vec4 starProj = vec4(-1.0);
+    for (int s = 0; s < NSTARS; s++) {
+      float pr = dot(starPos(s) - ro, rd);
+      if (pr > NEAR) starProj[s] = pr;
+    }
+    vec4 starT = vec4(0.0);
+    vec4 starHit = vec4(0.0);
 
     vec3 col = vec3(0.0);
     float T = 1.0;
+    float Ts = 1.0;
 
     for (int i = 0; i < STEPS; i++) {
-      if (T < 0.015) break;
-      vec3 p = ro + rd * (NEAR + (float(i) + jitter) * stepL);
+      if (i >= uSteps || T < 0.015) break;
+      float t = NEAR + (float(i) + jitter) * stepL;
+
+      // the first sample at or past a star's depth donates the current
+      // star-path transmittance; empty samples leave Ts untouched, so the
+      // value is the same whenever the handoff lands
+      vec4 hit = step(starProj, vec4(t)) * (1.0 - starHit);
+      starT = mix(starT, vec4(Ts), hit);
+      starHit = max(starHit, hit);
+
+      vec3 p = ro + rd * t;
+
+      // the envelope is exactly zero for r < 1.3 and r > 8.6 — skip the
+      // whole noise stack there
+      float r2 = dot(p, p);
+      if (r2 < 1.69 || r2 > 73.96) continue;
 
       float d = density(p);
       if (d > 0.004) {
-        float r = length(p);
         // lit from the cluster centre + local knots compress crimson
-        float li = 1.9 / (1.0 + dot(p, p));
+        float li = 1.9 / (1.0 + r2);
         float knot = smoothstep(0.55, 0.88, fbm(p * 0.9 + 31.0)) * smoothstep(0.30, 0.8, d);
-        vec3 emis = palette(exp(-r * 0.30) * 1.6, knot);
+        vec3 emis = palette(exp(-sqrt(r2) * 0.30) * 1.6, knot);
         // push chroma — the tonemap otherwise greys the midtones out
         float lum = dot(emis, vec3(0.299, 0.587, 0.114));
         emis = mix(vec3(lum), emis, 1.35);
         col += T * d * stepL * emis * (0.09 + 2.0 * li);
         T *= exp(-d * ${CONFIG.absorption.toFixed(2)} * stepL);
+        Ts *= exp(-d * 0.85 * stepL);
       }
     }
 
     // newborn stars, with halos, hidden by the gas in front of them
     for (int s = 0; s < NSTARS; s++) {
-      vec3 sp = starPos(s);
-      vec3 toS = sp - ro;
-      float proj = dot(toS, rd);
-      if (proj > 0.0) {
-        float off = length(toS - rd * proj);
-        // gas transmittance along the ray to the star (sampled coarsely)
-        float sT = 1.0;
-        for (int k = 1; k <= 6; k++) {
-          vec3 q = ro + rd * (proj * float(k) / 7.0);
-          sT *= exp(-density(q) * 0.85 * proj / 7.0);
-        }
-        vec3 sc = starCol(s) * sT;
-        col += sc * (exp(-off * off * 340.0) + exp(-off * 6.5) * 0.14);
+      if (starProj[s] > 0.0) {
+        float off = length(starPos(s) - ro - rd * starProj[s]);
+        col += starCol(s) * starT[s] * (exp(-off * off * 340.0) + exp(-off * 6.5) * 0.14);
       }
     }
 
@@ -321,9 +340,11 @@
   const uResolution = gl.getUniformLocation(prog, 'uResolution');
   const uTime = gl.getUniformLocation(prog, 'uTime');
   const uGrain = gl.getUniformLocation(prog, 'uGrain');
+  const uSteps = gl.getUniformLocation(prog, 'uSteps');
 
   // -------------------- sizing / adaptive quality --------------------
   let scale = 0.8;
+  let steps = CONFIG.maxSteps;
   let ema = 16;
 
   function resize() {
@@ -351,11 +372,24 @@
     ema = ema * 0.94 + Math.min(dtMs, 100) * 0.06;
     if (now - lastCheck > CONFIG.checkEveryMs) {
       lastCheck = now;
-      if (ema > CONFIG.frameBudgetMs * 1.6 && scale > CONFIG.renderScaleMin) {
-        scale = Math.max(CONFIG.renderScaleMin, scale * CONFIG.scaleStep);
+      if (ema > CONFIG.frameBudgetMs * 1.6) {
+        // shed march steps first (the jittered march hides it), then
+        // resolution; a badly over-budget frame sheds both at once
+        if (steps > CONFIG.stepsMin) {
+          steps = Math.max(CONFIG.stepsMin, Math.round(steps * 0.75));
+        }
+        if (steps <= CONFIG.stepsMin || ema > CONFIG.panicEmaMs) {
+          if (scale > CONFIG.renderScaleMin) {
+            scale = Math.max(CONFIG.renderScaleMin, scale * CONFIG.scaleStep);
+          }
+        }
         resize();
-      } else if (ema < CONFIG.frameBudgetMs * 0.62 && scale < CONFIG.renderScaleMax) {
-        scale = Math.min(CONFIG.renderScaleMax, scale / CONFIG.scaleStep);
+      } else if (ema < CONFIG.frameBudgetMs * 0.62) {
+        if (scale < CONFIG.renderScaleMax) {
+          scale = Math.min(CONFIG.renderScaleMax, scale / CONFIG.scaleStep);
+        } else if (steps < CONFIG.maxSteps) {
+          steps = Math.min(CONFIG.maxSteps, Math.round(steps / 0.75));
+        }
         resize();
       }
     }
@@ -363,6 +397,7 @@
     gl.uniform2f(uResolution, canvas.width, canvas.height);
     gl.uniform1f(uTime, time);
     gl.uniform1f(uGrain, CONFIG.grain);
+    gl.uniform1i(uSteps, steps);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
     if (!ready) {
