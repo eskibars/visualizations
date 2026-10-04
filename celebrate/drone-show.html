@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Drone Show</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #050910; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 128% 102% at 50% 42%,
+        rgba(0,0,0,0) 42%, rgba(0,0,0,.30) 82%, rgba(0,0,0,.74) 100%);
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.4vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(200, 216, 255, .27);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+      opacity: 0; transition: opacity 3s ease 2s;
+    }
+    body.ready .caption { opacity: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="caption">two hundred lights, one sky</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  DRONE SHOW — a fleet of lights over dark water, taking
+  //  turns being a heart, a star, the year, a burst, a spiral.
+  //  Between shapes the fleet streams to its new posts in a
+  //  staggered rush; holding a shape, it shimmers, and a slow
+  //  strobe rolls through it. The water keeps a copy of
+  //  everything, wobbling.
+  //
+  //  Construction notes
+  //  ------------------
+  //  Formations are point sets: parametric curves for heart,
+  //  star, burst and spiral, and pixel-sampled type for the
+  //  year. At each transition the drones and the target points
+  //  are both sorted by angle-then-radius about the formation
+  //  centre, so pairings stay short and the morph reads as
+  //  choreography rather than crossfire. Each drone tweens on
+  //  its own delay and duration with an ease-in-out; holding,
+  //  it jitters on noise and twinkles. Reflections are a
+  //  second pass of the same lights, mirrored and sheared by a
+  //  travelling wobble.
+  // ============================================================
+  const CONFIG = {
+    dprCap: 1.6,
+
+    fleet: 230,
+    centre: { x: 0.5, y: 0.40 },
+    spread: 0.30,             // formation radius, fraction of min(W,H)
+
+    hold: [6.5, 9],
+    transition: 3.2,
+
+    stars: 130,
+  };
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  function noise1(x) {
+    const i = Math.floor(x), f = x - i;
+    const h = (n) => {
+      const s = Math.sin(n * 127.1 + 311.7) * 43758.5453;
+      return s - Math.floor(s);
+    };
+    const u = f * f * f * (f * (f * 6 - 15) + 10);
+    return h(i) * (1 - u) + h(i + 1) * u;
+  }
+
+  function makeGlow(r, g, b) {
+    const s = 128, c = document.createElement('canvas');
+    c.width = c.height = s;
+    const g2 = c.getContext('2d');
+    const grad = g2.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    grad.addColorStop(0, `rgba(${r},${g},${b},1)`);
+    grad.addColorStop(0.25, `rgba(${r},${g},${b},.55)`);
+    grad.addColorStop(0.6, `rgba(${r},${g},${b},.16)`);
+    grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    g2.fillStyle = grad;
+    g2.fillRect(0, 0, s, s);
+    return c;
+  }
+  const glowFleet = makeGlow(235, 240, 255);
+  const glowGold = makeGlow(255, 214, 140);
+  const glowRose = makeGlow(255, 150, 150);
+
+  function stamp(sprite, x, y, size, alpha) {
+    if (alpha <= 0.004) return;
+    ctx.globalAlpha = Math.min(1, alpha);
+    ctx.drawImage(sprite, x - size / 2, y - size / 2, size, size);
+    ctx.globalAlpha = 1;
+  }
+
+  // -------------------- background --------------------
+  let bgLayer;
+  const horizon = () => H * 0.78;
+  function paintBg() {
+    bgLayer = document.createElement('canvas');
+    bgLayer.width = Math.floor(W * DPR); bgLayer.height = Math.floor(H * DPR);
+    const g = bgLayer.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    const grad = g.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, '#04060d');
+    grad.addColorStop(0.6, '#081020');
+    grad.addColorStop(0.78, '#0d1626');
+    grad.addColorStop(1, '#05080f');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, W, H);
+
+    for (let i = 0; i < CONFIG.stars; i++) {
+      const y = Math.pow(Math.random(), 1.5) * H * 0.6;
+      g.fillStyle = `rgba(210, 222, 250, ${rand(0.08, 0.5).toFixed(2)})`;
+      g.fillRect(Math.random() * W, y, Math.random() < 0.12 ? 1.6 * U : 1 * U, 1 * U);
+    }
+
+    // treeline on the horizon
+    g.fillStyle = '#04060b';
+    g.beginPath();
+    g.moveTo(-2, horizon() + 2);
+    for (let x = -2; x <= W + 2; x += 7) {
+      const t = x / W;
+      g.lineTo(x, horizon()
+        - Math.abs(Math.sin(t * 13 + 2)) * H * 0.014
+        - Math.abs(Math.sin(t * 31 + 5)) * H * 0.007
+        - noise1(t * 6 + 3) * H * 0.012);
+    }
+    g.lineTo(W + 2, H + 2);
+    g.closePath();
+    g.fill();
+  }
+
+  // -------------------- formations --------------------
+  function heartPoints(n, R) {
+    const pts = [];
+    for (let i = 0; i < n; i++) {
+      const t = (i / n) * Math.PI * 2;
+      pts.push({
+        x: 16 * Math.pow(Math.sin(t), 3),
+        y: -(13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t)),
+      });
+    }
+    // normalise to radius R
+    let m = 0;
+    for (const p of pts) m = Math.max(m, Math.hypot(p.x, p.y));
+    for (const p of pts) { p.x = p.x / m * R; p.y = p.y / m * R; }
+    return pts;
+  }
+  function starPoints(n, R) {
+    const pts = [];
+    const spikes = 5;
+    for (let i = 0; i < n; i++) {
+      const u = i / n;
+      // walk the star perimeter: outer/inner vertices alternating
+      const seg = u * spikes * 2;
+      const k = Math.floor(seg);
+      const f = seg - k;
+      const ang0 = -Math.PI / 2 + (k % 2 === 0 ? k / 2 : (k - 1) / 2 + 0.5) * (Math.PI * 2 / spikes);
+      const ang1 = -Math.PI / 2 + ((k + 1) % 2 === 0 ? (k + 1) / 2 : ((k + 1) - 1) / 2 + 0.5) * (Math.PI * 2 / spikes);
+      const r0 = k % 2 === 0 ? R : R * 0.475;
+      const r1 = (k + 1) % 2 === 0 ? R : R * 0.475;
+      const rr = r0 + (r1 - r0) * f;
+      const aa = ang0 + (ang1 - ang0) * f;
+      pts.push({ x: Math.cos(aa) * rr, y: Math.sin(aa) * rr });
+    }
+    return pts;
+  }
+  function burstPoints(n, R) {
+    const pts = [];
+    for (let i = 0; i < n; i++) {
+      const k = i % 10;
+      if (k === 0) {
+        pts.push({ x: rand(-R * 0.06, R * 0.06), y: rand(-R * 0.06, R * 0.06) });   // core cluster
+      } else {
+        const ring = k < 6 ? 0.62 : 1;
+        const a = (i * 2.399963) % (Math.PI * 2);   // golden-angle scatter
+        const rr = R * ring * (0.92 + 0.08 * Math.sin(i * 7.7));
+        pts.push({ x: Math.cos(a) * rr, y: Math.sin(a) * rr * 0.94 });
+      }
+    }
+    return pts;
+  }
+  function spiralPoints(n, R) {
+    const pts = [];
+    const turns = 2.6;
+    for (let i = 0; i < n; i++) {
+      const u = i / n;
+      const a = u * turns * Math.PI * 2;
+      const rr = R * 0.14 + u * R * 0.86;
+      pts.push({ x: Math.cos(a) * rr, y: Math.sin(a) * rr * 0.92 });
+    }
+    return pts;
+  }
+  function textPoints(text, n, size) {
+    const c = document.createElement('canvas');
+    c.width = Math.ceil(size * text.length * 0.75);
+    c.height = Math.ceil(size * 1.3);
+    const g = c.getContext('2d');
+    g.fillStyle = '#fff';
+    g.font = `800 ${size}px system-ui, -apple-system, "Segoe UI", sans-serif`;
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillText(text, c.width / 2, c.height / 2);
+    const img = g.getImageData(0, 0, c.width, c.height).data;
+    const raw = [];
+    for (let y = 0; y < c.height; y += 3) {
+      for (let x = 0; x < c.width; x += 3) {
+        if (img[(y * c.width + x) * 4 + 3] > 120) {
+          raw.push({ x: x - c.width / 2, y: y - c.height / 2 });
+        }
+      }
+    }
+    // pick n evenly through the raw list (keeps coverage even)
+    const pts = [];
+    for (let i = 0; i < n; i++) {
+      const p = raw[Math.floor(i / n * raw.length)];
+      if (p) pts.push({ x: p.x, y: p.y });
+    }
+    return pts;
+  }
+
+  // sort by angle then radius about the centre — the pairing
+  // heuristic that keeps morphs short
+  function polarSort(pts) {
+    for (const p of pts) {
+      p._a = Math.atan2(p.y, p.x);
+      p._r = Math.hypot(p.x, p.y);
+    }
+    pts.sort((a, b) => (a._a - b._a) || (a._r - b._r));
+    return pts;
+  }
+
+  function shapeSet(name, R) {
+    let pts;
+    if (name === 'heart') pts = heartPoints(CONFIG.fleet, R);
+    else if (name === 'star') pts = starPoints(CONFIG.fleet, R);
+    else if (name === 'burst') pts = burstPoints(CONFIG.fleet, R);
+    else if (name === 'spiral') pts = spiralPoints(CONFIG.fleet, R);
+    else pts = textPoints(name, CONFIG.fleet, R * 0.72);
+    // centre in formation space
+    for (const p of pts) { p.x += R * 0; p.y += R * 0; }
+    return polarSort(pts);
+  }
+
+  // -------------------- fleet --------------------
+  const drones = [];
+  const SHOW = ['heart', 'star', '2026', 'burst', 'spiral'];
+  let showIdx = 0;
+  const show = { state: 'hold', t: 0, dur: 8 };
+
+  function buildFleet() {
+    drones.length = 0;
+    const R = Math.min(W, H) * CONFIG.spread;
+    const cx = W * CONFIG.centre.x, cy = H * CONFIG.centre.y;
+    const targets = shapeSet(SHOW[0], R);
+    for (let i = 0; i < CONFIG.fleet; i++) {
+      drones.push({
+        // start from a loose globe so the first morph is a show
+        x: cx + Math.cos(i * 2.4) * R * rand(0.6, 1.15),
+        y: cy + Math.sin(i * 2.4) * R * rand(0.6, 1.15) * 0.9,
+        fx: cx + targets[i].x, fy: cy + targets[i].y,     // from
+        tx: cx + targets[i].x, ty: cy + targets[i].y,     // to
+        delay: 0, dur: 1, t: 1,
+        ph: rand(0, Math.PI * 2),
+        tw: rand(0.8, 2.2),
+        accent: i % 9 === 0 ? (i % 27) / 27 : -1,
+        slotA: 0, slotR: 0,
+      });
+    }
+    show.dur = rand(...CONFIG.hold);
+  }
+
+  function nextShape() {
+    showIdx = (showIdx + 1) % SHOW.length;
+    const R = Math.min(W, H) * CONFIG.spread;
+    const cx = W * CONFIG.centre.x, cy = H * CONFIG.centre.y;
+    const targets = shapeSet(SHOW[showIdx], R);
+
+    // sort drones by where they are now, pair with sorted targets
+    for (const d of drones) {
+      d.slotA = Math.atan2(d.y - cy, d.x - cx);
+      d.slotR = Math.hypot(d.x - cx, d.y - cy);
+    }
+    const order = drones.map((d, i) => i).sort((a, b) =>
+      (drones[a].slotA - drones[b].slotA) || (drones[a].slotR - drones[b].slotR));
+    order.forEach((di, k) => {
+      const d = drones[di];
+      d.fx = d.x; d.fy = d.y;
+      d.tx = cx + targets[k].x;
+      d.ty = cy + targets[k].y;
+      d.delay = rand(0, 1.3);
+      d.dur = rand(1.8, 2.9);
+      d.t = 0;
+    });
+    show.state = 'morph';
+    show.t = 0;
+  }
+
+  function stepShow(t, dt) {
+    show.t += dt;
+    if (show.state === 'hold') {
+      if (show.t > show.dur) nextShape();
+    } else if (show.t > CONFIG.transition + 1.2) {
+      show.state = 'hold';
+      show.t = 0;
+      show.dur = rand(...CONFIG.hold);
+    }
+
+    const cy = H * CONFIG.centre.y;
+    for (const d of drones) {
+      if (d.t < d.dur) {
+        d.t += dt;
+        const k = Math.min(1, Math.max(0, (d.t - d.delay) / d.dur));
+        const e = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
+        d.x = d.fx + (d.tx - d.fx) * e;
+        d.y = d.fy + (d.ty - d.fy) * e;
+      } else {
+        // holding: breathe around the post
+        d.x = d.tx + (noise1(t * 0.7 + d.ph) - 0.5) * 4.4 * U;
+        d.y = d.ty + (noise1(t * 0.6 + d.ph + 40) - 0.5) * 4.4 * U;
+      }
+    }
+  }
+
+  // -------------------- draw --------------------
+  function drawFleet(t, reflect) {
+    ctx.save();
+    if (reflect) {
+      ctx.beginPath();
+      ctx.rect(0, horizon(), W, H - horizon());
+      ctx.clip();
+      ctx.globalAlpha = 0.16;
+    }
+    ctx.globalCompositeOperation = 'screen';
+    for (const d of drones) {
+      let x = d.x, y = d.y;
+      if (reflect) {
+        y = horizon() + (horizon() - y) * 0.86;
+        x += Math.sin(y * 0.02 + t * 1.1 + d.ph) * 3.2 * U;
+      }
+      // twinkle; the strobe wave rolls through the fleet
+      const wave = 0.55 + 0.45 * Math.sin(t * 2.1 - d.slotA * 2 + d.ph);
+      const tw = 0.6 + 0.4 * Math.sin(t * d.tw * Math.PI * 2 + d.ph);
+      const a = (reflect ? 0.8 : 1) * (0.5 + 0.5 * tw) * (0.7 + 0.3 * wave);
+      const sz = (reflect ? 7 : 9) * U * (0.8 + 0.35 * tw);
+      if (d.accent >= 0) {
+        const hue = (d.accent + t * 0.06) % 1;
+        const spr = hue < 0.5 ? glowGold : glowRose;
+        stamp(spr, x, y, sz * 4.6, a * 0.8);
+        ctx.fillStyle = `rgba(255, 236, 210, ${a})`;
+      } else {
+        stamp(glowFleet, x, y, sz * 4.2, a * 0.75);
+        ctx.fillStyle = `rgba(240, 245, 255, ${a})`;
+      }
+      ctx.beginPath();
+      ctx.arc(x, y, Math.max(0.8, (reflect ? 0.9 : 1.25) * U), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // -------------------- resize / build --------------------
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.floor(window.innerWidth);
+    H = Math.floor(window.innerHeight);
+    U = W / 1600;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    paintBg();
+    buildFleet();
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  // -------------------- loop --------------------
+  let last = performance.now();
+  let ready = false;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const t = now / 1000;
+
+    ctx.drawImage(bgLayer, 0, 0, W, H);
+
+    stepShow(t, dt);
+    drawFleet(t, true);      // reflection first, under everything
+    drawFleet(t, false);
+
+    if (!ready) { ready = true; document.body.classList.add('ready'); }
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
