@@ -1,0 +1,974 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Long-Range Sensor Sweep</title>
+  <style>
+    html, body {
+      margin: 0; height: 100%; overflow: hidden; background: #02040a;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: #bfe6ff;
+    }
+    canvas { display: block; }
+    /*  The haze canvas is a backdrop: fixed, so the stacked phone layout
+        starts at the top of the page instead of below a viewport-height
+        canvas. */
+    #bg { position: fixed; left: 0; top: 0; z-index: -1; }
+
+    /* ---- layout ----
+       Same instrument-shell pattern as the navigation console: the console
+       is authored in grid areas at a design width and scaled to fit by
+       --fit, which JS converges against the rendered rect. */
+    .screen {
+      position: absolute; inset: 0;
+      display: grid;
+      grid-template-columns: 25% 1fr 26%;
+      grid-template-rows: auto 1fr;
+      grid-template-areas:
+        "head head  head"
+        "stat scope reg";
+      gap: 1.0vw;
+      padding: 1.1vw;
+      transform-origin: 0 0;
+      transform: scale(var(--fit, 1));
+    }
+    .screen > * { min-height: 0; min-width: 0; }
+
+    .head { grid-area: head; display: flex; align-items: center; justify-content: space-between; gap: 1.2vw;
+      padding: .7vw 1vw; border-radius: .9vw;
+      background: linear-gradient(180deg, rgba(8,20,52,.80), rgba(5,13,38,.72));
+      border: 1px solid rgba(86,236,252,.22); box-shadow: 0 0 26px rgba(20,120,200,.18) inset; }
+    .head h1 { margin: 0; font-size: clamp(12px, 1.05vw, 20px); letter-spacing: .20em; text-transform: uppercase; color: #7fe4ff; }
+    .head .sub { margin: .25em 0 0; font: 500 clamp(9px, .70vw, 13px)/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: #6f8db4; letter-spacing: .10em; text-transform: uppercase; }
+    .pills { display: flex; gap: .7vw; flex-wrap: wrap; }
+    .pill { display: inline-flex; align-items: center; gap: .5em; padding: .4em .8em; border-radius: 999px;
+      background: rgba(8,18,44,.78); border: 1px solid rgba(86,236,252,.24);
+      font: 600 clamp(9px, .70vw, 13px)/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .10em; text-transform: uppercase; white-space: nowrap; }
+    .dot { width: .6em; height: .6em; border-radius: 999px; background: #4ee6c8; box-shadow: 0 0 10px rgba(78,230,200,.7); }
+    .pill.warn { border-color: rgba(255,107,212,.5); color: #ffb8ec; }
+    .pill.warn .dot { background: #ff6bd4; box-shadow: 0 0 10px rgba(255,107,212,.8); animation: blink 1s steps(2,start) infinite; }
+    @keyframes blink { 50% { opacity: .35; } }
+
+    .panel { position: relative; overflow: hidden; border-radius: .9vw;
+      display: flex; flex-direction: column;
+      background: linear-gradient(180deg, rgba(8,20,52,.74), rgba(5,12,34,.66));
+      border: 1px solid rgba(86,236,252,.18); }
+    .panel > .title { display: flex; align-items: center; justify-content: space-between; flex: 0 0 auto;
+      padding: .55vw .8vw; border-bottom: 1px solid rgba(86,236,252,.14);
+      font: 700 clamp(9px, .72vw, 13px)/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .16em; text-transform: uppercase; color: #86dcff; }
+    .panel > .title .hint { color: #5d7ba0; font-weight: 600; letter-spacing: .12em; }
+
+    /* ---- emitter status column ---- */
+    .stat { grid-area: stat; display: flex; flex-direction: column; }
+    .stat .body { flex: 1; min-height: 0; padding: .55vw .8vw .8vw; display: flex; flex-direction: column; gap: .5vw; overflow: hidden; }
+    .row { display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: .6em;
+      font: 600 clamp(9px, .70vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .06em; }
+    .row .k { color: #6f8bd0; text-transform: uppercase; }
+    .row .v { color: #dcf3ff; font-variant-numeric: tabular-nums; }
+    .row.warn .v { color: #ffb8ec; }
+    .bar { height: .55vw; min-height: 5px; border-radius: 999px; background: rgba(20,40,80,.7); overflow: hidden; margin: .05em 0 .2em; }
+    .bar > i { display: block; height: 100%; background: linear-gradient(90deg, #2b8cff, #6fe0ff); border-radius: 999px; }
+    .bar.teal > i { background: linear-gradient(90deg, #1d9e88, #63f0d0); }
+    .stat .spacer { flex: 1 1 auto; min-height: 0; }
+    .log { flex: 0 1 auto; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: .14em;
+      font: 600 clamp(8.5px, .64vw, 12px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: #5d7ba0; letter-spacing: .05em; }
+    .log div b { color: #86dcff; font-weight: 600; }
+    .stat .sep { height: 1px; background: rgba(86,236,252,.14); margin: .2em 0; }
+    .sectors { display: grid; grid-template-columns: repeat(12, 1fr); gap: .22vw; }
+    .sectors i { display: block; height: 1.3vw; min-height: 10px; border-radius: .18vw;
+      background: rgba(20, 46, 88, .8); border: 1px solid rgba(86,236,252,.10); }
+    .sectors i.on { background: rgba(60, 180, 220, .85); border-color: rgba(120,240,255,.5); box-shadow: 0 0 8px rgba(90,220,255,.4); }
+
+    /* ---- the scope ---- */
+    .scope { grid-area: scope; display: flex; flex-direction: column; }
+    .scope .body { flex: 1; min-height: 0; position: relative; }
+    .scope canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+    .tracebox { flex: 0 0 auto; height: 15%; min-height: 56px; position: relative;
+      border-top: 1px solid rgba(86,236,252,.14); }
+    .tracebox .label { position: absolute; top: .3em; left: .7em; z-index: 2;
+      font: 600 clamp(8px, .6vw, 11px)/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .18em; text-transform: uppercase; color: #5d7ba0; }
+    .tracebox .label b { color: #8fb8e8; }
+
+    /* ---- contact registry ---- */
+    .reg { grid-area: reg; display: flex; flex-direction: column; }
+    .reg .body { flex: 1; min-height: 0; padding: .45vw .7vw .7vw; display: flex; flex-direction: column; gap: .28vw; overflow: hidden; }
+    .chead, .c { display: grid; grid-template-columns: 4.6em 3.4em 3.6em 1fr; gap: .5em; align-items: baseline;
+      font: 600 clamp(8.5px, .66vw, 12.5px)/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .05em; }
+    .chead { color: #5d7ba0; text-transform: uppercase; letter-spacing: .12em; border-bottom: 1px solid rgba(86,236,252,.18); padding-bottom: .18em; }
+    .c { color: #9fc4e8; border-bottom: 1px dashed rgba(86,236,252,.10); padding: .06em 0; transition: color .35s, background .35s; }
+    .c .rng, .c .brg { font-variant-numeric: tabular-nums; color: #dcf3ff; }
+    .c .cls { text-align: right; color: #6f8bd0; text-transform: uppercase; }
+    .c.vessel .cls { color: #ffc46b; }
+    .c.planet .cls { color: #6fe0ff; }
+    .c.anomaly .cls { color: #ff6bd4; }
+    .c.fresh { background: rgba(60, 180, 220, .16); }
+    .c.fresh .id { color: #eafcff; }
+    .reg .spacer { flex: 1 1 auto; min-height: 0; }
+    .reg .foot { font: 600 clamp(8.5px, .64vw, 12px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: #5d7ba0; letter-spacing: .08em; text-transform: uppercase; }
+    .reg .foot b { color: #86dcff; }
+
+    /* CRT grain, scanlines and vignette, as the other consoles use. */
+    .fx { pointer-events: none; position: absolute; inset: 0; z-index: 30; }
+    .scan { background: repeating-linear-gradient(0deg, rgba(0,0,0,.16) 0 1px, rgba(0,0,0,0) 1px 3px); mix-blend-mode: multiply; }
+    .vig { background: radial-gradient(ellipse 120% 100% at 50% 46%, rgba(0,0,0,0) 45%, rgba(0,0,0,.45) 86%, rgba(0,0,0,.78) 100%); }
+
+    /*  Portrait viewports: a three-column console is a landscape instrument,
+        so re-flow — scope across the middle at full width, status and
+        registry side by side beneath it. */
+    @media (min-width: 781px) and (max-aspect-ratio: 1/1) {
+      .screen {
+        grid-template-columns: 1fr 1fr;
+        grid-template-rows: auto minmax(0, 1.55fr) minmax(0, 1fr);
+        grid-template-areas:
+          "head head"
+          "scope scope"
+          "stat reg";
+      }
+    }
+
+    @media (max-width: 780px) {
+      /* Phones: stack and scroll rather than scale to illegibility. */
+      .screen { position: static; grid-template-columns: 1fr; grid-template-rows: auto;
+        grid-template-areas: "head" "scope" "stat" "reg"; transform: none; height: auto; }
+      .scope .body { min-height: 60vh; }
+      .tracebox { min-height: 64px; }
+      .stat, .reg { min-height: 34vh; }
+      html, body { overflow: auto; }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="bg"></canvas>
+
+  <div class="screen" id="screen">
+    <header class="head">
+      <div>
+        <h1>Sensor Array · Long-Range Sweep</h1>
+        <p class="sub" id="shipLine">U.S.S. ORION · NX-91872 · SCIENCES · STELLAR CARTOGRAPHY FEED</p>
+      </div>
+      <div class="pills">
+        <span class="pill"><span class="dot"></span><span id="modeText">CONDITION GREEN</span></span>
+        <span class="pill">MODE <span id="modePill">ACTIVE</span></span>
+        <span class="pill">RANGE <span id="rangePill">4.0 LY</span></span>
+      </div>
+    </header>
+
+    <section class="panel stat">
+      <div class="title"><span>Emitter Status</span><span class="hint" id="cycleText">CYCLE 47-C</span></div>
+      <div class="body">
+        <div class="row"><span class="k">Emitter charge</span><span class="v" id="chg">--%</span></div>
+        <div class="bar teal"><i id="chgBar" style="width:0%"></i></div>
+        <div class="row"><span class="k">Receiver gain</span><span class="v" id="gain">--</span></div>
+        <div class="bar"><i id="gainBar" style="width:0%"></i></div>
+        <div class="row"><span class="k">Noise floor</span><span class="v" id="noise">--</span></div>
+        <div class="bar"><i id="noiseBar" style="width:0%"></i></div>
+        <div class="sep"></div>
+        <div class="row"><span class="k">Resolution</span><span class="v">0.02 LY</span></div>
+        <div class="row"><span class="k">Sweep rate</span><span class="v" id="rpm">8.6 RPM</span></div>
+        <div class="row"><span class="k">Bearing</span><span class="v" id="brgNow">000.0°</span></div>
+        <div class="row"><span class="k">Returns</span><span class="v" id="paintCount">0</span></div>
+        <div class="sep"></div>
+        <div class="row"><span class="k">Sweep log</span></div>
+        <div class="log" id="log"></div>
+        <div class="spacer"></div>
+        <div class="row"><span class="k">Sector load</span></div>
+        <div class="sectors" id="sectors"></div>
+      </div>
+    </section>
+
+    <section class="panel scope">
+      <div class="title"><span>Planar Scope · Long-Range</span><span class="hint" id="scopeRange">RANGE 4.0 LY</span></div>
+      <div class="body"><canvas id="scope"></canvas></div>
+      <div class="tracebox">
+        <span class="label">RETURN SIGNAL · <b id="traceLabel">STANDBY</b></span>
+        <canvas id="trace"></canvas>
+      </div>
+    </section>
+
+    <section class="panel reg">
+      <div class="title"><span>Contact Registry</span><span class="hint">AUTO</span></div>
+      <div class="body" id="regBody">
+        <div class="chead"><span>ID</span><span>BRG</span><span>RNG</span><span style="text-align:right">CLASS</span></div>
+        <div class="spacer"></div>
+        <div class="foot" id="regFoot">STRONGEST RETURN <b id="strong">—</b></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="fx scan"></div>
+  <div class="fx vig"></div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  LONG-RANGE SENSOR SWEEP — the sciences station of the same
+  //  ship as the other consoles. A planar scope runs a rotating
+  //  sweep with phosphor persistence; contacts bloom as the beam
+  //  crosses their bearing and decay until the next pass. The
+  //  registry re-sorts by range, the trace at the foot of the
+  //  scope spikes as the beam crosses a return, and every so
+  //  often an unclassified anomaly drifts through and the station
+  //  goes to CONDITION YELLOW until it resolves.
+  //
+  //  Construction notes
+  //  ------------------
+  //  Two canvases in the scope panel: the main scope and a
+  //  persistence layer at half resolution. The persistence layer
+  //  is only ever faded (destination-out) and blipped (lighter),
+  //  which is what makes the phosphor trail cheap. Contacts live
+  //  in true polar coordinates in light-years, so changing the
+  //  range setting genuinely rescales the picture.
+  // ============================================================
+  const CFG = {
+    dprCap: 1.6,
+
+    /* ---- layout ---- */
+    designWidth: 1600,
+    pad: 14,
+
+    /* ---- sweep ---- */
+    rpm: 8.6,
+    trailDeg: 44,          // width of the afterglow wedge
+    persistFade: 0.009,    // persistence-layer fade per frame (of 1)
+
+    /* ---- range settings cycled through ---- */
+    ranges: [4, 8, 12],    // light-years
+    rangeSeconds: [22, 34],
+
+    /* ---- contacts ---- */
+    counts: { star: 4, planet: 2, vessel: 3, debris: 3 },
+    anomalyEvery: [42, 75],   // seconds between anomalies
+    anomalyLife: [16, 26],
+
+    /* ---- passive mode ---- */
+    passiveSeconds: [12, 20],  // listens between active sweeps
+  };
+
+  const FAST = /[?&]fast=1/.test(location.search);
+  if (FAST) {
+    CFG.anomalyEvery = [9, 14];
+    CFG.passiveSeconds = [6, 9];
+    CFG.rangeSeconds = [8, 12];
+  }
+
+  const el = (id) => document.getElementById(id);
+  const TAU = Math.PI * 2;
+  const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const angDiff = (a, b) => { let d = (b - a) % 360; if (d > 180) d -= 360; if (d < -180) d += 360; return d; };
+
+  /* ---------------- console fit ----------------
+     Authored at designWidth and scaled; converges over a few
+     passes because the readouts change the console's height. */
+  let fittedKey = '';
+  function fit() {
+    const screen = el('screen');
+    if (window.innerWidth <= 780) {
+      screen.style.removeProperty('width');
+      screen.style.removeProperty('margin-left');
+      screen.style.removeProperty('margin-top');
+      screen.style.setProperty('--fit', '1');
+      fittedKey = '';
+      return;
+    }
+    const vw = window.innerWidth, vh = window.innerHeight, pad = CFG.pad;
+    const portrait = vw <= vh;
+    const designW = portrait
+      ? Math.max(760, Math.min(vw, 1000))
+      : Math.max(1100, Math.min(CFG.designWidth * 1.25, Math.max(vw, 1100)));
+    screen.style.width = designW + 'px';
+    screen.style.setProperty('--fit', '1');
+    let s = 1;
+    for (let i = 0; i < 6; i++) {
+      screen.style.setProperty('--fit', String(s));
+      const r = screen.getBoundingClientRect();
+      if (!r.height || !r.width) return;
+      const over = Math.max(r.height / (vh - pad), r.width / (vw - pad));
+      if (over > 0.995 && over < 1.005) break;
+      if (over > 1) s = Math.max(0.25, s / over);
+      else s = Math.min(1.6, s / over);
+    }
+    screen.style.setProperty('--fit', String(s));
+    fittedKey = designW + 'x' + vw + 'x' + vh + 'x' + Math.round(screen.scrollHeight);
+    const r = screen.getBoundingClientRect();
+    screen.style.marginLeft = Math.max(0, (vw - r.width) / 2) + 'px';
+    screen.style.marginTop = Math.max(0, (vh - r.height) / 2) + 'px';
+  }
+
+  /* ---------------- background haze ---------------- */
+  const bg = el('bg');
+  const bctx = bg.getContext('2d');
+  const bstars = [];
+  function sizeBg() {
+    const dpr = Math.min(CFG.dprCap, window.devicePixelRatio || 1);
+    bg.width = Math.max(1, Math.floor(window.innerWidth * dpr));
+    bg.height = Math.max(1, Math.floor(window.innerHeight * dpr));
+    bg.style.width = window.innerWidth + 'px';
+    bg.style.height = window.innerHeight + 'px';
+    bctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    bstars.length = 0;
+    const n = Math.floor((window.innerWidth * window.innerHeight) / 16000);
+    for (let i = 0; i < n; i++) {
+      bstars.push({ x: Math.random() * window.innerWidth, y: Math.random() * window.innerHeight,
+                    r: rand(0.4, 1.3), a: rand(0.10, 0.40), ph: rand(0, TAU) });
+    }
+  }
+  function drawBg(time) {
+    const w = window.innerWidth, h = window.innerHeight;
+    bctx.fillStyle = '#02040a';
+    bctx.fillRect(0, 0, w, h);
+    const g = bctx.createRadialGradient(w * 0.5, h * 0.46, 0, w * 0.5, h * 0.46, Math.max(w, h) * 0.62);
+    g.addColorStop(0, 'rgba(14, 70, 96, 0.20)');
+    g.addColorStop(0.55, 'rgba(8, 40, 70, 0.08)');
+    g.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    bctx.fillStyle = g;
+    bctx.fillRect(0, 0, w, h);
+    for (const s of bstars) {
+      const tw = 0.6 + 0.4 * Math.sin(time * 1.2 + s.ph);
+      bctx.fillStyle = `rgba(200, 226, 255, ${(s.a * tw).toFixed(3)})`;
+      bctx.fillRect(s.x, s.y, s.r, s.r);
+    }
+  }
+
+  /* ---------------- scope geometry ---------------- */
+  const scope = el('scope');
+  const sctx = scope.getContext('2d');
+  const persist = document.createElement('canvas');
+  const pctx = persist.getContext('2d');
+  let SW = 1, SH = 1, sdpr = 1, cx = 0, cy = 0, R = 1;
+
+  function sizeScope() {
+    const body = scope.parentElement.getBoundingClientRect();
+    const r = scope.getBoundingClientRect();
+    sdpr = Math.min(CFG.dprCap, window.devicePixelRatio || 1);
+    SW = Math.max(1, Math.round(r.width));
+    SH = Math.max(1, Math.round(r.height));
+    scope.width = Math.round(SW * sdpr);
+    scope.height = Math.round(SH * sdpr);
+    sctx.setTransform(sdpr, 0, 0, sdpr, 0, 0);
+    persist.width = Math.max(1, Math.round(SW * sdpr));
+    persist.height = Math.max(1, Math.round(SH * sdpr));
+    pctx.setTransform(sdpr, 0, 0, sdpr, 0, 0);
+    //  The scope disc centers in the body and leaves room for the
+    //  degree labels on the rim.
+    cx = SW / 2; cy = SH / 2;
+    R = Math.min(SW, SH) / 2 - Math.min(SW, SH) * 0.055;
+  }
+
+  //  Bearing 000 is up, degrees run clockwise — polar to screen.
+  function polar(brg, rngLy, range) {
+    const a = (brg - 90) * Math.PI / 180;
+    const rr = clamp(rngLy / range, 0, 1.02) * R;
+    return { x: cx + Math.cos(a) * rr, y: cy + Math.sin(a) * rr };
+  }
+
+  /* ---------------- contacts ---------------- */
+  //  Contacts live in true polar coordinates (bearing degrees, range in
+  //  light-years). Vessels drift; stars hold. Class decides shape and color.
+  const CLASSES = {
+    star:    { color: '226, 240, 255', label: 'STAR' },
+    planet:  { color: '111, 224, 255', label: 'PLANET' },
+    vessel:  { color: '255, 196, 107', label: 'VESSEL' },
+    debris:  { color: '140, 160, 190', label: 'DEBRIS' },
+    anomaly: { color: '255, 107, 212', label: 'ANOMALY' },
+  };
+  const contacts = [];
+  const ID_PREFIX = { star: 'STR', planet: 'PLT', vessel: 'TRV', debris: 'DRF', anomaly: 'ANM' };
+
+  function seedContacts() {
+    contacts.length = 0;
+    let n = 100;
+    const add = (cls) => {
+      contacts.push({
+        id: ID_PREFIX[cls] + '-' + (n += 7 + ((Math.random() * 20) | 0)),
+        cls,
+        brg: rand(0, 360),
+        rng: rand(0.35, 0.95) * CFG.ranges[CFG.ranges.length - 1],
+        size: rand(0.6, 1.15),
+        vbrg: rand(-0.35, 0.35),          // deg/s
+        vrng: rand(-0.05, 0.05),          // ly/s (fraction of max)
+        energy: 0,
+        wob: rand(0, TAU),
+      });
+    };
+    for (let i = 0; i < CFG.counts.star; i++) add('star');
+    for (let i = 0; i < CFG.counts.planet; i++) add('planet');
+    for (let i = 0; i < CFG.counts.vessel; i++) add('vessel');
+    for (let i = 0; i < CFG.counts.debris; i++) add('debris');
+  }
+
+  function updateContacts(dt) {
+    for (const c of contacts) {
+      c.brg = (c.brg + c.vbrg * dt + 360) % 360;
+      c.rng += c.vrng * dt;
+      if (c.rng < 0.3) c.vrng = Math.abs(c.vrng);
+      if (c.rng > 11.2) c.vrng = -Math.abs(c.vrng);
+      //  Swept? The beam crossing the bearing refreshes the phosphor.
+      const d = Math.abs(angDiff(sweepAng, c.brg));
+      if (d < 2.4 && c.energy < 0.5) {
+        c.energy = 1;
+        c.rowFresh = 0.7;
+        paintBlip(c);
+        paintsThisPass++;
+      }
+      c.energy = Math.max(0, c.energy - dt / 2.6);
+      c.rowFresh = Math.max(0, (c.rowFresh || 0) - dt);
+    }
+  }
+
+  function paintBlip(c) {
+    const col = CLASSES[c.cls].color;
+    const range = ranges[rangeIdx];
+    const p = polar(c.brg, c.rng, range);
+    const size = (c.cls === 'star' ? 11 : c.cls === 'vessel' ? 12 : c.cls === 'anomaly' ? 17 : 7) * c.size;
+    const g = pctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, size);
+    g.addColorStop(0, `rgba(${col}, 0.85)`);
+    g.addColorStop(0.4, `rgba(${col}, 0.38)`);
+    g.addColorStop(1, `rgba(${col}, 0)`);
+    pctx.fillStyle = g;
+    pctx.beginPath();
+    pctx.arc(p.x, p.y, size, 0, TAU);
+    pctx.fill();
+  }
+
+  /* ---------------- sweep ---------------- */
+  let sweepAng = 0;          // degrees, 0 = up, clockwise
+  let paintsThisPass = 0;
+  let passTotal = 0;
+  let passNo = 0;
+  function logPass() {
+    const box = el('log');
+    const line = document.createElement('div');
+    const secs = Math.floor(performance.now() / 1000);
+    const mm = String(Math.floor(secs / 60)).padStart(2, '0');
+    const ss = String(secs % 60).padStart(2, '0');
+    line.innerHTML = `T+${mm}:${ss} · PASS ${String(passNo).padStart(2, '0')} · <b>${passTotal} RETURNS</b>`;
+    box.prepend(line);
+    while (box.children.length > 10) box.lastChild.remove();
+  }
+  const sectorLoad = new Array(12).fill(0);
+
+  function updateSweep(dt) {
+    const rate = 360 * (CFG.rpm / 60) * (mode === 'PASSIVE' ? 0.25 : 1);
+    const prev = sweepAng;
+    sweepAng = (sweepAng + rate * dt) % 360;
+    if (sweepAng < prev) {
+      //  A full revolution closed: log the pass.
+      passNo++;
+      passTotal = paintsThisPass;
+      logPass();
+      paintsThisPass = 0;
+    }
+    //  Sector load meter: how much of the disc the beam recently covered.
+    //  The tail must be shorter than one revolution or every cell ends
+    //  up lit and the meter stops meaning anything.
+    const sec = Math.floor(sweepAng / 30) % 12;
+    sectorLoad[sec] = 1;
+    for (let i = 0; i < 12; i++) sectorLoad[i] = Math.max(0, sectorLoad[i] - dt * 0.3);
+  }
+
+  function drawPersistence() {
+    //  Fade, then composite. The layer holds painted blips; the fade
+    //  is the phosphor decay.
+    pctx.save();
+    pctx.globalCompositeOperation = 'destination-out';
+    pctx.fillStyle = `rgba(0, 0, 0, ${CFG.persistFade})`;
+    pctx.fillRect(0, 0, SW, SH);
+    pctx.restore();
+    sctx.save();
+    sctx.globalCompositeOperation = 'lighter';
+    sctx.globalAlpha = 0.9;
+    sctx.drawImage(persist, 0, 0, SW, SH);
+    sctx.restore();
+  }
+
+  function drawSweep(time) {
+    //  Afterglow wedge behind the beam head.
+    const trail = CFG.trailDeg;
+    if (sctx.createConicGradient) {
+      const a0 = (sweepAng - 90 - trail) * Math.PI / 180;
+      const g = sctx.createConicGradient(a0, cx, cy);
+      const span = trail / 360;
+      g.addColorStop(0, 'rgba(78, 230, 200, 0)');
+      g.addColorStop(span * 0.55, 'rgba(78, 230, 200, 0.05)');
+      g.addColorStop(span * 0.88, 'rgba(120, 244, 224, 0.16)');
+      g.addColorStop(Math.min(span, 0.999), 'rgba(160, 255, 236, 0.42)');
+      sctx.fillStyle = g;
+      sctx.beginPath();
+      sctx.moveTo(cx, cy);
+      sctx.arc(cx, cy, R, a0, (sweepAng - 90) * Math.PI / 180);
+      sctx.closePath();
+      sctx.fill();
+    } else {
+      //  Conic gradients are recent; a fan of wedges reads the same.
+      for (let i = 0; i < 26; i++) {
+        const a1 = sweepAng - trail * (i / 26) - 90;
+        const a2 = sweepAng - trail * ((i + 1) / 26) - 90;
+        sctx.fillStyle = `rgba(78, 230, 200, ${(0.42 * (1 - i / 26)).toFixed(3)})`;
+        sctx.beginPath();
+        sctx.moveTo(cx, cy);
+        sctx.arc(cx, cy, R, a2 * Math.PI / 180, a1 * Math.PI / 180);
+        sctx.closePath();
+        sctx.fill();
+      }
+    }
+    //  Beam head.
+    const a = (sweepAng - 90) * Math.PI / 180;
+    const hx = cx + Math.cos(a) * R, hy = cy + Math.sin(a) * R;
+    const dim = mode === 'PASSIVE' ? 0.45 : 1;
+    const g2 = sctx.createLinearGradient(cx, cy, hx, hy);
+    g2.addColorStop(0, `rgba(160, 255, 236, ${0.10 * dim})`);
+    g2.addColorStop(0.85, `rgba(160, 255, 236, ${0.75 * dim})`);
+    g2.addColorStop(1, `rgba(220, 255, 248, ${0.95 * dim})`);
+    sctx.strokeStyle = g2;
+    sctx.lineWidth = 1.6;
+    sctx.beginPath();
+    sctx.moveTo(cx, cy);
+    sctx.lineTo(hx, hy);
+    sctx.stroke();
+    //  Head glow.
+    const hg = sctx.createRadialGradient(hx, hy, 0, hx, hy, 12);
+    hg.addColorStop(0, `rgba(220, 255, 248, ${0.8 * dim})`);
+    hg.addColorStop(1, 'rgba(220, 255, 248, 0)');
+    sctx.fillStyle = hg;
+    sctx.beginPath();
+    sctx.arc(hx, hy, 12, 0, TAU);
+    sctx.fill();
+  }
+
+  /* ---------------- scope furniture ---------------- */
+  function drawScopeBase(range, time) {
+    //  Disc wash.
+    const bg = sctx.createRadialGradient(cx, cy, 0, cx, cy, R);
+    bg.addColorStop(0, 'rgba(10, 34, 44, 0.85)');
+    bg.addColorStop(0.7, 'rgba(7, 24, 38, 0.78)');
+    bg.addColorStop(1, 'rgba(4, 14, 26, 0.7)');
+    sctx.fillStyle = bg;
+    sctx.beginPath();
+    sctx.arc(cx, cy, R, 0, TAU);
+    sctx.fill();
+
+    //  Range rings with their labels.
+    sctx.font = `600 ${Math.max(9, R * 0.052)}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+    sctx.textAlign = 'left';
+    sctx.textBaseline = 'middle';
+    for (let i = 1; i <= 4; i++) {
+      const rr = (i / 4) * R;
+      sctx.strokeStyle = 'rgba(86, 236, 252, 0.14)';
+      sctx.lineWidth = 1;
+      sctx.beginPath();
+      sctx.arc(cx, cy, rr, 0, TAU);
+      sctx.stroke();
+      sctx.fillStyle = 'rgba(111, 140, 180, 0.75)';
+      const la = (45 - 90) * Math.PI / 180;
+      sctx.fillText((range * i / 4).toFixed(range < 10 && i % 2 ? 1 : 0),
+        cx + Math.cos(la) * rr + 4, cy + Math.sin(la) * rr - 4);
+    }
+
+    //  Bearing spokes and degree labels every 30°.
+    sctx.textAlign = 'center';
+    for (let d = 0; d < 360; d += 30) {
+      const a = (d - 90) * Math.PI / 180;
+      const c = Math.cos(a), s = Math.sin(a);
+      sctx.strokeStyle = 'rgba(86, 236, 252, 0.10)';
+      sctx.beginPath();
+      sctx.moveTo(cx + c * R * 0.06, cy + s * R * 0.06);
+      sctx.lineTo(cx + c * R, cy + s * R);
+      sctx.stroke();
+      const lx = cx + c * (R + R * 0.085), ly = cy + s * (R + R * 0.085);
+      sctx.fillStyle = d % 90 === 0 ? 'rgba(134, 220, 255, 0.95)' : 'rgba(111, 140, 180, 0.8)';
+      sctx.fillText(String(d).padStart(3, '0'), lx, ly);
+      //  Tick marks between labeled bearings.
+      for (let t = 6; t < 30; t += 6) {
+        const ta = (d + t - 90) * Math.PI / 180;
+        const tc = Math.cos(ta), ts = Math.sin(ta);
+        sctx.strokeStyle = 'rgba(86, 236, 252, 0.20)';
+        sctx.beginPath();
+        sctx.moveTo(cx + tc * (R - 4), cy + ts * (R - 4));
+        sctx.lineTo(cx + tc * R, cy + ts * R);
+        sctx.stroke();
+      }
+    }
+
+    //  Outer rim double ring.
+    sctx.strokeStyle = 'rgba(86, 236, 252, 0.30)';
+    sctx.lineWidth = 1.4;
+    sctx.beginPath();
+    sctx.arc(cx, cy, R, 0, TAU);
+    sctx.stroke();
+    sctx.strokeStyle = 'rgba(86, 236, 252, 0.12)';
+    sctx.lineWidth = 1;
+    sctx.beginPath();
+    sctx.arc(cx, cy, R * 1.045, 0, TAU);
+    sctx.stroke();
+
+    //  Own-ship marker: chevron pointing up, plus a crosshair.
+    sctx.strokeStyle = 'rgba(220, 243, 255, 0.85)';
+    sctx.lineWidth = 1.6;
+    sctx.beginPath();
+    sctx.moveTo(cx, cy - R * 0.035);
+    sctx.lineTo(cx - R * 0.026, cy + R * 0.026);
+    sctx.lineTo(cx, cy + R * 0.012);
+    sctx.lineTo(cx + R * 0.026, cy + R * 0.026);
+    sctx.closePath();
+    sctx.stroke();
+    sctx.strokeStyle = 'rgba(86, 236, 252, 0.22)';
+    sctx.lineWidth = 1;
+    sctx.beginPath();
+    sctx.moveTo(cx - R * 0.055, cy); sctx.lineTo(cx + R * 0.055, cy);
+    sctx.moveTo(cx, cy - R * 0.055); sctx.lineTo(cx, cy + R * 0.055);
+    sctx.stroke();
+
+    //  Contact glyphs on top of the phosphor layer: a crisp marker at
+    //  full energy, fading to a hint as the phosphor decays.
+    for (const c of contacts) {
+      if (c.cls === 'anomaly' && c.energy <= 0) continue;
+      const p = polar(c.brg, c.rng, range);
+      const col = CLASSES[c.cls].color;
+      const e = clamp(c.energy * 1.7, 0.2, 1);
+      sctx.save();
+      sctx.translate(p.x, p.y);
+      sctx.strokeStyle = `rgba(${col}, ${e})`;
+      sctx.fillStyle = `rgba(${col}, ${e * 0.85})`;
+      sctx.lineWidth = 1.6;
+      if (c.cls === 'star') {
+        sctx.beginPath();
+        sctx.arc(0, 0, 3.2 * c.size, 0, TAU);
+        sctx.fill();
+      } else if (c.cls === 'planet') {
+        sctx.beginPath();
+        sctx.arc(0, 0, 6.0 * c.size, 0, TAU);
+        sctx.stroke();
+        sctx.beginPath();
+        sctx.arc(0, 0, 1.6, 0, TAU);
+        sctx.fill();
+      } else if (c.cls === 'vessel') {
+        sctx.rotate(c.brg * Math.PI / 180);
+        sctx.beginPath();
+        sctx.moveTo(0, -7.0 * c.size); sctx.lineTo(5.2 * c.size, 0); sctx.lineTo(0, 7.0 * c.size); sctx.lineTo(-5.2 * c.size, 0);
+        sctx.closePath();
+        sctx.stroke();
+        //  Velocity vector: where the contact is headed.
+        sctx.beginPath();
+        sctx.moveTo(0, 5.4 * c.size);
+        sctx.lineTo(Math.sin(c.vbrg * 26) , 5.4 * c.size + Math.abs(c.vbrg) * 60 + 8);
+        sctx.stroke();
+      } else if (c.cls === 'anomaly') {
+        const pulse = 0.6 + 0.4 * Math.sin(time * 5 + c.wob);
+        sctx.strokeStyle = `rgba(${col}, ${e * pulse})`;
+        sctx.beginPath();
+        sctx.arc(0, 0, 7 * c.size, 0, TAU);
+        sctx.stroke();
+        sctx.beginPath();
+        sctx.arc(0, 0, 12 * c.size * pulse, 0, TAU);
+        sctx.stroke();
+        sctx.fillStyle = `rgba(${col}, ${e * pulse * 0.9})`;
+        sctx.beginPath();
+        sctx.arc(0, 0, 2.4, 0, TAU);
+        sctx.fill();
+      } else {
+        sctx.fillRect(-1.4, -1.4, 2.8, 2.8);
+      }
+      sctx.restore();
+    }
+  }
+
+  /* ---------------- return-signal trace ---------------- */
+  const trace = el('trace');
+  const tctx = trace.getContext('2d');
+  let TW = 1, TH = 1;
+  function sizeTrace() {
+    const r = trace.getBoundingClientRect();
+    const dpr = Math.min(CFG.dprCap, window.devicePixelRatio || 1);
+    TW = Math.max(1, Math.round(r.width));
+    TH = Math.max(1, Math.round(r.height));
+    trace.width = Math.round(TW * dpr);
+    trace.height = Math.round(TH * dpr);
+    tctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function drawTrace(time) {
+    tctx.clearRect(0, 0, TW, TH);
+    //  Grid.
+    tctx.strokeStyle = 'rgba(86, 236, 252, 0.10)';
+    tctx.lineWidth = 1;
+    tctx.beginPath();
+    for (let x = 0; x <= TW; x += TW / 12) { tctx.moveTo(x, 0); tctx.lineTo(x, TH); }
+    tctx.moveTo(0, TH / 2); tctx.lineTo(TW, TH / 2);
+    tctx.stroke();
+
+    //  Waveform: a carrier plus an envelope that spikes as the sweep
+    //  crosses any contact bearing — the trace literally answers the scope.
+    const range = ranges[rangeIdx];
+    let spike = 0, spikeLbl = null;
+    for (const c of contacts) {
+      const d = Math.abs(angDiff(sweepAng, c.brg));
+      const s = Math.exp(-(d * d) / 140) * (c.cls === 'anomaly' ? 1.25 : c.cls === 'vessel' ? 1 : 0.6) * c.size;
+      if (s > spike) { spike = s; spikeLbl = c; }
+    }
+    const mid = TH / 2;
+    tctx.beginPath();
+    for (let x = 0; x <= TW; x += 2) {
+      const u = x / TW;
+      const carrier = Math.sin(u * 46 + time * 9) * 0.16 + Math.sin(u * 90 - time * 5) * 0.07;
+      const y = mid - carrier * TH * (0.30 + spike * 0.9) * (0.5 + 0.5 * Math.sin(u * Math.PI));
+      x === 0 ? tctx.moveTo(x, y) : tctx.lineTo(x, y);
+    }
+    const amp = 0.30 + spike * 0.9;
+    tctx.strokeStyle = spike > 0.5 ? 'rgba(140, 244, 226, 0.95)' : 'rgba(78, 200, 230, 0.7)';
+    tctx.lineWidth = 1.5;
+    tctx.shadowColor = 'rgba(78, 230, 200, 0.8)';
+    tctx.shadowBlur = spike > 0.5 ? 8 : 3;
+    tctx.stroke();
+    tctx.shadowBlur = 0;
+
+    //  Sweep position gate: a faint marker where the beam currently is.
+    const gx = (sweepAng / 360) * TW;
+    tctx.strokeStyle = 'rgba(78, 230, 200, 0.35)';
+    tctx.beginPath();
+    tctx.moveTo(gx, 0); tctx.lineTo(gx, TH);
+    tctx.stroke();
+
+    return { spike, spikeLbl, amp };
+  }
+
+  /* ---------------- registry ---------------- */
+  const regBody = el('regBody');
+  const regRows = new Map();
+  function buildRegistry() {
+    for (const c of contacts) {
+      const row = document.createElement('div');
+      row.className = 'c ' + c.cls;
+      row.innerHTML = `<span class="id">${c.id}</span><span class="brg">---</span><span class="rng">--</span><span class="cls">${CLASSES[c.cls].label}</span>`;
+      regBody.insertBefore(row, regBody.querySelector('.spacer'));
+      regRows.set(c, row);
+    }
+  }
+
+  function updateRegistry() {
+    const range = ranges[rangeIdx];
+    const rows = contacts
+      .map((c) => ({ c, vis: c.cls === 'anomaly' ? c.energy > 0 : true }))
+      .filter((r) => r.vis)
+      .sort((a, b) => a.c.rng - b.c.rng);
+    const rowEls = [...regBody.querySelectorAll('.c')];
+    for (let i = 0; i < rowEls.length; i++) {
+      if (i >= rows.length) { rowEls[i].style.display = 'none'; continue; }
+      const { c } = rows[i];
+      const row = rowEls[i];
+      row.style.display = '';
+      row.querySelector('.id').textContent = c.id;
+      row.querySelector('.brg').textContent = Math.round(c.brg).toString().padStart(3, '0') + '°';
+      row.querySelector('.rng').textContent = c.rng.toFixed(1);
+      row.classList.toggle('fresh', (c.rowFresh || 0) > 0);
+    }
+    const strong = rows.find((r) => r.c.energy > 0.25);
+    el('strong').textContent = strong
+      ? `${strong.c.id} · ${Math.round(strong.c.brg).toString().padStart(3, '0')}° · ${strong.c.rng.toFixed(1)} LY`
+      : '—';
+  }
+
+  /* ---------------- sectors meter ---------------- */
+  function buildSectors() {
+    const box = el('sectors');
+    for (let i = 0; i < 12; i++) box.appendChild(document.createElement('i'));
+  }
+  function updateSectors() {
+    const kids = el('sectors').children;
+    for (let i = 0; i < 12; i++) kids[i].classList.toggle('on', sectorLoad[i] > 0.05);
+  }
+
+  /* ---------------- mode & range cycles ---------------- */
+  let mode = 'ACTIVE';
+  let passiveLeft = 0;
+  let rangeIdx = 0;
+  let rangeLeft = 0;
+  const ranges = CFG.ranges;
+
+  function updateCycles(dt) {
+    if (mode === 'ACTIVE') {
+      passiveLeft -= dt;
+      if (passiveLeft <= 0) {
+        mode = 'PASSIVE';
+        passiveLeft = rand(CFG.passiveSeconds[0], CFG.passiveSeconds[1]);
+        el('modePill').textContent = 'PASSIVE';
+        el('traceLabel').textContent = 'LISTENING';
+      }
+    } else {
+      passiveLeft -= dt;
+      if (passiveLeft <= 0) {
+        mode = 'ACTIVE';
+        passiveLeft = rand(26, 44);
+        el('modePill').textContent = 'ACTIVE';
+        el('traceLabel').textContent = 'STANDBY';
+      }
+    }
+    rangeLeft -= dt;
+    if (rangeLeft <= 0) {
+      rangeIdx = (rangeIdx + 1) % CFG.ranges.length;
+      rangeLeft = rand(CFG.rangeSeconds[0], CFG.rangeSeconds[1]);
+      const r = CFG.ranges[rangeIdx];
+      el('rangePill').textContent = r.toFixed(1) + ' LY';
+      el('scopeRange').textContent = `RANGE ${r.toFixed(1)} LY`;
+      //  A range change re-scales every return; nudge the phosphor so
+      //  the picture visibly re-blips.
+      for (const c of contacts) { c.energy = Math.max(c.energy, 0.5); }
+    }
+  }
+
+  /* ---------------- anomaly events ---------------- */
+  let anomaly = null;
+  let nextAnomaly = rand(CFG.anomalyEvery[0], CFG.anomalyEvery[1]);
+
+  function updateAnomaly(dt, time) {
+    if (anomaly) {
+      anomaly.life -= dt;
+      anomaly.brg = (anomaly.brg + anomaly.vbrg * dt + 360) % 360;
+      anomaly.rng += anomaly.vrng * dt;
+      anomaly.energy = 1;
+      if (anomaly.life <= 0) {
+        const i = contacts.indexOf(anomaly);
+        if (i >= 0) contacts.splice(i, 1);
+        regRows.delete(anomaly);
+        const row = regBody.querySelector('.c.anomaly');
+        if (row) row.remove();
+        anomaly = null;
+        nextAnomaly = rand(CFG.anomalyEvery[0], CFG.anomalyEvery[1]);
+        el('modeText').textContent = 'CONDITION GREEN';
+        el('modePill').closest('.pill').classList.remove('warn');
+        document.querySelector('.head .dot').style.background = '#4ee6c8';
+      }
+      return;
+    }
+    nextAnomaly -= dt;
+    if (nextAnomaly <= 0) {
+      anomaly = {
+        id: 'ANM-' + (100 + ((Math.random() * 800) | 0)),
+        cls: 'anomaly',
+        brg: rand(0, 360),
+        rng: rand(0.5, 0.9) * CFG.ranges[CFG.ranges.length - 1],
+        size: rand(0.9, 1.3),
+        vbrg: rand(-0.5, 0.5),
+        vrng: rand(-0.04, 0.04),
+        energy: 1, wob: rand(0, TAU),
+        life: rand(CFG.anomalyLife[0], CFG.anomalyLife[1]),
+      };
+      contacts.push(anomaly);
+      const row = document.createElement('div');
+      row.className = 'c anomaly';
+      row.innerHTML = `<span class="id">${anomaly.id}</span><span class="brg">---</span><span class="rng">--</span><span class="cls">ANOMALY</span>`;
+      regBody.insertBefore(row, regBody.querySelector('.spacer'));
+      regRows.set(anomaly, row);
+      el('modeText').textContent = 'CONDITION YELLOW';
+      el('modePill').closest('.pill').classList.add('warn');
+      el('traceLabel').textContent = 'SIGNAL ANOMALY';
+      document.querySelector('.head .dot').style.background = '#ffc46b';
+    }
+  }
+
+  /* ---------------- readouts ---------------- */
+  let hudEvery = 0;
+  function updateReadouts(dt, time, traceInfo) {
+    hudEvery -= dt;
+    if (hudEvery > 0) return;
+    hudEvery = 0.15;
+    const chg = 62 + 30 * (0.5 + 0.5 * Math.sin(time * 0.35)) + rand(-2, 2);
+    el('chg').textContent = Math.round(chg) + '%';
+    el('chgBar').style.width = clamp(chg, 0, 100) + '%';
+    const gain = 54 + 18 * Math.sin(time * 0.11 + 2);
+    el('gain').textContent = Math.round(gain) + '%';
+    el('gainBar').style.width = gain + '%';
+    const noise = 12 + 8 * Math.abs(Math.sin(time * 0.7)) + rand(0, 6);
+    el('noise').textContent = Math.round(noise) + ' dB';
+    el('noiseBar').style.width = clamp(noise * 4, 2, 100) + '%';
+    el('rpm').textContent = (mode === 'PASSIVE' ? CFG.rpm * 0.25 : CFG.rpm).toFixed(1) + ' RPM';
+    el('brgNow').textContent = sweepAng.toFixed(1).padStart(5, '0') + '°';
+    el('paintCount').textContent = String(passTotal).padStart(2, '0');
+    el('cycleText').textContent = mode === 'PASSIVE' ? 'PASSIVE LISTEN' : 'CYCLE 47-C';
+    updateSectors();
+    updateRegistry();
+  }
+
+  /* ---------------- boot ---------------- */
+  function resizeAll() {
+    sizeBg();
+    sizeScope();
+    sizeTrace();
+    fit();
+  }
+  let relayoutTimer = 0;
+  window.addEventListener('resize', () => {
+    sizeBg();
+    sizeScope();
+    sizeTrace();
+    clearTimeout(relayoutTimer);
+    relayoutTimer = setTimeout(fit, 140);
+  }, { passive: true });
+  if (window.ResizeObserver) {
+    let pending = false;
+    new ResizeObserver(() => {
+      if (pending) return;
+      pending = true;
+      requestAnimationFrame(() => {
+        pending = false;
+        if (window.innerWidth <= 780) return;
+        const key = window.innerWidth + 'x' + window.innerHeight + 'x' + Math.round(el('screen').scrollHeight);
+        if (key !== fittedKey) fit();
+      });
+    }).observe(el('screen'));
+  }
+
+  seedContacts();
+  buildRegistry();
+  buildSectors();
+  resizeAll();
+  requestAnimationFrame(() => { fit(); });
+
+  el('shipLine').textContent =
+    `${['U.S.S. ORION', 'U.S.S. VESPER', 'U.S.S. CALYPSO'][(Math.random() * 3) | 0]} · ` +
+    `NX-${10000 + ((Math.random() * 80000) | 0)} · SCIENCES · STELLAR CARTOGRAPHY FEED`;
+
+  let last = performance.now();
+  const start = last;
+  passiveLeft = rand(26, 44);
+  rangeLeft = rand(CFG.rangeSeconds[0], CFG.rangeSeconds[1]);
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = (now - start) / 1000;
+
+    updateCycles(dt);
+    updateAnomaly(dt, time);
+    updateSweep(dt);
+    updateContacts(dt);
+
+    drawBg(time);
+
+    sctx.clearRect(0, 0, SW, SH);
+    drawScopeBase(ranges[rangeIdx], time);
+    drawPersistence();
+    drawSweep(time);
+
+    const traceInfo = drawTrace(time);
+    updateReadouts(dt, time, traceInfo);
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

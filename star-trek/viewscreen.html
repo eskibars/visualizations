@@ -1,0 +1,1124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Bridge Main Viewscreen</title>
+  <style>
+    /*  The bridge wall is a touch darker than the consoles' backdrop so the
+        aperture reads as the one bright thing in the room. */
+    html, body {
+      margin: 0; height: 100%; overflow: hidden; background: #010107;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: #bfe6ff;
+    }
+    /*  The inset is a page-level unit: the aperture and the LCARS bars that
+        live in the margin around it both need it. */
+    :root { --inset: clamp(26px, 3.6vw, 64px); }
+
+    /* ---- the aperture ----
+       The screen sits inset from the window edges like a physical panel on
+       the bridge. Everything inside it is the view; everything outside is
+       frame. --inset drives both the aperture and the LCARS bars around it. */
+    .aperture {
+      position: absolute;
+      inset: var(--inset);
+      border-radius: clamp(10px, 1.2vw, 22px);
+      overflow: hidden;
+      background: #000;
+      border: 1px solid rgba(120, 200, 255, .16);
+      box-shadow:
+        0 0 0 1px rgba(0, 0, 0, .8),
+        0 0 44px rgba(24, 110, 190, .18),
+        0 0 120px rgba(10, 40, 90, .22);
+    }
+    body.alert .aperture {
+      border-color: rgba(255, 96, 72, .5);
+      box-shadow:
+        0 0 0 1px rgba(0, 0, 0, .8),
+        0 0 44px rgba(220, 50, 30, .30),
+        0 0 120px rgba(160, 20, 10, .30);
+    }
+    .aperture > canvas { display: block; width: 100%; height: 100%; }
+
+    /* CRT grain, scanlines and vignette, as the other consoles use. */
+    .fx { pointer-events: none; position: absolute; inset: 0; z-index: 30; }
+    .scan { background: repeating-linear-gradient(0deg, rgba(0,0,0,.14) 0 1px, rgba(0,0,0,0) 1px 3px); mix-blend-mode: multiply; }
+    .vig { background: radial-gradient(ellipse 125% 105% at 50% 46%, rgba(0,0,0,0) 52%, rgba(0,0,0,.40) 88%, rgba(0,0,0,.72) 100%); }
+
+    /* ---- HUD inside the aperture ----
+       A slim readout strip along the bottom, plus the little station tag
+       top-left. The strip is translucent so the view keeps its depth. */
+    .hud {
+      position: absolute; left: 0; right: 0; bottom: 0; z-index: 20;
+      display: flex; align-items: stretch; gap: clamp(10px, 1.4vw, 26px);
+      padding: .55em clamp(12px, 1.5vw, 26px) .6em;
+      background: linear-gradient(180deg, rgba(3, 10, 24, .30), rgba(3, 10, 24, .68));
+      border-top: 1px solid rgba(120, 200, 255, .14);
+      font: 600 clamp(8.5px, .72vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .12em; text-transform: uppercase; white-space: nowrap;
+      backdrop-filter: blur(2px);
+    }
+    .hud .cell { display: flex; flex-direction: column; gap: .1em; }
+    .hud .k { color: #5d7ba0; font-size: .82em; }
+    .hud .v { color: #dcf3ff; font-variant-numeric: tabular-nums; }
+    .hud .grow { flex: 1 1 auto; }
+    .hud .alertv { color: #4ee6c8; }
+    body.alert .hud .alertv { color: #ff7a5c; animation: blink 1s steps(2, start) infinite; }
+    @keyframes blink { 50% { opacity: .35; } }
+
+    .tag {
+      position: absolute; top: .8em; left: 1em; z-index: 20;
+      font: 600 clamp(8px, .66vw, 12px)/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .22em; text-transform: uppercase; color: #6f9ec8;
+      text-shadow: 0 0 8px rgba(0, 20, 40, .8);
+    }
+    .tag b { color: #9fd8ff; font-weight: 700; }
+
+    /* ---- LCARS frame ----
+       The colored pill bars around the aperture. Bars sit just outside it,
+       in the margin the inset creates; on red alert they warm to red. */
+    .lcars {
+      position: absolute; z-index: 10;
+      display: flex; gap: clamp(4px, .45vw, 8px);
+      height: clamp(14px, 1.5vw, 24px);
+      pointer-events: none;
+    }
+    .lcars.top    { left: var(--inset); right: var(--inset); bottom: calc(100% - var(--inset) + clamp(5px, .55vw, 9px)); }
+    .lcars.bottom { left: var(--inset); right: var(--inset); top: calc(100% - var(--inset) + clamp(5px, .55vw, 9px)); }
+    .lcars .seg { height: 100%; border-radius: 999px; }
+    .lcars .seg.cap-l { border-top-left-radius: 999px; border-bottom-left-radius: 999px; border-top-right-radius: 4px; border-bottom-right-radius: 4px; }
+    .lcars .seg.cap-r { border-top-right-radius: 999px; border-bottom-right-radius: 999px; border-top-left-radius: 4px; border-bottom-left-radius: 4px; }
+    .amber { background: linear-gradient(180deg, #ffb877, #ff9a3c); }
+    .gold  { background: linear-gradient(180deg, #ffd47a, #eec064); }
+    .teal  { background: linear-gradient(180deg, #7ff0da, #3fd0b2); }
+    .steel { background: linear-gradient(180deg, #5d7ba0, #45597a); }
+    body.alert .amber { background: linear-gradient(180deg, #ff8a6a, #e04a30); }
+    body.alert .gold  { background: linear-gradient(180deg, #ff7a5c, #d43a24); }
+
+    .lcars .gap {
+      flex: 1 1 auto; display: flex; align-items: center; justify-content: center;
+      font: 700 clamp(8px, .68vw, 12px)/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .30em; text-transform: uppercase; color: #4a5f80;
+      white-space: nowrap; overflow: hidden;
+    }
+    .lcars .gap b { color: #7f9cc0; font-weight: 700; }
+
+    /* Phones: stack nothing — the aperture simply fills more of the frame and
+       the optional HUD cells drop out so the strip stays one line. */
+    @media (max-width: 780px) {
+      :root { --inset: 14px; }
+      .hud .opt { display: none; }
+      .tag { letter-spacing: .14em; }
+      .lcars .gap { letter-spacing: .14em; }
+    }
+  </style>
+</head>
+<body>
+  <div class="aperture" id="aperture">
+    <canvas id="space"></canvas>
+    <div class="tag">VIEWSCREEN 01 · <b>FORWARD</b> · SECTOR <span id="sector">221-G</span></div>
+    <div class="hud">
+      <div class="cell"><span class="k">Alert</span><span class="v alertv" id="alertText">CONDITION GREEN</span></div>
+      <div class="cell"><span class="k">Heading</span><span class="v" id="hdg">000.0°</span></div>
+      <div class="cell"><span class="k">Pitch</span><span class="v" id="pitch">+0.0°</span></div>
+      <div class="cell opt"><span class="k">Velocity</span><span class="v" id="vel">0.25 c</span></div>
+      <div class="cell"><span class="k">Magnification</span><span class="v" id="mag">1.00×</span></div>
+      <div class="cell grow opt"><span class="k">Primary contact</span><span class="v" id="tgt">NO CONTACT</span></div>
+      <div class="cell opt"><span class="k">Stardate</span><span class="v" id="sdate">47634.4</span></div>
+    </div>
+    <div class="fx scan"></div>
+    <div class="fx vig"></div>
+  </div>
+
+  <div class="lcars top">
+    <div class="seg cap-l amber" style="width:24%"></div>
+    <div class="seg gold" style="width:9%"></div>
+    <div class="gap">U.S.S. ORION · NX-91872 · <b>BRIDGE FORWARD VIEWSCREEN</b></div>
+    <div class="seg steel" style="width:11%"></div>
+    <div class="seg cap-r teal" style="width:15%"></div>
+  </div>
+  <div class="lcars bottom">
+    <div class="seg cap-l teal" style="width:15%"></div>
+    <div class="seg steel" style="width:8%"></div>
+    <div class="gap">LCARS 47-23638 · OPTICAL 1.2 · <b id="lcarsMode">STANDARD BY</b></div>
+    <div class="seg gold" style="width:7%"></div>
+    <div class="seg cap-r amber" style="width:22%"></div>
+  </div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  BRIDGE MAIN VIEWSCREEN — the forward window on the same ship
+  //  as the engineering, navigation and systems consoles. This one
+  //  is a scene rather than a console: the camera flies a cruise
+  //  legs, planets come and go on encounter cycles, traffic makes
+  //  the occasional pass, and every so often a raider decloaks and
+  //  the view runs a short tactical exchange before condition
+  //  green returns.
+  //
+  //  Construction notes
+  //  ------------------
+  //  One canvas, everything drawn per frame. Depth is faked in two
+  //  layers that never need to agree: the starfield is a classic
+  //  z-buffered fly-through whose vanishing point wanders with the
+  //  turn, while planets and ships are painted scene objects at
+  //  screen-space sizes. `?fast=1` compresses the event schedule so
+  //  a reviewer sees a full cycle (flyby, alert, warp) in half a
+  //  minute; normal playback ignores it.
+  // ============================================================
+  const CFG = {
+    dprCap: 1.5,
+
+    /* ---- flight ---- */
+    legs: [10, 22],          // seconds per cruise leg
+    turnRate: 5.2,           // deg/s ceiling
+    cruiseSpeed: 0.017,      // starfield z units / s at impulse
+    warpSpeed: 0.20,
+
+    /* ---- schedule (seconds, [min, max]) ---- */
+    flybyAt:    [16, 34],
+    tacticalAt: [46, 80],
+    warpAt:     [70, 110],
+    encounter:  [70, 95],    // planet approach duration
+
+    /* ---- starfield ---- */
+    stars: 380,
+    starSpread: 1.25,
+
+    /* ---- tactical beats, relative to alert start ---- */
+    beatDecloak: 0.0,
+    beatPhaser1: 2.6,
+    beatTorpedo1: 4.6,
+    beatReturnFire: 6.8,
+    beatPhaser2: 8.6,
+    beatTorpedo2: 9.9,
+    beatKill: 12.2,
+    beatClear: 14.6,
+
+    fast: /[?&]fast=1/.test(location.search),
+  };
+  if (CFG.fast) {
+    CFG.flybyAt = [5, 8];
+    CFG.tacticalAt = [10, 12];
+    CFG.warpAt = [30, 30];
+    CFG.encounter = [30, 40];
+  }
+
+  const TAU = Math.PI * 2;
+  const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const pick = (arr) => arr[(Math.random() * arr.length) | 0];
+  const ease = (t) => t * t * (3 - 2 * t);
+
+  const aperture = document.getElementById('aperture');
+  const cv = document.getElementById('space');
+  const ctx = cv.getContext('2d');
+  let W = 1, H = 1, dpr = 1, M = 1;   // M = min dimension, for size-relative drawing
+
+  function sizeCanvas() {
+    const r = aperture.getBoundingClientRect();
+    dpr = Math.min(CFG.dprCap, window.devicePixelRatio || 1);
+    W = Math.max(1, Math.round(r.width));
+    H = Math.max(1, Math.round(r.height));
+    cv.width = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    M = Math.min(W, H);
+  }
+
+  /* ---------------- flight model ---------------- */
+  const ship = {
+    heading: rand(0, 360),
+    target: rand(0, 360),
+    pitch: 0,
+    warp: 0,          // 0 impulse .. 1 full warp streaks
+    warpHold: 0,      // seconds left in the warp burst
+    yawRate: 0,
+    legLeft: 0,
+  };
+  const SECTORS = ['221-G', '221-H', '222-A', '219-F', '224-C'];
+
+  function angleDiff(a, b) {
+    let d = (b - a) % 360;
+    if (d > 180) d -= 360;
+    if (d < -180) d += 360;
+    return d;
+  }
+
+  function planLeg() {
+    const delta = rand(-70, 70);
+    ship.target = (ship.heading + delta + 360) % 360;
+    ship.legLeft = rand(CFG.legs[0], CFG.legs[1]);
+  }
+
+  function updateFlight(dt) {
+    const diff = angleDiff(ship.heading, ship.target);
+    const step = clamp(diff * dt * 0.7, -1, 1) * Math.min(Math.abs(diff), CFG.turnRate * dt);
+    ship.heading = (ship.heading + step + 360) % 360;
+    ship.yawRate = step / Math.max(dt, 1e-4);
+
+    ship.legLeft -= dt;
+    if (ship.legLeft <= 0 && !state.warping) planLeg();
+
+    //  Pitch reads as the nose easing up under drive; warp swings it higher.
+    const wantPitch = 1.5 + (state.warping ? 5 : 0) + Math.sin(state.time * 0.05) * 1.2;
+    ship.pitch = lerp(ship.pitch, wantPitch, dt * 0.4);
+
+    if (state.warping) {
+      //  Ramp in, hold, ramp out; the streak length follows the same curve.
+      const t = state.warpT;
+      const ramp = t < 3 ? t / 3 : t > state.warpDur - 3 ? Math.max(0, (state.warpDur - t) / 3) : 1;
+      ship.warp = lerp(ship.warp, ease(clamp(ramp, 0, 1)), dt * 2.4);
+    } else {
+      ship.warp = Math.max(0, ship.warp - dt * 0.8);
+    }
+  }
+
+  /* ---------------- schedule ---------------- */
+  const state = {
+    time: 0,
+    warping: false, warpT: 0, warpDur: 9,
+    nextFlyby: 0, nextTactical: 0, nextWarp: 0,
+    alert: false, alertT: 0,
+    sector: 0,
+    zoom: 1, zoomWant: 1, focusX: 0.5, focusY: 0.46,
+    shake: 0,
+  };
+
+  /* ---------------- starfield ---------------- */
+  const stars = [];
+  function seedStars() {
+    stars.length = 0;
+    for (let i = 0; i < CFG.stars; i++) {
+      stars.push({
+        x: rand(-1, 1), y: rand(-1, 1),
+        z: rand(0.06, 1),
+        hue: Math.random() < 0.16 ? rand(28, 52) : rand(195, 225),
+        a: rand(0.35, 1),
+        tw: rand(0, TAU),
+      });
+    }
+  }
+
+  //  Vanishing point wanders with the turn so a heading change reads as
+  //  the whole field swinging, not just the dots sliding.
+  function vanishingPoint() {
+    const hx = Math.sin((ship.heading - 180) * Math.PI / 180);
+    const hy = Math.cos((ship.pitch) * Math.PI / 180) - 1;
+    return { x: W * 0.5 + hx * W * 0.22, y: H * 0.46 + hy * H * 0.3 };
+  }
+
+  function drawStars(time) {
+    const vp = vanishingPoint();
+    const speed = lerp(CFG.cruiseSpeed, CFG.warpSpeed, ship.warp);
+    const spread = M * CFG.starSpread;
+    for (const s of stars) {
+      s.z -= speed * dt_ * (0.55 + s.z * 0.8);
+      if (s.z < 0.045) {
+        s.x = rand(-1, 1); s.y = rand(-1, 1);
+        s.z = 1;
+        continue;
+      }
+      const px = vp.x + s.x * spread * s.z;
+      const py = vp.y + s.y * spread * s.z;
+      if (px < -20 || px > W + 20 || py < -20 || py > H + 20) continue;
+      const r = clamp(s.z * 1.9, 0.4, 2.1);
+      const tw = 0.72 + 0.28 * Math.sin(time * 1.6 + s.tw);
+      const a = s.a * tw * clamp(s.z * 2.2, 0.12, 1);
+
+      if (ship.warp > 0.03) {
+        //  Warp: stretch each star back toward the vanishing point.
+        const k = 1 + ship.warp * 0.10;
+        const qx = vp.x + s.x * spread * s.z * k;
+        const qy = vp.y + s.y * spread * s.z * k;
+        const len = ship.warp * (14 + 130 * (1 - s.z));
+        const dx = px - qx, dy = py - qy;
+        const dl = Math.hypot(dx, dy) || 1;
+        const g = ctx.createLinearGradient(px, py, px - (dx / dl) * len, py - (dy / dl) * len);
+        g.addColorStop(0, `hsla(${s.hue}, 90%, 82%, ${a})`);
+        g.addColorStop(1, 'hsla(220, 90%, 70%, 0)');
+        ctx.strokeStyle = g;
+        ctx.lineWidth = r;
+        ctx.beginPath();
+        ctx.moveTo(px, py);
+        ctx.lineTo(px - (dx / dl) * len, py - (dy / dl) * len);
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = `hsla(${s.hue}, 70%, 84%, ${a})`;
+        ctx.beginPath();
+        ctx.arc(px, py, r, 0, TAU);
+        ctx.fill();
+      }
+    }
+  }
+
+  /* ---------------- nebula haze ---------------- */
+  const nebulae = [
+    { x: 0.24, y: 0.30, r: 0.55, c: '46, 96, 190',  a: 0.10 },
+    { x: 0.78, y: 0.68, r: 0.62, c: '28, 130, 132', a: 0.09 },
+    { x: 0.62, y: 0.14, r: 0.42, c: '150, 74, 120', a: 0.05 },
+  ];
+  function drawNebula() {
+    const vp = vanishingPoint();
+    for (const n of nebulae) {
+      //  Haze drifts against the turn, at a middle depth between stars
+      //  and the planet, which is all the parallax the eye needs here.
+      const x = (n.x + (vp.x / W - 0.5) * -0.12) * W;
+      const y = (n.y + (vp.y / H - 0.5) * -0.10) * H;
+      const g = ctx.createRadialGradient(x, y, 0, x, y, n.r * M);
+      g.addColorStop(0, `rgba(${n.c}, ${n.a})`);
+      g.addColorStop(1, `rgba(${n.c}, 0)`);
+      ctx.fillStyle = g;
+      ctx.fillRect(-W, -H, W * 3, H * 3);
+    }
+  }
+
+  /* ---------------- planets ---------------- */
+  //  One featured planet at a time. It approaches on an encounter cycle,
+  //  sweeps past close to the frame edge, departs, and after a gap a new
+  //  world with fresh parameters arrives from another bearing.
+  const planet = { active: false, d: 0, az: 0, azv: 0, kind: '', r: 0, hue: 0, hue2: 0,
+                   bands: false, ring: false, tilt: 0, moons: [], phase: 0, alpha: 1 };
+
+  function spawnPlanet(first) {
+    planet.active = true;
+    planet.alpha = 1;
+    planet.d = first ? rand(1.1, 1.6) : 2.3;
+    planet.az = rand(-0.55, 0.55);
+    planet.azv = rand(-0.010, 0.010);
+    planet.kind = pick(['gas', 'rock', 'ice']);
+    planet.bands = planet.kind === 'gas';
+    planet.ring = Math.random() < 0.55;
+    planet.hue = planet.kind === 'gas' ? rand(18, 46) : planet.kind === 'ice' ? rand(185, 215) : rand(8, 24);
+    planet.hue2 = (planet.hue + rand(150, 210)) % 360;
+    planet.tilt = rand(-0.42, 0.42);
+    planet.moons = [];
+    const nm = (Math.random() * 2.4) | 0;
+    for (let i = 0; i < nm; i++) {
+      planet.moons.push({ w: rand(0.5, 1.2), ph: rand(0, TAU), dist: rand(1.7, 2.6), r: rand(0.06, 0.12) });
+    }
+    planet.phase = rand(0, TAU);
+    planet.mottle = null;
+    if (!planet.bands) {
+      planet.mottle = [];
+      const nm = 9 + ((Math.random() * 7) | 0);
+      for (let i = 0; i < nm; i++) {
+        planet.mottle.push({
+          x: rand(-0.75, 0.75), y: rand(-0.75, 0.75),
+          r: rand(0.08, 0.22),
+          l: Math.random() < 0.55 ? rand(26, 38) : rand(58, 76),
+          a: rand(0.07, 0.17), tilt: rand(0, TAU),
+        });
+      }
+    }
+  }
+
+  function updatePlanet(dt) {
+    if (!planet.active) {
+      planet.gapLeft -= dt;
+      if (planet.gapLeft <= 0) spawnPlanet(false);
+      return;
+    }
+    planet.d -= dt * (state.warping ? 0.14 : 0.021);
+    planet.az += planet.azv * dt;
+    if (planet.d < 0.5) {
+      //  Departure: the world falls off its bearing and fades.
+      planet.azv += Math.sign(planet.az || 1) * dt * 0.06;
+      planet.alpha = Math.max(0, planet.alpha - dt * 0.5);
+      if (planet.alpha <= 0) {
+        planet.active = false;
+        planet.gapLeft = rand(9, 16) * (CFG.fast ? 0.4 : 1);
+      }
+    }
+  }
+
+  function drawPlanet(time) {
+    if (!planet.active || planet.alpha <= 0) return;
+    const vp = vanishingPoint();
+    //  Approach projection: bearing holds while distance closes, so the
+    //  world stays near its compass point and simply grows.
+    const px = vp.x + Math.sin(planet.az) * W * 0.62 * clamp(planet.d, 0.4, 2.4);
+    const py = vp.y + Math.cos(planet.az) * -H * 0.5 * clamp(planet.d * 0.55, 0.15, 1.3);
+    const pr = (0.16 / clamp(planet.d, 0.42, 2.4)) * M * 1.9 * planet.alpha;
+    if (px < -pr * 2 || px > W + pr * 2 || py < -pr * 2 || py > H + pr * 2) return;
+
+    ctx.save();
+    ctx.globalAlpha = planet.alpha;
+    const lx = -0.42, ly = -0.38;   // light from upper left, as everywhere else
+
+    //  Ring behind: the far half of the ellipse passes behind the sphere.
+    if (planet.ring) drawRing(px, py, pr, true);
+
+    //  Sphere: base gradient toward the light.
+    const g = ctx.createRadialGradient(px + lx * pr * 0.55, py + ly * pr * 0.55, pr * 0.1, px, py, pr);
+    g.addColorStop(0, `hsl(${planet.hue}, 58%, 68%)`);
+    g.addColorStop(0.55, `hsl(${planet.hue}, 55%, 46%)`);
+    g.addColorStop(1, `hsl(${planet.hue}, 60%, 12%)`);
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(px, py, pr, 0, TAU);
+    ctx.fill();
+
+    //  Cloud bands: skewed ellipses clipped to the disc, drifting slowly.
+    //  Two alternating tones at decent alpha — whisper-faint bands read as
+    //  dirt at screen sizes, not weather.
+    if (planet.bands && pr > 18) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(px, py, pr, 0, TAU);
+      ctx.clip();
+      ctx.translate(px, py);
+      ctx.rotate(planet.tilt * 0.5);
+      for (let i = 0; i < 9; i++) {
+        const by = -pr * 1.05 + (i / 8) * pr * 2.1;
+        const bw = pr * (1.25 - (i % 3) * 0.16);
+        const light = i % 2 ? 74 : 30;
+        ctx.fillStyle = `hsla(${(planet.hue2 + i * 7) % 360}, 54%, ${light}%, 0.34)`;
+        ctx.beginPath();
+        ctx.ellipse(Math.sin(time * 0.045 + i * 2.1) * pr * 0.14, by, bw, pr * 0.10, 0, 0, TAU);
+        ctx.fill();
+      }
+      //  A storm spot, because gas giants get one.
+      ctx.fillStyle = `hsla(${planet.hue2}, 62%, 58%, 0.5)`;
+      ctx.beginPath();
+      ctx.ellipse(Math.cos(time * 0.03 + planet.phase) * pr * 0.35, pr * 0.28, pr * 0.16, pr * 0.09, 0, 0, TAU);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    //  Surface mottling for rocky and icy worlds: seeded blotches so the
+    //  disc has geography instead of reading as a smooth billiard ball.
+    if (!planet.bands && pr > 24 && planet.mottle) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(px, py, pr, 0, TAU);
+      ctx.clip();
+      for (const m of planet.mottle) {
+        const mx = px + m.x * pr, my = py + m.y * pr, mr = m.r * pr;
+        ctx.fillStyle = `hsla(${planet.hue2}, 40%, ${m.l}%, ${m.a})`;
+        ctx.beginPath();
+        ctx.ellipse(mx, my, mr, mr * 0.72, m.tilt, 0, TAU);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    //  Night side: a shadow disc offset away from the light, blended in.
+    const sh = ctx.createRadialGradient(px - lx * pr * 1.05, py - ly * pr * 1.05, pr * 0.12, px - lx * pr * 0.6, py - ly * pr * 0.6, pr * 1.45);
+    sh.addColorStop(0, 'rgba(1, 3, 8, 0.96)');
+    sh.addColorStop(0.5, 'rgba(1, 3, 8, 0.55)');
+    sh.addColorStop(1, 'rgba(1, 3, 8, 0)');
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(px, py, pr, 0, TAU);
+    ctx.clip();
+    ctx.fillStyle = sh;
+    ctx.fillRect(px - pr, py - pr, pr * 2, pr * 2);
+    ctx.restore();
+
+    //  Atmosphere rim: a wide soft halo plus a bright arc on the lit limb.
+    if (pr > 10) {
+      const rim = ctx.createRadialGradient(px, py, pr * 0.97, px, py, pr * 1.13);
+      rim.addColorStop(0, `hsla(${planet.hue}, 85%, 78%, 0.26)`);
+      rim.addColorStop(0.45, `hsla(${planet.hue}, 85%, 78%, 0.12)`);
+      rim.addColorStop(1, `hsla(${planet.hue}, 85%, 78%, 0)`);
+      ctx.fillStyle = rim;
+      ctx.beginPath();
+      ctx.arc(px, py, pr * 1.13, 0, TAU);
+      ctx.fill();
+      ctx.lineWidth = Math.max(1.2, pr * 0.018);
+      const la = Math.atan2(ly, lx);
+      //  Dark at the anti-light limb, bright where the sun strikes.
+      const limb = ctx.createLinearGradient(px - Math.cos(la) * pr, py - Math.sin(la) * pr, px + Math.cos(la) * pr, py + Math.sin(la) * pr);
+      limb.addColorStop(0, `hsla(${planet.hue}, 80%, 60%, 0.04)`);
+      limb.addColorStop(0.5, `hsla(${planet.hue}, 80%, 74%, 0.18)`);
+      limb.addColorStop(1, `hsla(${planet.hue}, 92%, 84%, 0.85)`);
+      ctx.strokeStyle = limb;
+      ctx.beginPath();
+      ctx.arc(px, py, pr * 1.004, 0, TAU);
+      ctx.stroke();
+    }
+
+    //  Ring in front: the near half crosses the disc.
+    if (planet.ring) drawRing(px, py, pr, false);
+
+    //  Moons: tiny shaded discs on inclined orbits.
+    for (const m of planet.moons) {
+      const a = time * m.w * 0.25 + m.ph;
+      const mx = px + Math.cos(a) * pr * m.dist;
+      const my = py + Math.sin(a) * pr * m.dist * 0.36;
+      const mr = Math.max(1.2, pr * m.r);
+      const mg = ctx.createRadialGradient(mx - mr * 0.4, my - mr * 0.4, mr * 0.1, mx, my, mr);
+      mg.addColorStop(0, 'hsl(40, 12%, 68%)');
+      mg.addColorStop(1, 'hsl(40, 12%, 16%)');
+      ctx.fillStyle = mg;
+      ctx.beginPath();
+      ctx.arc(mx, my, mr, 0, TAU);
+      ctx.fill();
+    }
+
+    ctx.restore();
+    planet.screen = { x: px, y: py, r: pr };
+  }
+
+  function drawRing(px, py, pr, back) {
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(planet.tilt);
+    const ir = pr * 1.45, orr = pr * 2.05;
+    for (let i = 0; i < 3; i++) {
+      const rr = lerp(ir, orr, i / 2.4);
+      ctx.beginPath();
+      //  back half = above the ring plane (y < 0), front half = below
+      ctx.ellipse(0, 0, rr, rr * 0.24, 0, back ? Math.PI : 0, back ? TAU : Math.PI);
+      ctx.lineWidth = pr * (i === 1 ? 0.10 : 0.045);
+      ctx.strokeStyle = `hsla(${planet.hue}, 40%, ${i === 1 ? 78 : 60}%, ${i === 1 ? 0.5 : 0.32})`;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  /* ---------------- ships ---------------- */
+  //  Silhouette library. Each is a draw function in local coords, nose at
+  //  +x, drawn at unit scale — the caller handles placement and size.
+  const HULLS = {
+    raider(ctx, gl) {
+      //  Battlecruiser silhouette: a raised command pod on a neck, a long
+      //  aft spine, and wings swept back and down from it. Wing-tip
+      //  disruptor glows carry the menace.
+      ctx.beginPath();
+      ctx.moveTo(1.3, 0.02);
+      ctx.lineTo(0.95, 0.07);
+      ctx.lineTo(0.62, 0.09);
+      ctx.lineTo(0.52, 0.42);
+      ctx.lineTo(0.08, 0.44);
+      ctx.lineTo(0.02, 0.12);
+      ctx.lineTo(-0.78, 0.15);
+      ctx.lineTo(-1.12, 0.58);
+      ctx.lineTo(-1.4, 0.62);
+      ctx.lineTo(-1.02, 0.14);
+      ctx.lineTo(-1.28, 0.08);
+      ctx.lineTo(-1.28, -0.08);
+      ctx.lineTo(-1.02, -0.14);
+      ctx.lineTo(-1.4, -0.62);
+      ctx.lineTo(-1.12, -0.58);
+      ctx.lineTo(-0.78, -0.15);
+      ctx.lineTo(0.02, -0.12);
+      ctx.lineTo(0.08, -0.44);
+      ctx.lineTo(0.52, -0.42);
+      ctx.lineTo(0.62, -0.09);
+      ctx.lineTo(0.95, -0.07);
+      ctx.closePath();
+      ctx.fill();
+      gl(-1.26, 0.58, 0.55, '140, 255, 170');
+      gl(-1.26, -0.58, 0.55, '140, 255, 170');
+      gl(1.22, 0.02, 0.22, '255, 190, 140');
+    },
+    cruiser(ctx, gl) {
+      //  Heavy cruiser: long spine, side nacelles.
+      ctx.beginPath();
+      ctx.moveTo(1.3, 0);
+      ctx.lineTo(0.5, 0.12);
+      ctx.lineTo(0.42, 0.5);
+      ctx.lineTo(-0.3, 0.5);
+      ctx.lineTo(-0.34, 0.14);
+      ctx.lineTo(-1.05, 0.2);
+      ctx.lineTo(-1.05, -0.2);
+      ctx.lineTo(-0.34, -0.14);
+      ctx.lineTo(-0.3, -0.5);
+      ctx.lineTo(0.42, -0.5);
+      ctx.lineTo(0.5, -0.12);
+      ctx.closePath();
+      ctx.fill();
+      gl(-0.85, 0.34, 1.0, '120, 220, 255');
+      gl(-0.85, -0.34, 1.0, '120, 220, 255');
+    },
+    shuttle(ctx, gl) {
+      ctx.beginPath();
+      ctx.moveTo(0.7, 0);
+      ctx.lineTo(0.25, 0.2);
+      ctx.lineTo(-0.55, 0.2);
+      ctx.lineTo(-0.62, 0);
+      ctx.lineTo(-0.55, -0.2);
+      ctx.lineTo(0.25, -0.2);
+      ctx.closePath();
+      ctx.fill();
+      gl(-0.5, 0, 0.6, '120, 220, 255');
+    },
+  };
+
+  //  Engine glow helper bound into the hull painters; color per exhaust.
+  function makeGlow(ctx) {
+    return (x, y, s, rgb) => {
+      const g = ctx.createRadialGradient(x, y, 0, x, y, s * 0.55);
+      g.addColorStop(0, `rgba(${rgb}, 0.95)`);
+      g.addColorStop(0.4, `rgba(${rgb}, 0.45)`);
+      g.addColorStop(1, `rgba(${rgb}, 0)`);
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(x, y, s * 0.55, 0, TAU);
+      ctx.fill();
+    };
+  }
+
+  const traffic = [];   // passive flybys
+  const raider = { active: false, hp: 0 };
+
+  function spawnFlyby() {
+    const dir = Math.random() < 0.5 ? 1 : -1;
+    traffic.push({
+      hull: pick(['raider', 'cruiser', 'shuttle']),
+      x: dir > 0 ? -0.15 : 1.15,
+      y: rand(0.22, 0.52),
+      vx: dir * rand(0.030, 0.055),
+      vy: rand(-0.006, 0.006),
+      s: rand(0.045, 0.085) * M,
+      rot: dir > 0 ? rand(-0.14, 0.05) : Math.PI + rand(-0.05, 0.14),
+      bob: rand(0, TAU),
+    });
+  }
+
+  function updateTraffic(dt) {
+    for (let i = traffic.length - 1; i >= 0; i--) {
+      const t = traffic[i];
+      t.x += t.vx * dt;
+      t.y += t.vy * dt;
+      if (t.x < -0.25 || t.x > 1.25) traffic.splice(i, 1);
+    }
+  }
+
+  function drawShip(hull, x, y, s, rot, alpha, glowScale) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(rot);
+    ctx.globalAlpha = alpha;
+    ctx.scale(s, s);
+    //  Hull shading: dark gunmetal with a lit upper edge — silhouettes
+    //  should read as ships against space, not paper cutouts.
+    const grad = ctx.createLinearGradient(-1, -0.7, 1, 0.7);
+    grad.addColorStop(0, 'rgba(112, 132, 164, 0.98)');
+    grad.addColorStop(0.45, 'rgba(52, 66, 92, 0.98)');
+    grad.addColorStop(1, 'rgba(10, 15, 26, 0.98)');
+    ctx.fillStyle = grad;
+    const gl = makeGlow(ctx);
+    HULLS[hull](ctx, glowScale ? (x2, y2, s2, c) => gl(x2, y2, s2 * glowScale, c) : gl);
+    ctx.restore();
+  }
+
+  function drawTraffic(time) {
+    for (const t of traffic) {
+      const bob = Math.sin(time * 0.7 + t.bob) * t.s * 0.05;
+      drawShip(t.hull, t.x * W, t.y * H + bob, t.s, t.rot, 1, 1);
+    }
+  }
+
+  /* ---------------- tactical exchange ---------------- */
+  //  A short scripted sequence: raider decloaks off the starboard bow,
+  //  phasers and torpedoes answer, it gets one shot back, then breaks up.
+  const torpedoes = [];
+  const sparks = [];
+  const bolts = [];
+
+  function spawnRaider() {
+    raider.active = true;
+    raider.hp = 1;
+    raider.x = 0.70;
+    raider.y = 0.38;
+    raider.s = 0.085 * M;
+    raider.rot = 2.72;
+    raider.alpha = 0;
+    raider.wander = rand(0, TAU);
+  }
+
+  function updateTactical(dt) {
+    if (!state.alert) return;
+    state.alertT += dt;
+    const t = state.alertT;
+    const B = CFG;
+
+    //  Beats fire on crossing their timestamp, never on landing in a
+    //  window: frame jitter can step clean over a dt/2 window, but it
+    //  cannot un-cross a threshold.
+    const prev = state.prevAlertT;
+    const crossed = (v) => prev < v && t >= v;
+    state.prevAlertT = t;
+
+    raider.alpha = clamp((t - B.beatDecloak) / 1.6, 0, 1);
+    raider.wander += dt * 0.6;
+    raider.x += Math.sin(raider.wander * 0.5) * dt * 0.006;
+    raider.y += Math.cos(raider.wander * 0.4) * dt * 0.004;
+    raider.s = (0.085 - clamp((t - 2) / 30, 0, 0.02)) * M;
+
+    //  Zoom creeps toward the fight and relaxes when it ends.
+    state.zoomWant = t < B.beatClear - 1.5 ? 1.55 : 1;
+
+    const rx = raider.x * W, ry = raider.y * H;
+
+    const phaserWindow = (t0, dur) => t >= t0 && t < t0 + dur;
+    state.phaser1 = phaserWindow(B.beatPhaser1, 1.3);
+    state.phaser2 = phaserWindow(B.beatPhaser2, 1.3);
+
+    if (crossed(B.beatTorpedo1)) fireTorpedo(rx, ry);
+    if (crossed(B.beatTorpedo2)) fireTorpedo(rx, ry);
+    if (crossed(B.beatReturnFire)) fireBolt();
+
+    if (t >= B.beatKill && raider.hp > 0) {
+      raider.hp = 0;
+      explode(rx, ry, raider.s);
+      state.shake = 1;
+    }
+    if (raider.hp === 0) raider.alpha = Math.max(0, raider.alpha - dt * 2.2);
+
+    if (t >= B.beatClear) {
+      state.alert = false;
+      state.phaser1 = false;
+      state.phaser2 = false;
+      state.zoomWant = 1;
+      document.body.classList.remove('alert');
+      el('alertText').textContent = 'CONDITION GREEN';
+      el('lcarsMode').textContent = 'STANDARD BY';
+      el('tgt').textContent = 'NO CONTACT';
+      state.nextTactical = state.time + rand(CFG.tacticalAt[0], CFG.tacticalAt[1]);
+    }
+  }
+
+  function fireTorpedo(tx, ty) {
+    torpedoes.push({
+      x: W * (0.5 + rand(-0.06, 0.06)), y: H * 1.02,
+      tx, ty, t: 0, dur: rand(1.5, 1.9),
+    });
+  }
+
+  function fireBolt() {
+    bolts.push({
+      x: raider.x * W, y: raider.y * H,
+      tx: W * (0.42 + rand(-0.12, 0.12)), ty: H * 1.06,
+      t: 0, dur: 0.85,
+    });
+  }
+
+  function explode(x, y, s) {
+    state.flash = { x, y, t: 0 };
+    for (let i = 0; i < 16; i++) {
+      const a = rand(0, TAU);
+      sparks.push({
+        x, y,
+        vx: Math.cos(a) * rand(0.02, 0.16) * s,
+        vy: Math.sin(a) * rand(0.02, 0.16) * s,
+        life: rand(0.7, 1.9), t: 0,
+        r: rand(0.02, 0.05) * s,
+      });
+    }
+  }
+
+  function drawWeapons(dt, time) {
+    //  Phaser beams: from the bottom corners to the raider, only while the
+    //  beat is live. Tapered core plus a wide soft sheath, flickering.
+    const target = raider.active && raider.hp > 0 ? { x: raider.x * W, y: raider.y * H } : null;
+    const beams = [];
+    if (state.phaser1 || state.phaser2) {
+      if (target) {
+        beams.push({ x0: W * 0.04, y0: H * 0.97, x1: target.x, y1: target.y });
+        beams.push({ x0: W * 0.96, y0: H * 0.97, x1: target.x, y1: target.y });
+      }
+    }
+    for (const b of beams) {
+      const flick = 0.75 + 0.25 * Math.sin(time * 47);
+      const dx = b.x1 - b.x0, dy = b.y1 - b.y0;
+      const dl = Math.hypot(dx, dy) || 1;
+      const nx = -dy / dl, ny = dx / dl;
+      const wCore = 2.2 * flick, wSheath = 9 * flick;
+      const sheath = ctx.createLinearGradient(b.x0, b.y0, b.x1, b.y1);
+      sheath.addColorStop(0, 'rgba(255, 120, 60, 0)');
+      sheath.addColorStop(0.25, 'rgba(255, 140, 70, 0.30)');
+      sheath.addColorStop(1, 'rgba(255, 190, 90, 0.85)');
+      ctx.strokeStyle = sheath;
+      ctx.lineWidth = wSheath;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(b.x0, b.y0);
+      ctx.lineTo(b.x1, b.y1);
+      ctx.stroke();
+      const core = ctx.createLinearGradient(b.x0, b.y0, b.x1, b.y1);
+      core.addColorStop(0, 'rgba(255, 240, 210, 0)');
+      core.addColorStop(0.3, 'rgba(255, 244, 214, 0.9)');
+      core.addColorStop(1, 'rgba(255, 252, 240, 1)');
+      ctx.strokeStyle = core;
+      ctx.lineWidth = wCore;
+      ctx.beginPath();
+      ctx.moveTo(b.x0, b.y0);
+      ctx.lineTo(b.x1, b.y1);
+      ctx.stroke();
+      //  Impact bloom where the beam lands.
+      const hit = ctx.createRadialGradient(b.x1, b.y1, 0, b.x1, b.y1, 20 * flick);
+      hit.addColorStop(0, 'rgba(255, 236, 190, 0.9)');
+      hit.addColorStop(1, 'rgba(255, 150, 60, 0)');
+      ctx.fillStyle = hit;
+      ctx.beginPath();
+      ctx.arc(b.x1, b.y1, 20 * flick, 0, TAU);
+      ctx.fill();
+    }
+
+    //  Torpedoes: glowing comets easing onto the target.
+    for (let i = torpedoes.length - 1; i >= 0; i--) {
+      const p = torpedoes[i];
+      p.t += dt;
+      const k = ease(clamp(p.t / p.dur, 0, 1));
+      const x = lerp(p.x, p.tx, k);
+      const y = lerp(p.y, p.ty, k);
+      const g = ctx.createRadialGradient(x, y, 0, x, y, 16);
+      g.addColorStop(0, 'rgba(255, 250, 230, 1)');
+      g.addColorStop(0.35, 'rgba(255, 190, 90, 0.8)');
+      g.addColorStop(1, 'rgba(255, 120, 40, 0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(x, y, 16, 0, TAU);
+      ctx.fill();
+      //  Trail: a fading line back along the flight path.
+      const kk = Math.max(0, k - 0.18);
+      const tx = lerp(p.x, p.tx, kk), ty = lerp(p.y, p.ty, kk);
+      const tg = ctx.createLinearGradient(tx, ty, x, y);
+      tg.addColorStop(0, 'rgba(255, 150, 60, 0)');
+      tg.addColorStop(1, 'rgba(255, 210, 120, 0.55)');
+      ctx.strokeStyle = tg;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(tx, ty);
+      ctx.lineTo(x, y);
+      ctx.stroke();
+      if (p.t >= p.dur) {
+        torpedoes.splice(i, 1);
+        state.shake = Math.max(state.shake, 0.55);
+        const fl = ctx.createRadialGradient(p.tx, p.ty, 0, p.tx, p.ty, 60);
+        fl.addColorStop(0, 'rgba(255, 240, 200, 0.95)');
+        fl.addColorStop(0.5, 'rgba(255, 160, 70, 0.5)');
+        fl.addColorStop(1, 'rgba(255, 120, 40, 0)');
+        ctx.fillStyle = fl;
+        ctx.beginPath();
+        ctx.arc(p.tx, p.ty, 60, 0, TAU);
+        ctx.fill();
+      }
+    }
+
+    //  Enemy bolts streaking past the camera toward the viewer's deck.
+    for (let i = bolts.length - 1; i >= 0; i--) {
+      const b = bolts[i];
+      b.t += dt;
+      const k = b.t / b.dur;
+      const x = lerp(b.x, b.tx, k), y = lerp(b.y, b.ty, k);
+      const px = x + (b.tx - b.x) * 0.12, py = y + (b.ty - b.y) * 0.12;
+      const g = ctx.createLinearGradient(px, py, x, y);
+      g.addColorStop(0, 'rgba(80, 255, 140, 0)');
+      g.addColorStop(1, 'rgba(160, 255, 190, 0.95)');
+      ctx.strokeStyle = g;
+      ctx.lineWidth = 3.4;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      ctx.lineTo(x, y);
+      ctx.stroke();
+      if (k >= 1) {
+        bolts.splice(i, 1);
+        state.shake = Math.max(state.shake, 0.4);
+      }
+    }
+
+    //  Debris sparks.
+    for (let i = sparks.length - 1; i >= 0; i--) {
+      const s = sparks[i];
+      s.t += dt;
+      if (s.t >= s.life) { sparks.splice(i, 1); continue; }
+      const x = s.x + s.vx * s.t, y = s.y + s.vy * s.t;
+      const a = 1 - s.t / s.life;
+      ctx.fillStyle = `rgba(255, ${180 + 60 * a | 0}, 120, ${a})`;
+      ctx.beginPath();
+      ctx.arc(x, y, s.r * (0.5 + a), 0, TAU);
+      ctx.fill();
+    }
+
+    //  Kill flash: a bloom that opens and fades.
+    if (state.flash) {
+      state.flash.t += dt;
+      const f = state.flash;
+      const k = f.t / 1.4;
+      if (k >= 1) state.flash = null;
+      else {
+        const r = 20 + ease(k) * M * 0.34;
+        const g = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, r);
+        g.addColorStop(0, `rgba(255, 244, 214, ${(1 - k) * 0.95})`);
+        g.addColorStop(0.45, `rgba(255, 170, 80, ${(1 - k) * 0.55})`);
+        g.addColorStop(1, 'rgba(255, 120, 40, 0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(f.x, f.y, r, 0, TAU);
+        ctx.fill();
+      }
+    }
+  }
+
+  /* ---------------- schedule ticks ---------------- */
+  function tickSchedule() {
+    const t = state.time;
+    if (!state.alert && t >= state.nextTactical) startAlert();
+    if (!state.alert && traffic.length === 0 && t >= state.nextFlyby) {
+      spawnFlyby();
+      state.nextFlyby = t + rand(CFG.flybyAt[0], CFG.flybyAt[1]);
+    }
+    if (!state.warping && !state.alert && t >= state.nextWarp) {
+      state.warping = true;
+      state.warpT = 0;
+      state.warpDur = 9;
+      el('lcarsMode').textContent = 'WARP TRANSIT';
+    }
+  }
+
+  function startAlert() {
+    state.alert = true;
+    state.alertT = 0;
+    state.prevAlertT = -1;
+    spawnRaider();
+    document.body.classList.add('alert');
+    el('alertText').textContent = 'RED ALERT';
+    el('lcarsMode').textContent = 'TACTICAL';
+  }
+
+  function updateWarp(dt) {
+    if (!state.warping) return;
+    state.warpT += dt;
+    if (state.warpT >= state.warpDur) {
+      state.warping = false;
+      state.sector = (state.sector + 1) % SECTORS.length;
+      el('sector').textContent = SECTORS[state.sector];
+      el('lcarsMode').textContent = 'STANDARD BY';
+      planLeg();
+      //  A warp hop is a good excuse for fresh scenery.
+      planet.active = false;
+      planet.gapLeft = 2;
+    }
+  }
+
+  /* ---------------- red alert wash ---------------- */
+  function drawAlertWash(time) {
+    if (!state.alert) return;
+    const pulse = 0.55 + 0.45 * Math.sin(time * 6.2);
+    const g = ctx.createRadialGradient(W / 2, H / 2, M * 0.30, W / 2, H / 2, M * 0.78);
+    g.addColorStop(0, 'rgba(200, 30, 16, 0)');
+    g.addColorStop(1, `rgba(200, 30, 16, ${0.09 + pulse * 0.07})`);
+    ctx.fillStyle = g;
+    ctx.fillRect(-W, -H, W * 3, H * 3);
+  }
+
+  /* ---------------- HUD ---------------- */
+  const el = (id) => document.getElementById(id);
+  let hudEvery = 0;
+  function updateHud(dt) {
+    hudEvery -= dt;
+    if (hudEvery > 0) return;
+    hudEvery = 0.12;
+    el('hdg').textContent = ship.heading.toFixed(1).padStart(5, '0') + '°';
+    el('pitch').textContent = (ship.pitch >= 0 ? '+' : '') + ship.pitch.toFixed(1) + '°';
+    el('vel').textContent = state.warping ? `WARP ${(1 + ship.warp * 4.6).toFixed(2)}` : (0.22 + Math.sin(state.time * 0.1) * 0.03).toFixed(2) + ' c';
+    el('mag').textContent = state.zoom.toFixed(2) + '×';
+    el('sdate').textContent = (47634.4 + state.time * 0.0007).toFixed(1);
+    if (state.alert && raider.hp > 0) {
+      el('tgt').textContent = `RAIDER · BRG ${Math.round((raider.x - 0.5) * 90 + 90)}° · LOCK`;
+    } else if (planet.active) {
+      el('tgt').textContent = `${planet.kind.toUpperCase()} · ${(planet.d * 0.82).toFixed(2)} AU`;
+    } else if (traffic.length) {
+      el('tgt').textContent = traffic[0].hull.toUpperCase() + ' · PASSING';
+    }
+  }
+
+  /* ---------------- boot ---------------- */
+  function resizeAll() { sizeCanvas(); }
+  window.addEventListener('resize', resizeAll, { passive: true });
+
+  const hold = CFG.fast ? 0.35 : 1;
+  state.nextFlyby = rand(CFG.flybyAt[0], CFG.flybyAt[1]) * hold;
+  state.nextTactical = rand(CFG.tacticalAt[0], CFG.tacticalAt[1]) * hold;
+  state.nextWarp = rand(CFG.warpAt[0], CFG.warpAt[1]) * hold;
+  seedStars();
+  spawnPlanet(true);
+  planet.gapLeft = 10;
+  resizeAll();
+
+  let last = performance.now();
+  let dt_ = 0.016;
+  const start = last;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    dt_ = dt;
+    const time = (now - start) / 1000;
+    state.time = time;
+
+    updateFlight(dt);
+    updateWarp(dt);
+    updatePlanet(dt);
+    updateTraffic(dt);
+    updateTactical(dt);
+    state.zoom = lerp(state.zoom, state.zoomWant, dt * 1.4);
+    state.shake = Math.max(0, state.shake - dt * 2.2);
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    //  Fills run past the frame: the tactical zoom can push the visible
+    //  rect outside the world's painted bounds, which would letterbox black.
+    ctx.fillStyle = '#02040a';
+    ctx.fillRect(-W, -H, W * 3, H * 3);
+
+    //  Camera: shake plus the tactical zoom, both centered near the action.
+    const shx = (Math.random() - 0.5) * state.shake * 6;
+    const shy = (Math.random() - 0.5) * state.shake * 6;
+    ctx.save();
+    if (state.zoom > 1.001 || state.shake > 0.001) {
+      const fx = W * state.focusX, fy = H * state.focusY;
+      if (state.alert && raider.hp > 0) { state.focusX = lerp(state.focusX, raider.x, dt * 2); state.focusY = lerp(state.focusY, raider.y, dt * 2); }
+      else { state.focusX = lerp(state.focusX, 0.5, dt * 2); state.focusY = lerp(state.focusY, 0.46, dt * 2); }
+      ctx.translate(W / 2 + shx, H / 2 + shy);
+      ctx.scale(state.zoom, state.zoom);
+      ctx.translate(-fx, -fy);
+    } else {
+      ctx.translate(shx, shy);
+    }
+
+    drawNebula();
+    drawStars(time);
+    drawPlanet(time);
+    drawTraffic(time);
+
+    if (raider.active) {
+      if (raider.hp > 0) {
+        //  Decloak shimmer: the silhouette wavers horizontally while it
+        //  fades in, the way a cloak discharge is usually drawn.
+        const shim = (1 - raider.alpha) * raider.s * 0.22;
+        if (shim > 0.5) {
+          ctx.save();
+          ctx.globalAlpha = raider.alpha * 0.35;
+          drawShip('raider', raider.x * W + shim * Math.sin(time * 31), raider.y * H, raider.s, raider.rot, 0.5, 1);
+          ctx.restore();
+        }
+        drawShip('raider', raider.x * W, raider.y * H, raider.s, raider.rot, raider.alpha, 1);
+      }
+    }
+
+    drawWeapons(dt, time);
+    drawAlertWash(time);
+    ctx.restore();
+
+    updateHud(dt);
+    tickSchedule();
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

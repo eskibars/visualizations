@@ -1,0 +1,592 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Poly Race</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #04040c; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .vignette {
+      pointer-events: none; position: fixed; inset: 0;
+      background: radial-gradient(ellipse 124% 100% at 50% 50%,
+        rgba(0,0,0,0) 44%, rgba(0,0,0,.30) 80%, rgba(0,0,0,.78) 100%);
+    }
+    .hud {
+      pointer-events: none; position: fixed; inset: 0;
+      font: 700 clamp(9px, .74vw, 14px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .14em; color: rgba(150, 240, 255, .88);
+      text-shadow: 0 0 8px rgba(0, 120, 180, .8), 0 2px 12px rgba(0,0,0,.9);
+      opacity: 0; transition: opacity 2s ease 1s;
+    }
+    body.ready .hud { opacity: 1; }
+    .hud .sp { position: absolute; left: 4vw; top: 6vh; }
+    .hud .sp .big {
+      display: block; font-size: clamp(20px, 2.6vw, 48px); line-height: 1;
+      color: #d8faff; letter-spacing: .06em;
+    }
+    .hud .sp .lab { opacity: .55; letter-spacing: .22em; }
+    .hud .tm { position: absolute; right: 4vw; top: 6vh; text-align: right; }
+    .hud .tm .big {
+      display: block; font-size: clamp(18px, 2.0vw, 36px); line-height: 1;
+      color: #ffe9b0; letter-spacing: .06em;
+    }
+    .hud .gear { position: absolute; left: 4vw; bottom: 16vh; opacity: .7; }
+    .hud .rev {
+      position: absolute; left: 50%; transform: translateX(-50%);
+      bottom: 9vh; opacity: .55; letter-spacing: .3em; text-transform: uppercase;
+    }
+    .caption {
+      pointer-events: none; position: fixed; left: 0; right: 0; bottom: 3.6vh;
+      text-align: center;
+      font: 500 clamp(9px, .68vw, 13px)/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .34em; text-transform: uppercase;
+      color: rgba(140, 220, 255, .30);
+      text-shadow: 0 1px 14px rgba(0,0,0,.95);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="vignette"></div>
+  <div class="hud">
+    <div class="sp"><span class="lab">SPEED</span><span class="big" id="spd">000</span></div>
+    <div class="tm"><span class="lab">LAP</span><span class="big" id="lap">1&#8202;/&#8202;3</span></div>
+    <div class="gear">GEAR <span id="gear">3</span></div>
+    <div class="rev">checkpoint <span id="cp">0</span></div>
+  </div>
+  <div class="caption">insert coin</div>
+<script>
+(() => {
+  "use strict";
+
+  // ============================================================
+  //  POLY RACE — the third-person arcade racer, in wireframe. A
+  //  road that bends and rises, roadside pylons and chevrons
+  //  streaming past, other cars as simple polygons, and a horizon
+  //  that shifts with the steering. Everything is drawn as lines,
+  //  as the hardware of the era actually did.
+  //
+  //  Construction notes
+  //  ------------------
+  //  The road is a strip of quads projected segment by segment:
+  //  each segment carries a curvature and a hill, and the track's
+  //  shape is accumulated as the player advances rather than being
+  //  stored. That is the classic technique, and it costs one loop
+  //  over the visible segments with no allocation.
+  // ============================================================
+  const CONFIG = {
+    //  Wireframe lines on near-black; a 1.4 store is plenty and the road strip
+    //  is the only large fill.
+    dprCap: 1.4,
+
+    segLen: 200,             // world units per segment
+    drawDist: 130,           // segments visible
+    /*  Road half-width in world units, and the camera height above it. Their
+        ratio to segLen is what decides how the strip reads: the projection is
+        pinhole, so the near segment's on-screen width is focal*roadHalf/segLen.
+        The first version of this page used a 1100-unit half-width with a
+        1050-unit camera, which put every segment within a few degrees of the
+        horizon and rendered no visible road at all. */
+    roadHalf: 300,
+    camHeight: 190,
+    rumble: 3,               // segments per rumble stripe
+
+    //  Focal length as a multiple of frame height. Fixing it to the height
+    //  rather than the width keeps the vertical field of view stable whatever
+    //  the aspect ratio.
+    focal: 0.9,
+    horizonY: 0.46,
+
+    maxSpeed: 13000,         // world units/s
+    accel: 5200,
+    offRoadDrag: 0.42,
+    centrifugal: 1.0,
+    hillStrength: 90,        // world units of rise
+    /*  Curvature, in radians of heading change per world unit. Over a visible
+        stretch this accumulates to a few tenths of a radian, which is a
+        pronounced corner without being undrivable. */
+    curveStrength: 1.4e-5,
+
+    cars: 26,
+  };
+
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d", { alpha: false });
+  let W = 0, H = 0, DPR = 1, U = 1;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  const TAU = Math.PI * 2;
+
+  // ---------------- track ----------------
+  //  Built once as a table of curvature and hill per segment. The classic
+  //  approach generates it analytically from the segment index, which keeps the
+  //  track identical between runs and needs no storage beyond the two arrays.
+  let curveTab = null;
+  let hillTab = null;
+  const TRACK = 2200;
+
+  function buildTrack() {
+    curveTab = new Float32Array(TRACK);
+    hillTab = new Float32Array(TRACK);
+    // A repeating sequence of corners and hills, generated by summing a few
+    // sine waves at different periods so the track never feels cyclic.
+    for (let i = 0; i < TRACK; i++) {
+      const t = i / TRACK;
+      const c =
+        Math.sin(t * TAU * 3) * 1.0 +
+        Math.sin(t * TAU * 7 + 1.3) * 0.55 +
+        Math.sin(t * TAU * 13 + 2.7) * 0.30;
+      // Hills: a different set of periods, and a gentler amplitude so the road
+      // stays drivable.
+      const h =
+        Math.sin(t * TAU * 2 + 0.4) * 1.0 +
+        Math.sin(t * TAU * 5 + 1.9) * 0.42;
+      curveTab[i] = c * CONFIG.curveStrength;
+      hillTab[i] = h * CONFIG.hillStrength;
+    }
+  }
+
+  function curveAt(z) {
+    const i = ((z / CONFIG.segLen) | 0) % TRACK;
+    return curveTab[((i % TRACK) + TRACK) % TRACK];
+  }
+  function hillAt(z) {
+    const i = ((z / CONFIG.segLen) | 0) % TRACK;
+    return hillTab[((i % TRACK) + TRACK) % TRACK];
+  }
+
+  // ---------------- state ----------------
+  const st = {
+    z: 0,               // camera position along the track
+    playerX: 0,         // -1..1 across the road
+    speed: 0,
+    steer: 0,
+    targetSteer: 0,
+    lap: 1,
+    laps: 3,
+    checkpoint: 0,
+    offRoad: 0,
+    bounce: 0,
+  };
+
+  const cars = [];
+  function seedCars() {
+    cars.length = 0;
+    for (let i = 0; i < CONFIG.cars; i++) {
+      cars.push({
+        z: rand(0, TRACK * CONFIG.segLen * 0.6),
+        // Lanes as fractions of the road half-width.
+        x: rand(-0.72, 0.72),
+        v: rand(0.42, 0.86),
+        w: rand(0.10, 0.17),
+        hue: [200, 320, 40, 150][(Math.random() * 4) | 0],
+      });
+    }
+  }
+
+  // ---------------- projection ----------------
+  //  A pinhole camera at a fixed height above the road, looking straight ahead.
+  //  Every quantity below is one multiply and one divide, which is the whole
+  //  reason a pseudo-3D road is cheap: no matrices, no per-vertex allocation.
+  //
+  //  screen_y = horizon + focal * (cameraHeight - roadHeight) / distance
+  //  screen_x = centre  + focal * (roadOffset - cameraOffset) / distance
+  //  halfWidth = focal * roadHalfWidth / distance
+  //
+  //  Distances are short near the camera, so the near segment projects far below
+  //  the frame and the far ones converge on the horizon, as they should.
+  function focalPx() { return CONFIG.focal * H; }
+
+  //  Per-segment screen geometry, filled once per frame by the road loop and
+  //  then sampled by the traffic rather than re-integrated per car.
+  const segX = new Float32Array(CONFIG.drawDist + 2);
+  const segY = new Float32Array(CONFIG.drawDist + 2);
+  const segW = new Float32Array(CONFIG.drawDist + 2);
+
+  //  `from` and `to` carry already-projected screen x, y and road half-width, so
+  //  this is pure polygon filling with no projection of its own.
+  function drawSegment(from, to, colours) {
+    // Road surface: a filled quad, alternating light and dark with the rumble
+    // stripes so the motion is legible.
+    ctx.beginPath();
+    ctx.moveTo(from.x - from.w, from.y);
+    ctx.lineTo(from.x + from.w, from.y);
+    ctx.lineTo(to.x + to.w, to.y);
+    ctx.lineTo(to.x - to.w, to.y);
+    ctx.closePath();
+    ctx.fillStyle = colours.road;
+    ctx.fill();
+
+    // Rumble strips along both edges, as a fraction of the road's half-width.
+    const rw = 0.14;
+    for (const sgn of [-1, 1]) {
+      ctx.beginPath();
+      ctx.moveTo(from.x + sgn * from.w, from.y);
+      ctx.lineTo(from.x + sgn * from.w * (1 + rw), from.y);
+      ctx.lineTo(to.x + sgn * to.w * (1 + rw), to.y);
+      ctx.lineTo(to.x + sgn * to.w, to.y);
+      ctx.closePath();
+      ctx.fillStyle = colours.rumble;
+      ctx.fill();
+    }
+
+    // Centre dashes, on the alternating segments only, which reads as a broken
+    // line rather than a solid stripe.
+    if (colours.dash) {
+      const dw = 0.022;
+      ctx.beginPath();
+      ctx.moveTo(from.x - from.w * dw, from.y);
+      ctx.lineTo(from.x + from.w * dw, from.y);
+      ctx.lineTo(to.x + to.w * dw, to.y);
+      ctx.lineTo(to.x - to.w * dw, to.y);
+      ctx.closePath();
+      ctx.fillStyle = colours.dashCol;
+      ctx.fill();
+    }
+  }
+
+  // ---------------- render ----------------
+  function render(dt, time) {
+    const focal = focalPx();
+    const horizon = H * CONFIG.horizonY;
+    const camY = CONFIG.camHeight + hillAt(st.z) * 0.5;
+    const camX = st.playerX * CONFIG.roadHalf * 0.80;
+
+    // Sky.
+    const sky = ctx.createLinearGradient(0, 0, 0, horizon);
+    sky.addColorStop(0, "#07031a");
+    sky.addColorStop(0.62, "#1b0740");
+    sky.addColorStop(1, "#4a0f52");
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, horizon);
+    // Ground below the horizon, so the road never has gaps under it.
+    ctx.fillStyle = "#0a0316";
+    ctx.fillRect(0, horizon, W, H - horizon);
+
+    //  The sun on the horizon, with stripes cut out of its lower half. It drifts
+    //  slightly with the steering, which is what ties the horizon to the car.
+    const sunR = U * 0.080;
+    const sunX = W * 0.5 - st.playerX * W * 0.05;
+    const sunY = horizon - sunR * 0.34;
+    const sg = ctx.createLinearGradient(sunX, sunY - sunR, sunX, sunY + sunR);
+    sg.addColorStop(0, "#ffeaa8");
+    sg.addColorStop(0.55, "#ff9a5a");
+    sg.addColorStop(1, "#ff3f7a");
+    ctx.save();
+    ctx.beginPath(); ctx.arc(sunX, sunY, sunR, 0, TAU); ctx.clip();
+    ctx.fillStyle = sg;
+    ctx.fillRect(sunX - sunR, sunY - sunR, sunR * 2, sunR * 2);
+    ctx.globalCompositeOperation = "destination-out";
+    for (let i = 0; i < 12; i++) {
+      const t = i / 11;
+      ctx.fillRect(sunX - sunR, sunY + sunR * (0.02 + t * 0.98), sunR * 2,
+        sunR * (0.010 + t * t * 0.070));
+    }
+    ctx.restore();
+
+    //  Road strip. The camera is at the player's position; each segment's
+    //  lateral offset is integrated from the track's curvature, and its height
+    //  comes straight from the hill profile.
+    let camRoadX = 0;             // world lateral offset of the road at the camera
+    const baseZ = st.z;
+    let prevX = 0, prevY = 0, prevW = 0;
+    let anyDrawn = false;
+
+    for (let n = 0; n <= CONFIG.drawDist; n++) {
+      const z = baseZ + n * CONFIG.segLen;
+      //  Integrate curvature twice: heading, then lateral offset. A segment's
+      //  offset is its predecessor's plus the heading, which is what produces
+      //  the quadratic bend of a constant-radius corner.
+      const curve = curveAt(z);
+      camRoadX += curve * CONFIG.segLen * 0.5;
+      //  Speed lines the road up with the camera: the camera sits on the road's
+      //  own centreline, so its lateral offset tracks the same integral.
+      const roadTravel = camRoadX * CONFIG.segLen;
+
+      const worldY = hillAt(z);
+      const d = Math.max(z - baseZ, CONFIG.segLen * 0.5);
+      const scale = focal / d;
+
+      const x = W * 0.5 + (roadTravel - camX) * scale;
+      const y = horizon + (camY - worldY) * scale;
+      const w = CONFIG.roadHalf * scale;
+
+      segX[n] = x; segY[n] = y; segW[n] = w;
+
+      if (n > 0) {
+        const fade = Math.pow(1 - n / CONFIG.drawDist, 0.55);
+        const alt = (((z / CONFIG.segLen) | 0) % (CONFIG.rumble * 2)) < CONFIG.rumble;
+        const colours = {
+          road: alt
+            ? `hsla(280, 58%, 11%, ${(0.92 * fade + 0.06).toFixed(3)})`
+            : `hsla(276, 62%, 16%, ${(0.92 * fade + 0.06).toFixed(3)})`,
+          rumble: alt
+            ? `hsla(320, 94%, 63%, ${(0.92 * fade).toFixed(3)})`
+            : `hsla(190, 96%, 68%, ${(0.92 * fade).toFixed(3)})`,
+          dash: alt,
+          dashCol: `hsla(58, 100%, 82%, ${(0.55 * fade).toFixed(3)})`,
+        };
+        //  A segment is skipped when its far edge lands above the near edge:
+        //  that is a hill occluding a dip behind it, and drawing it would show
+        //  road that is actually hidden.
+        if (!anyDrawn || y > prevY - 0.5 || n < 6) {
+          drawSegment({ x: prevX, y: prevY, w: prevW }, { x, y, w }, colours);
+          anyDrawn = true;
+
+          //  Roadside pylons with lit caps. These are what actually convey
+          //  speed, more than the road surface itself.
+          if (n % 6 === 0) {
+            const pw = w * 1.34;
+            for (const sgn of [-1, 1]) {
+              const px = x + sgn * pw;
+              const capH = Math.max(6, w * 0.55);
+              ctx.strokeStyle = `hsla(190, 96%, 66%, ${(0.55 * fade).toFixed(3)})`;
+              ctx.lineWidth = Math.max(1, w * 0.035);
+              ctx.beginPath(); ctx.moveTo(px, y); ctx.lineTo(px, y - capH); ctx.stroke();
+              ctx.strokeStyle = alt
+                ? `hsla(320, 94%, 68%, ${(0.85 * fade).toFixed(3)})`
+                : `hsla(58, 100%, 78%, ${(0.85 * fade).toFixed(3)})`;
+              ctx.lineWidth = Math.max(1, w * 0.070);
+              ctx.beginPath();
+              ctx.moveTo(px - w * 0.22, y - capH);
+              ctx.lineTo(px + w * 0.22, y - capH);
+              ctx.stroke();
+            }
+          }
+
+          //  Start/finish: a chequered band on the wrap segment. It is the only
+          //  landmark on the track, and the only thing that makes a lap legible.
+          if (((z / CONFIG.segLen) | 0) % TRACK === 0) {
+            const cols = 10;
+            for (let c = 0; c < cols; c++) {
+              const t0 = (c / cols) * 2 - 1;
+              const t1 = ((c + 1) / cols) * 2 - 1;
+              ctx.fillStyle = c % 2
+                ? `rgba(240, 244, 255, ${(0.88 * fade).toFixed(3)})`
+                : `rgba(14, 6, 30, ${(0.88 * fade).toFixed(3)})`;
+              ctx.beginPath();
+              ctx.moveTo(prevX + prevW * t0, prevY);
+              ctx.lineTo(prevX + prevW * t1, prevY);
+              ctx.lineTo(x + w * t1, y);
+              ctx.lineTo(x + w * t0, y);
+              ctx.closePath();
+              ctx.fill();
+            }
+          }
+        }
+      }
+      prevX = x; prevY = y; prevW = w;
+    }
+
+    //  Traffic. Each car finds its own segment in the table built by the road
+    //  loop and interpolates between the two nearest entries, so a car is placed
+    //  exactly on the road surface rather than by re-integrating the curvature.
+    const visible = [];
+    for (const c of cars) {
+      let dz = c.z - st.z;
+      if (dz < -CONFIG.segLen * 6) dz += TRACK * CONFIG.segLen;
+      if (dz < CONFIG.segLen * 0.6 || dz > CONFIG.segLen * CONFIG.drawDist) continue;
+      const nf = dz / CONFIG.segLen;
+      const n0 = Math.min(CONFIG.drawDist, Math.max(0, Math.floor(nf)));
+      const n1 = Math.min(CONFIG.drawDist, n0 + 1);
+      const tt = nf - n0;
+      const sxp = lerp(segX[n0], segX[n1], tt);
+      const syp = lerp(segY[n0], segY[n1], tt);
+      const swp = lerp(segW[n0], segW[n1], tt);
+      visible.push({ c, x: sxp + c.x * swp, y: syp, w: swp, dz });
+    }
+    visible.sort((a, b) => b.dz - a.dz);
+    for (const { c, x, y, w, dz } of visible) {
+      const fade = clamp(Math.pow(1 - dz / (CONFIG.segLen * CONFIG.drawDist), 0.45), 0, 1);
+      const s = w * c.w * 2;
+      if (s < 2) continue;
+      const cy = y - s * 0.34;
+      // Body: a simple wedge, filled dark and outlined bright — which is all the
+      // hardware of the era could manage, and all it needs.
+      ctx.beginPath();
+      ctx.moveTo(x - s * 0.5, y);
+      ctx.lineTo(x - s * 0.5, cy);
+      ctx.lineTo(x, cy - s * 0.42);
+      ctx.lineTo(x + s * 0.5, cy);
+      ctx.lineTo(x + s * 0.5, y);
+      ctx.closePath();
+      ctx.fillStyle = `hsla(${c.hue}, 62%, 24%, ${(0.88 * fade).toFixed(3)})`;
+      ctx.fill();
+      ctx.strokeStyle = `hsla(${c.hue}, 96%, 72%, ${(0.92 * fade).toFixed(3)})`;
+      ctx.lineWidth = Math.max(1, s * 0.030);
+      ctx.stroke();
+      // Rear lights.
+      ctx.fillStyle = `rgba(255, 70, 90, ${(0.8 * fade).toFixed(3)})`;
+      const lw = Math.max(1, s * 0.10);
+      ctx.fillRect(x - s * 0.42, cy + s * 0.05, lw, lw * 0.7);
+      ctx.fillRect(x + s * 0.42 - lw, cy + s * 0.05, lw, lw * 0.7);
+    }
+
+    //  The player's car, as a bottom-centre bumper rather than a model: a full
+    //  body would block the road, which is why these games drew a bumper and two
+    //  wheels.
+    const sway = st.steer * W * 0.020;
+    const carW = U * 0.115;
+    const carY = H * 0.930;
+    ctx.save();
+    ctx.translate(W * 0.5 + sway, carY);
+    ctx.beginPath();
+    ctx.moveTo(-carW * 0.5, 0);
+    ctx.lineTo(-carW * 0.34, -carW * 0.20);
+    ctx.lineTo(carW * 0.34, -carW * 0.20);
+    ctx.lineTo(carW * 0.5, 0);
+    ctx.closePath();
+    ctx.fillStyle = "rgba(12, 8, 28, 0.94)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(150, 240, 255, 0.75)";
+    ctx.lineWidth = Math.max(1.2, U * 0.0022);
+    ctx.stroke();
+    const braking = st.speed < CONFIG.maxSpeed * 0.35;
+    ctx.fillStyle = braking ? "rgba(255, 120, 130, 0.95)" : "rgba(220, 60, 80, 0.60)";
+    ctx.fillRect(-carW * 0.44, -carW * 0.16, carW * 0.13, carW * 0.08);
+    ctx.fillRect(carW * 0.31, -carW * 0.16, carW * 0.13, carW * 0.08);
+    ctx.strokeStyle = "rgba(200, 250, 255, 0.55)";
+    ctx.beginPath();
+    ctx.moveTo(-carW * 0.30, -carW * 0.22);
+    ctx.lineTo(carW * 0.30, -carW * 0.22);
+    ctx.stroke();
+    ctx.fillStyle = "rgba(6, 4, 16, 0.95)";
+    ctx.fillRect(-carW * 0.52, -carW * 0.09, carW * 0.11, carW * 0.11);
+    ctx.fillRect(carW * 0.41, -carW * 0.09, carW * 0.11, carW * 0.11);
+    ctx.restore();
+
+    //  Speed streaks radiating from the vanishing point, appearing only above a
+    //  threshold so they read as the car getting quick rather than as decoration.
+    const quick = clamp((st.speed - CONFIG.maxSpeed * 0.45) / (CONFIG.maxSpeed * 0.55), 0, 1);
+    if (quick > 0.02) {
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      const vpx = W * 0.5 - st.playerX * W * 0.10;
+      ctx.strokeStyle = `rgba(180, 232, 255, ${(0.18 * quick).toFixed(3)})`;
+      ctx.lineWidth = Math.max(1, U * 0.0016);
+      for (let i = 0; i < 48; i++) {
+        const a = (i / 48) * TAU + time * 0.35;
+        const sy = Math.sin(a);
+        if (sy < 0.15) continue;
+        const r0 = U * (0.26 + (i % 7) * 0.048);
+        const dr = U * 0.16 * quick;
+        const cx = vpx + Math.cos(a) * r0 * 1.7;
+        const cy = horizon + sy * r0;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + Math.cos(a) * dr * 1.7, cy + sy * dr);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+
+  // ---------------- simulation ----------------
+  function update(dt) {
+    // Steering: the player's input eases toward a target, so the car has weight.
+    st.steer = lerp(st.steer, st.targetSteer, dt * 5.5);
+
+    // Speed: throttle always on, so the piece runs itself; the road and the
+    // traffic provide the drama.
+    // The car counts as off-road once its centre passes the rumble strip.
+    const off = Math.abs(st.playerX) > 1.14;
+    st.offRoad = lerp(st.offRoad, off ? 1 : 0, dt * 6);
+    const drag = off ? CONFIG.offRoadDrag : 1;
+    // A gentle oscillation of throttle, so speed rises and falls rather than
+    // pinning at the maximum for the whole run.
+    const throttle = 0.72 + 0.28 * Math.sin(speedPhase);
+    st.speed += (CONFIG.accel * throttle * drag - st.speed * 0.34) * dt;
+    st.speed = clamp(st.speed, 0, CONFIG.maxSpeed * drag);
+    speedPhase += dt * 0.23;
+
+    //  Centrifugal force pushes the car out of the corner. `curve` is in radians
+    //  per world unit and `speed` in world units per second, so their product is
+    //  radians per second of drift; scaling by the road's half-width converts it
+    //  into the road-relative units playerX uses.
+    const curve = curveAt(st.z);
+    st.playerX -= curve * st.speed * dt * CONFIG.centrifugal;
+    // Steering input, scaled so it is easier to correct at speed.
+    st.playerX += st.steer * dt * (1.5 - st.speed / CONFIG.maxSpeed * 0.6);
+    st.playerX = clamp(st.playerX, -1.6, 1.6);
+
+    st.z += st.speed * dt;
+
+    // Opponents: advance along the track, drifting in their lane.
+    for (const c of cars) {
+      c.z += CONFIG.maxSpeed * c.v * dt;
+      if (c.z > TRACK * CONFIG.segLen) c.z -= TRACK * CONFIG.segLen;
+      c.x += Math.sin(c.z * 0.0004 + c.w * 40) * dt * 0.10;
+      c.x = clamp(c.x, -0.80, 0.80);
+    }
+
+    // Lap counting on the wrap.
+    const lapLen = TRACK * CONFIG.segLen;
+    const prevLap = Math.floor(st.z / lapLen);
+    if (prevLap > st.lap - 1) {
+      st.lap = prevLap + 1;
+      st.checkpoint = 0;
+      if (st.lap > st.laps) st.lap = 1;
+    }
+    // Checkpoints: four per lap, purely for the HUD.
+    const cp = Math.floor((st.z % lapLen) / (lapLen / 4));
+    if (cp !== st.checkpoint && cp > st.checkpoint) st.checkpoint = cp;
+
+    // The HUD.
+    const spd = Math.round((st.speed / CONFIG.maxSpeed) * 299);
+    const spdEl = document.getElementById("spd");
+    if (spdEl) spdEl.textContent = String(spd).padStart(3, "0");
+    const gearEl = document.getElementById("gear");
+    if (gearEl) gearEl.textContent = String(clamp(1 + Math.floor((st.speed / CONFIG.maxSpeed) * 5), 1, 6));
+    const lapEl = document.getElementById("lap");
+    if (lapEl) lapEl.textContent = `${st.lap}\u200A/\u200A${st.laps}`;
+    const cpEl = document.getElementById("cp");
+    if (cpEl) cpEl.textContent = String(st.checkpoint);
+  }
+
+  let speedPhase = 0;
+
+  // ---------------- loop ----------------
+  let last = performance.now();
+  let ready = false;
+  const start = performance.now();
+
+  function resize() {
+    DPR = Math.min(CONFIG.dprCap, window.devicePixelRatio || 1);
+    W = Math.max(1, Math.floor(window.innerWidth));
+    H = Math.max(1, Math.floor(window.innerHeight));
+    U = Math.min(W, H);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    buildTrack();
+    seedCars();
+    st.laps = 3;
+  }
+  window.addEventListener("resize", resize, { passive: true });
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const time = (now - start) / 1000;
+
+    // The piece drives itself: a slow sinusoidal steering input, so the car
+    // weaves down the road the way an attract-mode demo does.
+    st.targetSteer = Math.sin(time * 0.31) * 0.62 + Math.sin(time * 0.83 + 1.2) * 0.22;
+
+    update(dt);
+    render(dt, time);
+
+    if (!ready) { ready = true; document.body.classList.add("ready"); }
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
