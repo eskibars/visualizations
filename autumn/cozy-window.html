@@ -33,7 +33,9 @@
   //  Construction notes
   //  ------------------
   //  Room, frame and the view are static layers painted per
-  //  resize; the view is clipped to the opening. Condensation
+  //  resize; the view is clipped to the opening. The mug is its
+  //  own layer composited above the glass — it stands in front
+  //  of the window, so the view can never paint over it. Condensation
   //  lives on its own offscreen canvas so the sliding droplets
   //  can erase their trails out of it with destination-out —
   //  the fog thins where the drop has been, exactly like the
@@ -285,10 +287,28 @@
     shg.addColorStop(1, 'rgba(0,0,0,0)');
     g.fillStyle = shg;
     g.fillRect(fx0 - mw * 3.4, sy + mw * 2.6, (fx1 - fx0) + mw * 6.8, mw * 2.9);
+  }
 
-    // mug on the sill, right of centre
-    const mugX = fx0 + (fx1 - fx0) * 0.66, mugY = sy;
+  // the mug lives on its own layer, above every glass layer: it
+  // stands on the sill, in front of the window, so the view must
+  // never paint over it even where its rim crosses the opening
+  let mugLayer;
+  function paintMug() {
+    mugLayer = document.createElement('canvas');
+    mugLayer.width = Math.floor(W * DPR); mugLayer.height = Math.floor(H * DPR);
+    const g = mugLayer.getContext('2d');
+    g.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    const mw = mullionW();
+    const mugX = fx0 + (fx1 - fx0) * 0.66, mugY = sillY - mw * 1.2;
     const mw2 = mw * 3.1, mh = mw * 3.6;
+    // handle: stroked before the body, swept past the wall so it
+    // emerges from behind it instead of floating alongside
+    g.strokeStyle = '#7c4526';
+    g.lineWidth = mw2 * 0.38;
+    g.beginPath();
+    g.arc(mugX + mw2 * 1.05, mugY - mh * 0.5, mw2 * 0.5, -Math.PI * 0.64, Math.PI * 0.64);
+    g.stroke();
     // body
     const mug = g.createLinearGradient(mugX - mw2, 0, mugX + mw2, 0);
     mug.addColorStop(0, '#6e3d20');
@@ -311,12 +331,6 @@
     g.beginPath();
     g.ellipse(mugX, mugY - mh, mw2 * 0.8, mw2 * 0.22, 0, 0, Math.PI * 2);
     g.fill();
-    // handle
-    g.strokeStyle = '#7c4526';
-    g.lineWidth = mw2 * 0.38;
-    g.beginPath();
-    g.arc(mugX + mw2 * 1.35, mugY - mh * 0.55, mw2 * 0.62, -Math.PI / 2.4, Math.PI / 2.4);
-    g.stroke();
     // tiny glow: the tea is warm
     stampAt(g, glowBokeh, mugX, mugY - mh * 1.4, mw2 * 4, 0.10);
   }
@@ -568,6 +582,7 @@
     layout();
     paintView();
     paintRoom();
+    paintMug();
     paintMullions();
     buildFog();
     leafSpr = makeLeafSprite('#b0561e');
@@ -605,6 +620,7 @@
     drawFogAndDroplets(t);
     ctx.drawImage(mullionLayer, 0, 0, W, H);
     drawBokeh(t);
+    ctx.drawImage(mugLayer, 0, 0, W, H);
 
     stepSteam(t, dt);
     drawSteam();
