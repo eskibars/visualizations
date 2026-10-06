@@ -40,12 +40,12 @@
   //  chained with their cursive connectors, and the sparkler
   //  walks the combined path at writing speed. Words are placed
   //  away from whichever words are still glowing, and the burn
-  //  dies fully within roughly one word-cycle, so the writing
-  //  always stays legible. Strokes are kept as timed segments and
-  //  the ink canvas is rebuilt each frame with exact age-based
-  //  alpha — fading in place on an 8-bit canvas stalls at a
-  //  permanent ghost floor. Sparks are pooled particles under
-  //  gravity and drag.
+  //  holds bright until a word is finished before decaying to
+  //  nothing, so the newest writing always stays legible. Strokes
+  //  are kept as timed segments and the ink canvas is rebuilt
+  //  each frame with exact age-based alpha — fading in place on
+  //  an 8-bit canvas stalls at a permanent ghost floor. Sparks
+  //  are pooled particles under gravity and drag.
   // ============================================================
   const CONFIG = {
     dprCap: 1.6,
@@ -54,11 +54,16 @@
     // legibility in the single-stroke glyph set below
     words: ['hello', 'joy', 'hooray', 'cheers', 'jolly', '2026'],
 
-    glyphHeight: 0.34,        // design space maps to this fraction of H
-    wordScale: [0.85, 1.25],  // per-word size variation
+    glyphHeight: 0.36,        // design space maps to this fraction of H
+    wordScale: [0.8, 1.05],   // per-word size variation
     writeSpeed: 420,          // px/s along the path
     sparksPerFrame: 9,
-    inkFade: 0.30,            // 1/s exponential decay of the burn
+    // two-phase decay: hold bright while the word is being written
+    // (a fast uniform fade erases the first letters before the word
+    // is done), then decay decisively so only ~2 words coexist and
+    // placement never has to write over a crowded canvas
+    inkFade: 0.12,            // 1/s decay after the hold phase
+    inkHold: 14,              // s of near-full brightness
     holdAfterWord: [0.9, 1.6],
   };
 
@@ -75,21 +80,19 @@
       ['M', 24, -4], ['Q', 28, -48, 36, -60], ['Q', 47, -68, 49, -46],
       ['Q', 50, -22, 53, -8], ['Q', 56, 2, 64, 4],
     ]] },
-    e: { adv: 44, segs: [[
-      ['M', 0, 6], ['Q', 2, -24, 10, -42], ['Q', 16, -54, 25, -49],
-      ['Q', 33, -43, 31, -26], ['Q', 29, -10, 20, -4],
-      ['Q', 8, 3, 4, 2], ['Q', 0, 1, 6, 1],
-      ['Q', 16, 3, 28, 1], ['Q', 34, 0, 40, 2],
+    e: { adv: 50, segs: [[
+      ['M', 2, 2], ['Q', 16, -28, 26, -48], ['Q', 31, -58, 34, -52],
+      ['Q', 36, -44, 24, -32], ['Q', 10, -20, 6, -10],
+      ['Q', 3, -2, 12, 1], ['Q', 24, 4, 38, 1], ['Q', 44, 0, 48, 0],
     ]] },
     l: { adv: 40, segs: [[
       ['M', 2, 8], ['Q', 6, -56, 11, -96], ['Q', 14, -118, 19, -111],
       ['Q', 23, -104, 21, -80], ['Q', 17, -36, 20, -4], ['Q', 22, 4, 32, 2],
     ]] },
     o: { adv: 48, segs: [[
-      ['M', 31, -10], ['Q', 29, -40, 18, -50], ['Q', 5, -58, 3, -37],
-      ['Q', 1, -15, 13, -5], ['Q', 23, 3, 28, -8],
-      ['Q', 30, -20, 28, -34], ['Q', 26, -42, 32, -42],
-      ['Q', 39, -41, 43, -28], ['Q', 46, -17, 47, -4],
+      ['M', 30, -14], ['Q', 28, -42, 16, -50], ['Q', 2, -57, 3, -35],
+      ['Q', 4, -14, 15, -5], ['Q', 24, 2, 30, -6], ['Q', 31, -9, 29, -11],
+      ['Q', 33, -6, 40, 0],
     ]] },
     j: { adv: 34, segs: [[
       ['M', 0, 4], ['Q', 4, -24, 8, -46],
@@ -99,19 +102,15 @@
       ['M', 8, -46], ['Q', 12, -12, 12, 10], ['Q', 12, 30, 4, 38],
       ['Q', -4, 46, -2, 30], ['Q', 0, 14, 12, 5], ['Q', 20, -2, 32, 0],
     ]] },
-    y: { adv: 46, segs: [[
-      ['M', 0, 4], ['Q', 9, -28, 17, -46], ['Q', 22, -56, 25, -45],
-      ['Q', 30, -24, 30, -10], ['Q', 29, 3, 22, -3],
-      ['Q', 13, -18, 15, -38], ['Q', 21, -54, 26, -42],
-      ['Q', 32, -18, 33, 2], ['Q', 34, 16, 28, 26],
-      ['Q', 21, 35, 11, 31], ['Q', 3, 26, 6, 17],
-      ['Q', 9, 9, 15, 5], ['Q', 23, 0, 34, 0],
+    y: { adv: 52, segs: [[
+      ['M', 0, 4], ['Q', 7, -26, 12, -44], ['Q', 16, -55, 20, -44],
+      ['Q', 24, -22, 25, -4], ['Q', 26, 14, 19, 26], ['Q', 11, 37, 1, 30],
+      ['Q', -6, 23, 3, 15], ['Q', 12, 8, 22, 3], ['Q', 32, 0, 42, 0],
     ]] },
-    r: { adv: 46, segs: [[
-      ['M', 0, 4], ['Q', 8, -32, 15, -52],
-      ['Q', 18, -56, 20, -51], ['Q', 23, -42, 27, -40],
-      ['Q', 31, -39, 32, -45], ['Q', 33, -30, 32, -12],
-      ['Q', 31, -2, 33, -1], ['Q', 39, 0, 45, 0],
+    r: { adv: 52, segs: [[
+      ['M', 0, 4], ['Q', 8, -28, 14, -46], ['Q', 17, -53, 19, -46],
+      ['Q', 22, -38, 28, -37], ['Q', 34, -36, 36, -42],
+      ['Q', 38, -32, 37, -20], ['Q', 36, -8, 39, -2], ['Q', 42, 0, 48, 0],
     ]] },
     a: { adv: 52, segs: [[
       ['M', 26, -10], ['Q', 25, -38, 15, -49], ['Q', 4, -57, 3, -36],
@@ -123,10 +122,10 @@
       ['M', 36, -18], ['Q', 31, -52, 13, -56], ['Q', 0, -58, 2, -36],
       ['Q', 4, -14, 16, -4], ['Q', 26, 3, 36, 0],
     ]] },
-    s: { adv: 34, segs: [[
-      ['M', 0, 4], ['Q', 6, -16, 11, -30], ['Q', 15, -42, 19, -46],
-      ['Q', 24, -49, 23, -41], ['Q', 21, -30, 15, -22],
-      ['Q', 8, -13, 7, -6], ['Q', 5, 2, 12, 3], ['Q', 21, 5, 28, 1],
+    s: { adv: 46, segs: [[
+      ['M', 6, 4], ['Q', 10, -10, 15, -22], ['Q', 20, -38, 26, -48],
+      ['Q', 31, -56, 35, -49], ['Q', 38, -41, 30, -31],
+      ['Q', 22, -22, 19, -14], ['Q', 17, -6, 24, -4], ['Q', 32, -2, 40, 0],
     ]] },
     2: { adv: 40, segs: [[
       ['M', 4, -18], ['Q', 2, -48, 20, -58], ['Q', 36, -64, 38, -44],
@@ -264,28 +263,45 @@
   function placeWord(word, unit, now) {
     let adv = 0;
     for (const ch of word) adv += (GLYPHS[ch] ? GLYPHS[ch].adv : 30) * unit;
-    const w = adv;
-    const minX = w / 2 + W * 0.03, maxX = W - w / 2 - W * 0.03;
+    // keep extreme words from spanning the whole canvas
+    if (adv > W * 0.55) { unit *= W * 0.55 / adv; adv = W * 0.55; }
+    const minX = adv / 2 + W * 0.03, maxX = W - adv / 2 - W * 0.03;
     const minY = Math.max(H * 0.30, 118 * unit + H * 0.02);
     const maxY = Math.min(H * 0.80, H * 0.96 - 46 * unit);
     const by = (base) => ({
-      x0: base.x - w / 2, x1: base.x + w / 2,
+      x0: base.x - adv / 2, x1: base.x + adv / 2,
       y0: base.y - 118 * unit, y1: base.y + 46 * unit,
     });
-    const pad = H * 0.05;
-    let best = null;
-    for (let i = 0; i < 50; i++) {
-      const c = {
-        x: rand(minX, Math.max(minX + 1, maxX)),
-        y: rand(Math.min(minY, maxY - 1), maxY),
-      };
-      const box = by(c);
-      box.x0 -= pad; box.x1 += pad; box.y0 -= pad; box.y1 += pad;
-      if (inkVisibleIn(box, now)) continue;
-      best = c;
-      if (Math.random() < 0.35) break;   // uniform over free space; extra sampling adds spread
+    //  progressively relax: fresh ink blocks outright, dimmer ink
+    //  only counts against a candidate's score, and tight packing
+    //  is tried before sparse — the least-colliding candidate wins,
+    //  so words never land blindly on top of each other
+    let best = null, bestScore = Infinity;
+    for (const thresh of [0.25, 0.45]) {
+      for (const pad of [H * 0.05, H * 0.025]) {
+        for (let i = 0; i < 40; i++) {
+          const c = {
+            x: rand(minX, Math.max(minX + 1, maxX)),
+            y: rand(Math.min(minY, maxY - 1), maxY),
+          };
+          const box = by(c);
+          box.x0 -= pad; box.x1 += pad; box.y0 -= pad; box.y1 += pad;
+          let score = 0;
+          for (let j = segHead; j < segments.length; j++) {
+            const s = segments[j];
+            if (inkAlpha(now - s.t) < thresh) continue;
+            const mx = (s.x0 + s.x1) / 2, my = (s.y0 + s.y1) / 2;
+            if (mx > box.x0 && mx < box.x1 && my > box.y0 && my < box.y1) score++;
+          }
+          if (score < bestScore) {
+            bestScore = score;
+            best = c;
+          }
+          if (score === 0 && Math.random() < 0.35) i = 1e9;   // good enough; extra sampling adds spread
+        }
+        if (bestScore === 0) return { x: best.x - adv / 2, y: best.y };
+      }
     }
-    if (!best) best = { x: W / 2, y: H * (0.42 + 0.3 * Math.random()) };
     return { x: best.x - adv / 2, y: best.y };
   }
 
@@ -296,10 +312,19 @@
   //  place stalls at a visible ~2% ghost floor — 8-bit alpha
   //  rounding — and old words pile into a scribble veil.)
   let ink, inkCtx;
-  const MAX_AGE = 12;              // s — fully faded beyond this
-  const KNEE = 9;                  // s — ease into the cutoff
+  const MAX_AGE = 36;              // s — fully faded beyond this
+  const KNEE = 31;                 // s — ease into the cutoff
   const segments = [];             // {x0,y0,x1,y1,t,strength}
   let segHead = 0;                 // first alive segment
+  //  shared brightness curve: near-full during the hold phase,
+  //  exponential decay after, eased to zero at MAX_AGE
+  function inkAlpha(age) {
+    const held = age < CONFIG.inkHold
+      ? 1 - 0.25 * (age / CONFIG.inkHold)
+      : 0.75 * Math.exp(-CONFIG.inkFade * (age - CONFIG.inkHold));
+    const knee = age < KNEE ? 1 : 1 - (age - KNEE) / (MAX_AGE - KNEE);
+    return held * knee;
+  }
   function buildInk() {
     ink = document.createElement('canvas');
     ink.width = Math.floor(W); ink.height = Math.floor(H);
@@ -318,29 +343,16 @@
     inkCtx.lineCap = 'round';
     for (let i = segHead; i < segments.length; i++) {
       const s = segments[i];
-      const age = now - s.t;
-      const knee = age < KNEE ? 1 : 1 - (age - KNEE) / (MAX_AGE - KNEE);
-      const k = s.strength * Math.exp(-CONFIG.inkFade * age) * knee;
+      const k = s.strength * inkAlpha(now - s.t);
       if (k < 0.008) continue;
       inkCtx.strokeStyle = `rgba(255, 214, 150, ${(0.20 * k).toFixed(3)})`;
-      inkCtx.lineWidth = 9;
+      inkCtx.lineWidth = 7;
       inkCtx.beginPath(); inkCtx.moveTo(s.x0, s.y0); inkCtx.lineTo(s.x1, s.y1); inkCtx.stroke();
       inkCtx.strokeStyle = `rgba(255, 246, 224, ${(0.8 * k).toFixed(3)})`;
-      inkCtx.lineWidth = 2.6;
+      inkCtx.lineWidth = 3;
       inkCtx.beginPath(); inkCtx.moveTo(s.x0, s.y0); inkCtx.lineTo(s.x1, s.y1); inkCtx.stroke();
     }
     inkCtx.globalCompositeOperation = 'source-over';
-  }
-  //  True while ink brighter than ~10% lingers inside a candidate
-  //  word box — used to keep new words off still-burning ones.
-  function inkVisibleIn(box, now) {
-    for (let i = segHead; i < segments.length; i++) {
-      const s = segments[i];
-      if (Math.exp(-CONFIG.inkFade * (now - s.t)) < 0.10) continue;
-      const mx = (s.x0 + s.x1) / 2, my = (s.y0 + s.y1) / 2;
-      if (mx > box.x0 && mx < box.x1 && my > box.y0 && my < box.y1) return true;
-    }
-    return false;
   }
 
   // -------------------- sparkler state --------------------
