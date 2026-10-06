@@ -25,38 +25,48 @@
   // ============================================================
   //  SPARKLER SCRIPT — a sparkler writes the evening's words.
   //  It flies along each letterform shedding sparks, the stroke
-  //  it leaves burning bright and slowly dying to a whisper,
-  //  then lifts, swirls, and takes up the next word somewhere
-  //  else on the dark.
+  //  it leaves burning bright and slowly dying to a whisper.
+  //  Then it lifts, loops, and swoops off to write the next word
+  //  somewhere else on the dark, forever — a screensaver, not a
+  //  finale.
   //
   //  Construction notes
   //  ------------------
   //  The letterforms are hand-drawn single-stroke cursive
   //  glyphs — quadratic chains in a small design space — because
-  //  a sparkler draws strokes, not filled type; the word list
-  //  only needs the glyphs it uses. Each glyph is sampled to a
-  //  point list with pen-lift breaks, letters are chained with
-  //  their cursive connectors, and the sparkler walks the
-  //  combined path at writing speed. The burn is a persistent
-  //  ink canvas decaying exponentially; sparks are pooled
-  //  particles under gravity and drag.
+  //  a sparkler draws strokes, not filled type. Each glyph is
+  //  sampled to a point list with pen-lift breaks (the j's dot is
+  //  a pen-lift detour the sparkler darts up to dab), letters are
+  //  chained with their cursive connectors, and the sparkler
+  //  walks the combined path at writing speed. Words are placed
+  //  away from whichever words are still glowing, and the burn
+  //  dies fully within roughly one word-cycle, so the writing
+  //  always stays legible. Strokes are kept as timed segments and
+  //  the ink canvas is rebuilt each frame with exact age-based
+  //  alpha — fading in place on an 8-bit canvas stalls at a
+  //  permanent ghost floor. Sparks are pooled particles under
+  //  gravity and drag.
   // ============================================================
   const CONFIG = {
     dprCap: 1.6,
 
-    words: ['hello', 'joy', 'hooray', 'cheers', '2026'],
+    // every word here has been proofed letter-by-letter for
+    // legibility in the single-stroke glyph set below
+    words: ['hello', 'joy', 'hooray', 'cheers', 'jolly', '2026'],
 
-    glyphHeight: 0.34,        // design space maps to this fraction of H (x-height ~ 45% of it)
-    writeSpeed: 300,          // px/s along the path
+    glyphHeight: 0.34,        // design space maps to this fraction of H
+    wordScale: [0.85, 1.25],  // per-word size variation
+    writeSpeed: 420,          // px/s along the path
     sparksPerFrame: 9,
-    inkFade: 0.085,           // 1/s exponential decay of the burn
-    holdAfterWord: [2.2, 3.2],
+    inkFade: 0.30,            // 1/s exponential decay of the burn
+    holdAfterWord: [0.9, 1.6],
   };
 
   // -------------------- glyph table --------------------
   //  Quadratic chains. Design space: baseline y=0, x-height ~-56,
   //  ascender ~-118, descender ~+42. One glyph per needed letter;
-  //  'adv' is the advance width.
+  //  'adv' is the advance width. Glyphs start low on their right
+  //  rim or baseline so the incoming cursive connector stays short.
   const GLYPHS = {
     h: { adv: 66, segs: [[
       ['M', 2, 8], ['Q', 8, -60, 14, -96], ['Q', 18, -118, 24, -110],
@@ -65,46 +75,58 @@
       ['M', 24, -4], ['Q', 28, -48, 36, -60], ['Q', 47, -68, 49, -46],
       ['Q', 50, -22, 53, -8], ['Q', 56, 2, 64, 4],
     ]] },
-    e: { adv: 48, segs: [[
-      ['M', 0, 4], ['Q', 16, -28, 34, -54], ['Q', 46, -66, 45, -46],
-      ['Q', 42, -18, 29, -7], ['Q', 18, 1, 28, 3], ['Q', 37, 4, 46, 2],
+    e: { adv: 44, segs: [[
+      ['M', 0, 6], ['Q', 2, -24, 10, -42], ['Q', 16, -54, 25, -49],
+      ['Q', 33, -43, 31, -26], ['Q', 29, -10, 20, -4],
+      ['Q', 8, 3, 4, 2], ['Q', 0, 1, 6, 1],
+      ['Q', 16, 3, 28, 1], ['Q', 34, 0, 40, 2],
     ]] },
     l: { adv: 40, segs: [[
       ['M', 2, 8], ['Q', 6, -56, 11, -96], ['Q', 14, -118, 19, -111],
       ['Q', 23, -104, 21, -80], ['Q', 17, -36, 20, -4], ['Q', 22, 4, 32, 2],
     ]] },
-    o: { adv: 52, segs: [[
-      ['M', 38, -28], ['Q', 36, -52, 23, -60], ['Q', 8, -66, 4, -43],
-      ['Q', 1, -22, 13, -8], ['Q', 24, 3, 34, -9], ['Q', 40, -18, 38, -28],
-      ['Q', 39, -6, 50, 2],
+    o: { adv: 48, segs: [[
+      ['M', 31, -10], ['Q', 29, -40, 18, -50], ['Q', 5, -58, 3, -37],
+      ['Q', 1, -15, 13, -5], ['Q', 23, 3, 28, -8],
+      ['Q', 30, -20, 28, -34], ['Q', 26, -42, 32, -42],
+      ['Q', 39, -41, 43, -28], ['Q', 46, -17, 47, -4],
     ]] },
-    j: { adv: 30, segs: [[
-      ['M', 6, -56], ['Q', 8, -20, 8, 8], ['Q', 8, 34, 20, 40], ['Q', 30, 44, 34, 36],
+    j: { adv: 34, segs: [[
+      ['M', 0, 4], ['Q', 4, -24, 8, -46],
     ], [
-      ['M', 11, -78], ['L', 12, -72],
+      ['M', 11, -74], ['Q', 15, -75, 14, -70], ['Q', 13, -65, 9, -69],
+    ], [
+      ['M', 8, -46], ['Q', 12, -12, 12, 10], ['Q', 12, 30, 4, 38],
+      ['Q', -4, 46, -2, 30], ['Q', 0, 14, 12, 5], ['Q', 20, -2, 32, 0],
     ]] },
     y: { adv: 46, segs: [[
-      ['M', 2, 2], ['Q', 6, -30, 12, -54], ['Q', 16, -66, 18, -52],
-      ['Q', 20, -30, 22, -10], ['Q', 24, 4, 30, -6], ['Q', 38, -22, 42, -40],
-      ['Q', 46, -14, 42, 10], ['Q', 38, 30, 28, 38],
+      ['M', 0, 4], ['Q', 9, -28, 17, -46], ['Q', 22, -56, 25, -45],
+      ['Q', 30, -24, 30, -10], ['Q', 29, 3, 22, -3],
+      ['Q', 13, -18, 15, -38], ['Q', 21, -54, 26, -42],
+      ['Q', 32, -18, 33, 2], ['Q', 34, 16, 28, 26],
+      ['Q', 21, 35, 11, 31], ['Q', 3, 26, 6, 17],
+      ['Q', 9, 9, 15, 5], ['Q', 23, 0, 34, 0],
     ]] },
-    r: { adv: 40, segs: [[
-      ['M', 0, 2], ['Q', 10, -30, 22, -52], ['Q', 26, -60, 26, -50],
-      ['Q', 26, -38, 31, -50], ['Q', 37, -62, 46, -56],
+    r: { adv: 46, segs: [[
+      ['M', 0, 4], ['Q', 8, -32, 15, -52],
+      ['Q', 18, -56, 20, -51], ['Q', 23, -42, 27, -40],
+      ['Q', 31, -39, 32, -45], ['Q', 33, -30, 32, -12],
+      ['Q', 31, -2, 33, -1], ['Q', 39, 0, 45, 0],
     ]] },
     a: { adv: 52, segs: [[
-      ['M', 38, -28], ['Q', 36, -52, 23, -60], ['Q', 8, -66, 4, -43],
-      ['Q', 1, -22, 13, -8], ['Q', 24, 3, 34, -9], ['Q', 40, -18, 38, -28],
-      ['Q', 37, -26, 39, -10], ['Q', 40, -2, 48, 4],
+      ['M', 26, -10], ['Q', 25, -38, 15, -49], ['Q', 4, -57, 3, -36],
+      ['Q', 2, -15, 12, -5], ['Q', 21, 2, 25, -8],
+      ['Q', 32, -18, 33, -30], ['Q', 33, -14, 32, -2], ['Q', 31, 5, 33, 5],
+      ['Q', 36, 9, 44, 4], ['Q', 50, 1, 54, 0],
     ]] },
     c: { adv: 40, segs: [[
-      ['M', 34, -14], ['Q', 31, -52, 13, -56], ['Q', 0, -58, 2, -36],
+      ['M', 36, -18], ['Q', 31, -52, 13, -56], ['Q', 0, -58, 2, -36],
       ['Q', 4, -14, 16, -4], ['Q', 26, 3, 36, 0],
     ]] },
-    s: { adv: 38, segs: [[
-      ['M', 2, -4], ['Q', 16, -14, 24, -30], ['Q', 31, -46, 20, -51],
-      ['Q', 10, -54, 8, -41], ['Q', 6, -26, 20, -16], ['Q', 32, -8, 30, 2],
-      ['Q', 28, 10, 18, 8],
+    s: { adv: 34, segs: [[
+      ['M', 0, 4], ['Q', 6, -16, 11, -30], ['Q', 15, -42, 19, -46],
+      ['Q', 24, -49, 23, -41], ['Q', 21, -30, 15, -22],
+      ['Q', 8, -13, 7, -6], ['Q', 5, 2, 12, 3], ['Q', 21, 5, 28, 1],
     ]] },
     2: { adv: 40, segs: [[
       ['M', 4, -18], ['Q', 2, -48, 20, -58], ['Q', 36, -64, 38, -44],
@@ -152,7 +174,8 @@
 
   // -------------------- word path building --------------------
   //  Sample a glyph's segments into points: {x, y, ink} where
-  //  ink=false marks the first point after a pen lift.
+  //  ink=false marks the first point after a pen lift (and the
+  //  un-inked approach to the j's dot).
   function sampleGlyph(glyph, s) {
     const pts = [];
     for (const seg of glyph.segs) {
@@ -235,65 +258,134 @@
     };
   }
 
+  // -------------------- placement --------------------
+  //  Words land somewhere new each time: candidates are rejected
+  //  while any still-glowing ink lingers inside the word's box.
+  function placeWord(word, unit, now) {
+    let adv = 0;
+    for (const ch of word) adv += (GLYPHS[ch] ? GLYPHS[ch].adv : 30) * unit;
+    const w = adv;
+    const minX = w / 2 + W * 0.03, maxX = W - w / 2 - W * 0.03;
+    const minY = Math.max(H * 0.30, 118 * unit + H * 0.02);
+    const maxY = Math.min(H * 0.80, H * 0.96 - 46 * unit);
+    const by = (base) => ({
+      x0: base.x - w / 2, x1: base.x + w / 2,
+      y0: base.y - 118 * unit, y1: base.y + 46 * unit,
+    });
+    const pad = H * 0.05;
+    let best = null;
+    for (let i = 0; i < 50; i++) {
+      const c = {
+        x: rand(minX, Math.max(minX + 1, maxX)),
+        y: rand(Math.min(minY, maxY - 1), maxY),
+      };
+      const box = by(c);
+      box.x0 -= pad; box.x1 += pad; box.y0 -= pad; box.y1 += pad;
+      if (inkVisibleIn(box, now)) continue;
+      best = c;
+      if (Math.random() < 0.35) break;   // uniform over free space; extra sampling adds spread
+    }
+    if (!best) best = { x: W / 2, y: H * (0.42 + 0.3 * Math.random()) };
+    return { x: best.x - adv / 2, y: best.y };
+  }
+
   // -------------------- ink layer --------------------
+  //  Strokes are kept as segments with birth times and the ink
+  //  canvas is rebuilt each frame: alpha is an exact function of
+  //  age, hard-terminating at zero. (A persistent canvas faded in
+  //  place stalls at a visible ~2% ghost floor — 8-bit alpha
+  //  rounding — and old words pile into a scribble veil.)
   let ink, inkCtx;
+  const MAX_AGE = 12;              // s — fully faded beyond this
+  const KNEE = 9;                  // s — ease into the cutoff
+  const segments = [];             // {x0,y0,x1,y1,t,strength}
+  let segHead = 0;                 // first alive segment
   function buildInk() {
     ink = document.createElement('canvas');
     ink.width = Math.floor(W); ink.height = Math.floor(H);
     inkCtx = ink.getContext('2d');
+    segments.length = 0;
+    segHead = 0;
   }
-  function stampInk(x0, y0, x1, y1, strength) {
+  function stampInk(x0, y0, x1, y1, strength, now) {
+    segments.push({ x0, y0, x1, y1, t: now, strength });
+  }
+  function drawInk(now) {
+    while (segHead < segments.length && now - segments[segHead].t > MAX_AGE) segHead++;
+    if (segHead > 4096) { segments.splice(0, segHead); segHead = 0; }
+    inkCtx.clearRect(0, 0, W, H);
     inkCtx.globalCompositeOperation = 'lighter';
     inkCtx.lineCap = 'round';
-    inkCtx.strokeStyle = `rgba(255, 214, 150, ${(0.20 * strength).toFixed(3)})`;
-    inkCtx.lineWidth = 9;
-    inkCtx.beginPath(); inkCtx.moveTo(x0, y0); inkCtx.lineTo(x1, y1); inkCtx.stroke();
-    inkCtx.strokeStyle = `rgba(255, 246, 224, ${(0.8 * strength).toFixed(3)})`;
-    inkCtx.lineWidth = 2.6;
-    inkCtx.beginPath(); inkCtx.moveTo(x0, y0); inkCtx.lineTo(x1, y1); inkCtx.stroke();
+    for (let i = segHead; i < segments.length; i++) {
+      const s = segments[i];
+      const age = now - s.t;
+      const knee = age < KNEE ? 1 : 1 - (age - KNEE) / (MAX_AGE - KNEE);
+      const k = s.strength * Math.exp(-CONFIG.inkFade * age) * knee;
+      if (k < 0.008) continue;
+      inkCtx.strokeStyle = `rgba(255, 214, 150, ${(0.20 * k).toFixed(3)})`;
+      inkCtx.lineWidth = 9;
+      inkCtx.beginPath(); inkCtx.moveTo(s.x0, s.y0); inkCtx.lineTo(s.x1, s.y1); inkCtx.stroke();
+      inkCtx.strokeStyle = `rgba(255, 246, 224, ${(0.8 * k).toFixed(3)})`;
+      inkCtx.lineWidth = 2.6;
+      inkCtx.beginPath(); inkCtx.moveTo(s.x0, s.y0); inkCtx.lineTo(s.x1, s.y1); inkCtx.stroke();
+    }
     inkCtx.globalCompositeOperation = 'source-over';
   }
-  function fadeInk(dt) {
-    const a = 1 - Math.exp(-CONFIG.inkFade * dt);
-    inkCtx.globalCompositeOperation = 'destination-out';
-    inkCtx.fillStyle = `rgba(0,0,0,${a.toFixed(4)})`;
-    inkCtx.fillRect(0, 0, W, H);
-    inkCtx.globalCompositeOperation = 'source-over';
+  //  True while ink brighter than ~10% lingers inside a candidate
+  //  word box — used to keep new words off still-burning ones.
+  function inkVisibleIn(box, now) {
+    for (let i = segHead; i < segments.length; i++) {
+      const s = segments[i];
+      if (Math.exp(-CONFIG.inkFade * (now - s.t)) < 0.10) continue;
+      const mx = (s.x0 + s.x1) / 2, my = (s.y0 + s.y1) / 2;
+      if (mx > box.x0 && mx < box.x1 && my > box.y0 && my < box.y1) return true;
+    }
+    return false;
   }
 
   // -------------------- sparkler state --------------------
+  //  plan → fly → writing → flourish → hold → plan → …
   const sp = {
-    state: 'writing',
+    state: 'plan',
     wordIdx: 0,
     wr: null,
     d: 0,
-    x: 0, y: 0, px: 0, py: 0,
+    x: -60, y: 0, px: -60, py: 0,   // enters from off-screen left
     t: 0,
     hold: 0,
     ember: 1,
+    fly: null,          // {p0, p1, p2, T} for the swoop to the next word
+    fx0: 0, fy0: 0,
   };
 
-  function nextWord() {
-    const unit = (H * CONFIG.glyphHeight) / 120;   // design space 120 tall
+  function planWord(now) {
+    const scale = rand(...CONFIG.wordScale);
+    const unit = (H * CONFIG.glyphHeight) / 120 * scale;
     const word = CONFIG.words[sp.wordIdx % CONFIG.words.length];
     sp.wordIdx++;
-    const ox = W * (0.5 + rand(-0.07, 0.07));
-    const oy = H * (0.52 + rand(-0.06, 0.06));
-    // measure: total advance, then start so the word centres
-    let adv = 0;
-    for (const ch of word) adv += (GLYPHS[ch] ? GLYPHS[ch].adv : 30) * unit;
-    sp.wr = buildWord(word, ox - adv / 2, oy, unit);
+    const placed = placeWord(word, unit, now);
+    sp.wr = buildWord(word, placed.x, placed.y, unit);
     sp.d = 0;
-    sp.state = 'writing';
-    const p = pathPos(sp.wr, 0);
-    sp.x = p.x; sp.y = p.y;
-    sp.px = sp.x; sp.py = sp.y;
-    sp.ember = Math.min(1, sp.ember + 0.4);
+    const start = pathPos(sp.wr, 0);
+    // swoop to the word's first stroke along an arced flight path
+    const dx = start.x - sp.x, dy = start.y - sp.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    const nx = -dy / dist, ny = dx / dist;
+    const bow = rand(-0.35, 0.35) * dist;
+    sp.fly = {
+      p0: { x: sp.x, y: sp.y },
+      p1: { x: sp.x + dx * 0.5 + nx * bow, y: sp.y + dy * 0.5 + ny * bow - dist * 0.08 },
+      p2: { x: start.x, y: start.y },
+      T: Math.min(2.2, Math.max(0.8, dist / 380)),
+    };
+    sp.t = 0;
+    sp.state = 'fly';
+    sp.ember = Math.min(1, sp.ember + 0.5);
   }
 
   function stepSparkler(t, dt) {
     sp.t += dt;
-    if (!sp.wr) { nextWord(); return; }
+    if (!sp.wr) { planWord(t); return; }
 
     if (sp.state === 'writing') {
       sp.d += CONFIG.writeSpeed * (0.92 + 0.16 * Math.sin(t * 3.1)) * dt * (sp.ember * 0.4 + 0.6);
@@ -301,7 +393,7 @@
       const p = pathPos(sp.wr, sp.d);
       sp.px = sp.x; sp.py = sp.y;
       sp.x = p.x; sp.y = p.y;
-      if (p.ink) stampInk(sp.px, sp.py, sp.x, sp.y, sp.ember);
+      if (p.ink) stampInk(sp.px, sp.py, sp.x, sp.y, sp.ember, t);
       if (sp.d >= sp.wr.len) {
         sp.state = 'flourish';
         sp.t = 0;
@@ -310,16 +402,31 @@
       }
     } else if (sp.state === 'flourish') {
       // a small celebratory loop above the finished word
-      const k = sp.t / 1.4;
+      const k = sp.t / 1.2;
       const r = H * 0.045;
       sp.px = sp.x; sp.py = sp.y;
       sp.x = sp.fx0 + Math.sin(k * Math.PI * 2.2) * r * 1.4;
       sp.y = sp.fy0 - Math.sin(k * Math.PI) * r * 1.1 - k * H * 0.02;
-      sp.ember = Math.max(0.35, 1 - sp.t / 1.6);
-      if (sp.t > 1.4) { sp.state = 'hold'; sp.t = 0; }
+      sp.ember = Math.max(0.35, 1 - sp.t / 1.4);
+      if (sp.t > 1.2) { sp.state = 'hold'; sp.t = 0; }
     } else if (sp.state === 'hold') {
-      sp.ember = Math.max(0, sp.ember - dt * 0.5);
-      if (sp.t > sp.hold) nextWord();
+      sp.px = sp.x; sp.py = sp.y;
+      sp.ember = Math.max(0.25, sp.ember - dt * 0.4);
+      if (sp.t > sp.hold) planWord(t);
+    } else if (sp.state === 'fly') {
+      const f = sp.fly;
+      const u = Math.min(1, sp.t / f.T);
+      const k = u * u * (3 - 2 * u);   // smoothstep ease
+      const v = 1 - k;
+      sp.px = sp.x; sp.py = sp.y;
+      sp.x = v * v * f.p0.x + 2 * v * k * f.p1.x + k * k * f.p2.x;
+      sp.y = v * v * f.p0.y + 2 * v * k * f.p1.y + k * k * f.p2.y;
+      sp.ember = Math.min(1, sp.ember + dt * 0.8);
+      if (u >= 1) {
+        sp.state = 'writing';
+        sp.d = 0;
+        sp.fly = null;
+      }
     }
   }
 
@@ -423,6 +530,10 @@
     buildMotes();
     sp.wr = null;
     sp.wordIdx = 0;
+    sp.state = 'plan';
+    sp.t = 0;
+    sp.x = sp.px = -60;
+    sp.y = sp.py = H * rand(0.25, 0.75);
   }
   window.addEventListener('resize', resize, { passive: true });
   resize();
@@ -442,14 +553,14 @@
     stepSparkler(t, dt);
 
     if (sp.ember > 0.05) {
-      const vigor = sp.state === 'writing' ? 1 : 0.7;
+      const vigor = sp.state === 'writing' ? 1 : 0.8;
       const hvx = (sp.x - sp.px) / Math.max(dt, 1e-4);
       const hvy = (sp.y - sp.py) / Math.max(dt, 1e-4);
       const n = Math.max(1, Math.round(CONFIG.sparksPerFrame * sp.ember));
       for (let i = 0; i < n; i++) emitSpark(sp.x, sp.y, hvx, hvy, vigor);
     }
 
-    fadeInk(dt);
+    drawInk(t);
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
     ctx.drawImage(ink, 0, 0, W, H);
