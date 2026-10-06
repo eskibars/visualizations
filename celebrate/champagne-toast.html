@@ -152,6 +152,7 @@
         scale: c.scale,
         bowlR: bowlR * c.scale,
         bowlH: bowlH * c.scale,
+        profile: buildBowlProfile(bowlR * c.scale, bowlH * c.scale),
         stemH: stemH * c.scale,
         footR: footR * c.scale,
         footY,
@@ -177,18 +178,52 @@
     return bowlBottomY(gl) - gl.bowlH * 0.90 * t;
   }
 
+  // Surface height in the glass's own frame (rim at y = 0). Bubbles live in
+  // that frame, so they take the same tilt the bowl is drawn with.
+  function localSurfaceY(gl) {
+    return gl.bowlH * (0.95 - 0.90 * clamp(gl.level, 0, 1));
+  }
+
+  // Half-width of the bowl at a depth below its rim, sampled from the same
+  // bezier bowlPath draws. The bowl narrows sharply toward its base — barely
+  // half as wide down there as at the rim — so a linear profile lets bubbles
+  // spawn and drift outside the glass. Constraining to this table keeps every
+  // bubble on the inside of the wall.
+  const PROFILE_BINS = 48;
+
+  function buildBowlProfile(r, h) {
+    const prof = new Float32Array(PROFILE_BINS + 1);
+    for (let i = 0; i <= 240; i++) {
+      const t = i / 240, mt = 1 - t;
+      const d = (3 * mt * mt * t * 0.72 + (3 * mt * t * t + t * t * t) * 1.06) * h;
+      const w = (mt * mt * mt + 3 * mt * mt * t * 1.02 + 3 * mt * t * t * 0.52) * r;
+      const bin = Math.min(PROFILE_BINS, Math.floor(d / (h * 1.06) * PROFILE_BINS));
+      if (w > prof[bin]) prof[bin] = w;
+    }
+    for (let k = 1; k <= PROFILE_BINS; k++) if (prof[k] === 0) prof[k] = prof[k - 1];
+    return prof;
+  }
+
+  function bowlHalfW(gl, y) {
+    const f = clamp(y / (gl.bowlH * 1.06), 0, 1) * PROFILE_BINS;
+    const i = Math.min(PROFILE_BINS - 1, Math.floor(f));
+    return lerp(gl.profile[i], gl.profile[i + 1], f - i);
+  }
+
   // ---------------- bubbles ----------------
   const bubbles = [];
 
   function spawnBubble(gl, fromFilm) {
-    // released from just above the base of the bowl, scattered across its width
+    // Released from just above the base of the bowl, scattered across the
+    // width the bowl actually has at that depth (x is from the glass's axis,
+    // y below its rim — both in the glass's own frame).
     const rpx = rand(CONFIG.bubbleR[0], CONFIG.bubbleR[1]) * U / 900;
-    const spread = gl.bowlR * 0.80 * Math.sqrt(Math.random());
-    const dir = Math.random() < 0.5 ? -1 : 1;
+    const y0 = gl.bowlH * rand(0.82, 0.92);
+    const halfW = Math.max(2, bowlHalfW(gl, y0) - rpx * 3.1);
     bubbles.push({
       gl,
-      x: gl.cx + dir * spread * gl.scale,
-      y: bowlBottomY(gl) - gl.bowlH * 0.04,
+      x: (Math.random() < 0.5 ? -1 : 1) * halfW * Math.sqrt(Math.random()),
+      y: y0,
       rpx,                       // radius in CSS px, for sprite choice and size
       v: rand(CONFIG.rise[0], CONFIG.rise[1]) * U / 1000,
       sway: rand(0.6, 2.4),
@@ -205,17 +240,13 @@
       const b = bubbles[i];
       const gl = b.gl;
       b.life += dt;
-      const sy = surfaceY(gl, gl.level);
       b.y -= b.v * dt;
       b.x += Math.sin(time * 1.7 + b.phase) * b.sway * dt * (b.wall ? 26 : 14);
-      // Constrain to the bowl profile, so bubbles hug the glass rather than
-      // drifting through it. The bowl narrows toward its base.
-      const bottom = bowlBottomY(gl);
-      const tAt = clamp((bottom - b.y) / (bottom - gl.bowlBaseY), 0, 1);
-      const halfW = gl.bowlR * (0.86 + 0.14 * tAt);
-      const dx = b.x - gl.cx;
-      if (Math.abs(dx) > halfW) b.x = gl.cx + Math.sign(dx) * halfW;
-      if (b.y <= sy) { bubbles.splice(i, 1); continue; }
+      // Constrain to the bowl's true profile, so bubbles hug the glass rather
+      // than drifting through it; the margin keeps their sprites inside too.
+      const halfW = Math.max(2, bowlHalfW(gl, b.y) - b.rpx * 3.1);
+      if (Math.abs(b.x) > halfW) b.x = Math.sign(b.x) * halfW;
+      if (b.y <= localSurfaceY(gl)) { bubbles.splice(i, 1); continue; }
     }
   }
 
@@ -541,16 +572,21 @@
   }
 
   function drawBubblesFor(gl) {
-    const bottom = bowlBottomY(gl);
+    const bottom = gl.bowlH * 0.95;
+    const sy = localSurfaceY(gl);
+    // Stamped in the glass's own frame so the trains tilt with the bowl.
+    ctx.save();
+    ctx.translate(gl.cx, gl.bowlBaseY);
+    ctx.rotate(gl.tilt);
     for (const b of bubbles) {
       if (b.gl !== gl) continue;
-      const sy = surfaceY(gl, gl.level);
       const t = clamp((bottom - b.y) / ((bottom - sy) || 1), 0, 1);
       // Fade in as it leaves the base, brightest mid-rise, out at the surface.
       const a = 0.16 + 0.52 * smoothstep(Math.min(t * 2.0, (1 - t) * 3.2));
       const idx = b.rpx > 3.0 ? 2 : b.rpx > 2.2 ? 1 : 0;
       stamp(bubbleSprites[idx], b.x, b.y, b.rpx * 6.2, a);
     }
+    ctx.restore();
   }
 
   resize();
