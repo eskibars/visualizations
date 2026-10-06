@@ -122,7 +122,7 @@
     // treeline on the horizon
     g.fillStyle = '#04060b';
     g.beginPath();
-    g.moveTo(-2, horizon() + 2);
+    g.moveTo(-2, horizon());
     for (let x = -2; x <= W + 2; x += 7) {
       const t = x / W;
       g.lineTo(x, horizon()
@@ -130,7 +130,7 @@
         - Math.abs(Math.sin(t * 31 + 5)) * H * 0.007
         - noise1(t * 6 + 3) * H * 0.012);
     }
-    g.lineTo(W + 2, H + 2);
+    g.lineTo(W + 2, horizon());
     g.closePath();
     g.fill();
   }
